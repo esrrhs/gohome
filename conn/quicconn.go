@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"github.com/esrrhs/gohome/common"
+	"github.com/quic-go/quic-go"
 	"github.com/xtaci/smux"
 	"net"
 )
