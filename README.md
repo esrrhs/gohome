@@ -1,4 +1,9 @@
 # GoHome
+[<img src="https://img.shields.io/github/license/esrrhs/gohome">](https://github.com/esrrhs/gohome)
+[<img src="https://img.shields.io/github/languages/top/esrrhs/gohome">](https://github.com/esrrhs/gohome)
+[![Go Report Card](https://goreportcard.com/badge/github.com/esrrhs/gohome)](https://goreportcard.com/report/github.com/esrrhs/gohome)
+[<img src="https://img.shields.io/github/actions/workflow/status/esrrhs/gohome/go.yml?branch=master">](https://github.com/esrrhs/gohome/actions)
+
 Go的通用开发库
 
 ## 内容
