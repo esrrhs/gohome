@@ -25,7 +25,12 @@ Go的通用开发库
 #### 环境
 * 终端颜色支持
 * 非阻塞终端
+* shell
 #### 算法
 * CryptoNight算法（cn/0，cn/1，cn/2，cn/r，cn/fast，cn/half，cn/xao，cn/rto，cn/rwz，cn/double，cn-lite/0，cn-lite/1，cn-heavy/0，cn-heavy/tube，cn-heavy/xhv，cn-pico，cn-pico/tlo）
 * 可靠帧控制
 * 拥塞控制
+#### 功能模块
+* Mysql自失效KV表
+#### 第三方
+* IP查询
