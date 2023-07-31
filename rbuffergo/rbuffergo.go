@@ -250,7 +250,7 @@ func (b *RBuffergo) GetReadLineBuffer() []byte {
 	if b.datasize < len(b.buffer)-b.begin {
 		return b.buffer[b.begin : b.begin+b.datasize]
 	} else {
-		return b.buffer[b.begin : b.begin+len(b.buffer)-b.begin]
+		return b.buffer[b.begin:len(b.buffer)]
 	}
 }
 
@@ -263,7 +263,7 @@ func (b *RBuffergo) GetWriteLineBuffer() []byte {
 	if len(b.buffer)-b.datasize < len(b.buffer)-b.end {
 		return b.buffer[b.end : b.end+len(b.buffer)-b.datasize]
 	} else {
-		return b.buffer[b.end : b.end+len(b.buffer)-b.end]
+		return b.buffer[b.end:len(b.buffer)]
 	}
 }
 
