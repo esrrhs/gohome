@@ -15,7 +15,7 @@ type QuicConn struct {
 	session  *smux.Session
 	qsteam   quic.Stream
 	stream   *smux.Stream
-	listener quic.Listener
+	listener *quic.Listener
 	info     string
 }
 
@@ -53,9 +53,9 @@ func (c *QuicConn) Info() string {
 	if c.session != nil {
 		c.info = c.qsession.LocalAddr().String() + "<--quic-->" + c.qsession.RemoteAddr().String()
 	} else if c.listener != nil {
-		c.info = "kcp--" + c.listener.Addr().String()
+		c.info = "quic--" + c.listener.Addr().String()
 	} else {
-		c.info = "empty kcp conn"
+		c.info = "empty quic conn"
 	}
 	return c.info
 }
@@ -82,7 +82,7 @@ func (c *QuicConn) Dial(dst string) (Conn, error) {
 		return nil, err
 	}
 
-	session, err := quic.Dial(pconn, udpAddr, dst, tlsConf, nil)
+	session, err := quic.Dial(context.Background(), pconn, udpAddr, tlsConf, nil)
 	if err != nil {
 		return nil, err
 	}
