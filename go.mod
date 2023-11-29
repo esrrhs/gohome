@@ -1,6 +1,6 @@
 module github.com/esrrhs/gohome
 
-go 1.18
+go 1.21
 
 require (
 	github.com/OneOfOne/xxhash v1.2.8
