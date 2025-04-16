@@ -6,6 +6,20 @@ import (
 	"strconv"
 )
 
+/*
+Package tmap 提供了一个用于操作MySQL数据库的结构体TMysql。
+该结构体支持连接数据库、创建数据库和表、插入记录、查询记录及查询特定条件的记录。
+功能包括：
+
+- 初始化MySQL连接
+- 加载数据库和表结构
+- 插入数据并管理数据的保留策略
+- 获取记录总数
+- 检查特定记录是否存在
+- 获取最近的记录
+- 根据条件查找记录
+*/
+
 type TMysql struct {
 	gdb   *sql.DB
 	dsn   string

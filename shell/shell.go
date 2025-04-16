@@ -9,6 +9,19 @@ import (
 	"time"
 )
 
+/*
+Package shell 提供了一系列用于执行外部命令和脚本的函数。
+这些函数支持运行 shell 脚本、命令和可执行文件，并提供超时控制和日志记录功能。
+
+主要功能包括：
+
+- 运行指定的 shell 脚本，并可选择是否静默输出日志
+- 支持指定超时时间来限制命令执行的时长
+- 在执行命令或脚本时记录开始和结束的日志信息
+- 包含执行命令、执行可执行文件的函数，支持参数传递
+- 提供原始执行的功能，不记录错误信息
+*/
+
 func Run(script string, silent bool, param ...string) (string, error) {
 
 	script = filepath.Clean(script)
