@@ -6,30 +6,55 @@
 
 Go的通用开发库
 
-## 内容
-#### 数据结构
+## 文件夹
+### common
+* 压缩、解压缩
+* channel封装
+* 颜色定义
+* 错误处理
+* 文件操作
+* hash函数
+* 数学函数
+* 网络操作
+* protobuf
+* 字符串处理
+* 时间处理
+
+### crypto
+* CryptoNight算法（cn/0，cn/1，cn/2，cn/r，cn/fast，cn/half，cn/xao，cn/rto，cn/rwz，cn/double，cn-lite/0，cn-lite/1，cn-heavy/0，cn-heavy/tube，cn-heavy/xhv，cn-pico，cn-pico/tlo）
+
+### list
 * 循环数组
 * 有锁链表
-#### 基础库
-* 数学库
-* 时间库
+* 循环队列
+* 请求队列
+
+### loggo
 * 日志库
-* 抽象网络库（tcp、udp、kcp、rudp、ricmp、rhttp）
-#### 基础模块
-* 线程池
-* 内存池
-* 协程组
-* 文件快速遍历
-* Protobuf动态解析
-#### 环境
 * 终端颜色支持
-* 非阻塞终端
-* shell
-#### 算法
-* CryptoNight算法（cn/0，cn/1，cn/2，cn/r，cn/fast，cn/half，cn/xao，cn/rto，cn/rwz，cn/double，cn-lite/0，cn-lite/1，cn-heavy/0，cn-heavy/tube，cn-heavy/xhv，cn-pico，cn-pico/tlo）
+
+### lru
+* LRU缓存
+* LRU资源池
+
+### network
+* 抽象网络库（tcp、udp、kcp、rudp、ricmp、rhttp）
 * 可靠帧控制
 * 拥塞控制
-#### 功能模块
-* Mysql自失效KV表
-#### 第三方
+* socks5代理
+
+### platform
+* shell调用
+
+### pool
+* 对象池
+* 令牌桶
+
+### thirdparty
 * IP查询
+* Mysql自失效KV表
+
+### thread
+* 线程池
+* 协程组
+* 任务池
