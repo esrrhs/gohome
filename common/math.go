@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
-	"hash/fnv"
 	"io"
 	"math"
 	"math/big"
@@ -104,12 +103,6 @@ func AbsInt64(v int64) int64 {
 		return v
 	}
 	return -v
-}
-
-func HashString(s string) uint32 {
-	h := fnv.New32a()
-	h.Write([]byte(s))
-	return h.Sum32()
 }
 
 func UniqueId() string {

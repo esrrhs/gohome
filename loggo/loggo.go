@@ -3,7 +3,6 @@ package loggo
 import (
 	"errors"
 	"fmt"
-	"github.com/esrrhs/gohome/termcolor"
 	"io"
 	"io/ioutil"
 	"os"
@@ -41,11 +40,12 @@ func init() {
 }
 
 func Ini(config Config) {
-	initbefore := false
 	if gInited {
 		fmt.Println("loggo had ini before " + gConfig.Prefix)
-		initbefore = true
+		return
 	}
+
+	rewriteStderrFile()
 
 	gConfig = config
 	if gConfig.Prefix == "" {
@@ -57,7 +57,7 @@ func Ini(config Config) {
 	}
 
 	gInited = true
-	if !initbefore && !gConfig.NoLogFile {
+	if !gConfig.NoLogFile {
 		go loopCheck(gConfig)
 	}
 }
@@ -84,7 +84,7 @@ func Debug(format string, a ...interface{}) {
 		}
 		if !gConfig.NoPrint {
 			if !gConfig.NoLogColor {
-				print(termcolor.FgString(str, 0, 0, 255))
+				print(FgString(str, 0, 0, 255))
 			} else {
 				print(str)
 			}
@@ -109,7 +109,7 @@ func Info(format string, a ...interface{}) {
 		}
 		if !gConfig.NoPrint {
 			if !gConfig.NoLogColor {
-				print(termcolor.FgString(str, 0, 255, 0))
+				print(FgString(str, 0, 255, 0))
 			} else {
 				print(str)
 			}
@@ -141,7 +141,7 @@ func Warn(format string, a ...interface{}) {
 		}
 		if !gConfig.NoPrint {
 			if !gConfig.NoLogColor {
-				print(termcolor.FgString(str, 255, 255, 0))
+				print(FgString(str, 255, 255, 0))
 			} else {
 				print(str)
 			}
@@ -180,7 +180,7 @@ func Error(format string, a ...interface{}) {
 		}
 		if !gConfig.NoPrint {
 			if !gConfig.NoLogColor {
-				print(termcolor.FgString(str, 255, 0, 0))
+				print(FgString(str, 255, 0, 0))
 			} else {
 				print(str)
 			}
