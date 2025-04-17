@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+/*
+socks5_client 封装了 SOCKS5 协议的客户端功能
+*/
+
 const (
 	socksVer5          = 5
 	socks5AuthNone     = 0

@@ -256,14 +256,14 @@ func NameToLevel(name string) int {
 	return -1
 }
 
-func openLog(level int) os.File {
+func openLog(level int) *os.File {
 	date := time.Now().Format("2006-01-02")
 	fileName := gConfig.Prefix + "_" + levelName(level) + "_" + date + ".log"
 	f, e := os.OpenFile(fileName, os.O_WRONLY|os.O_APPEND|os.O_CREATE, os.ModePerm)
 	if e != nil {
 		panic(e)
 	}
-	return *f
+	return f
 }
 
 func checkDate(config Config) {

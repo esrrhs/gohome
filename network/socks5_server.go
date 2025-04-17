@@ -9,6 +9,10 @@ import (
 	"strconv"
 )
 
+/*
+socks5_server 封装了 SOCKS5 协议的握手和请求处理
+*/
+
 var (
 	errAddrType      = errors.New("socks addr type not supported")
 	errVer           = errors.New("socks version not supported")
