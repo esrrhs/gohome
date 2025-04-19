@@ -10,6 +10,20 @@ import (
 	"time"
 )
 
+/*
+Group 实现了一个 Goroutine 管理工具，用于组织和控制 Goroutine 的执行生命周期。
+该工具允许将 Goroutine 组织成层级结构，便于管理它们的启动、停止和错误处理。
+
+主要功能包括：
+
+- 创建和管理 Goroutine 的分组（Group），支持父子关系以便实现层级管理。
+- 提供用于启动、停止和等待 Goroutine 任务完成的接口。
+- 支持错误传播机制，确保子 Goroutine 的错误可以传递影响到父 Goroutine。
+- 提供每个分组中 Goroutine 状态和执行情况的记录和日志输出。
+- 支持优雅地退出，避免 Goroutine 泄漏和资源争用问题。
+- 实现 Goroutine 的动态增减，以及并发安全的 Goroutine 状态访问。
+*/
+
 type Group struct {
 	father   *Group
 	son      map[*Group]int
@@ -56,9 +70,6 @@ func (g *Group) removeson(son *Group) {
 		//loggo.Debug("removeson fail no son %s %s", g.name, son.name)
 	}
 	delete(g.son, son)
-	if g.son[son] != 0 {
-		loggo.Error("removeson fail has son %s %s", g.name, son.name)
-	}
 }
 
 func (g *Group) add() {

@@ -49,7 +49,7 @@ func NewThreadPool(max int, buffer int, exef func(interface{})) *ThreadPool {
 
 	tp := &ThreadPool{max: max, exef: exef, ca: ca, control: control, stat: stat}
 
-	for index, _ := range ca {
+	for index := range ca {
 		go tp.run(index)
 	}
 
@@ -96,14 +96,14 @@ func (tp *ThreadPool) run(index int) {
 }
 
 func (tp *ThreadPool) GetStat() ThreadPoolStat {
-	for index, _ := range tp.ca {
+	for index := range tp.ca {
 		tp.stat.Datalen[index] = len(tp.ca[index])
 	}
 	return tp.stat
 }
 
 func (tp *ThreadPool) ResetStat() {
-	for index, _ := range tp.ca {
+	for index := range tp.ca {
 		tp.stat.Pushnum[index] = 0
 		tp.stat.Processnum[index] = 0
 	}
