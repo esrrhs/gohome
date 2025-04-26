@@ -6,6 +6,10 @@ import (
 	"net"
 )
 
+/*
+TcpConn 实现了基于 tcp 协议的Conn。
+*/
+
 type TcpConn struct {
 	conn     *net.TCPConn
 	listener *net.TCPListener

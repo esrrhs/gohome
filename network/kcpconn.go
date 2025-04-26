@@ -8,6 +8,10 @@ import (
 	"net"
 )
 
+/*
+KcpConn 实现了基于 KCP 协议的Conn。
+*/
+
 type KcpConn struct {
 	session  *smux.Session
 	stream   *smux.Stream

@@ -7,6 +7,15 @@ import (
 	"time"
 )
 
+/*
+LRUResourceCache 提供了一种高效的资源缓存机制，结合了最近最少使用（LRU）算法和请求队列，以优化资源获取和存取效率。
+
+该包定义了 LRUResourceCache 结构体，使用 LRUMultiCache 管理缓存的存储，并通过 ReqQueue 以异步方式从外部获取资源。
+核心功能包括缓存命中和未命中计数、资源获取请求的提交与处理，以及对缓存状态的重置操作。
+
+此实现旨在特别适用于高并发环境的资源密集型应用，确保尽可能减少对外部资源的访问次数以及对系统资源的占用。
+*/
+
 type LRUResourceCache[K comparable, V any] struct {
 	cache     *LRUMultiCache[K, V]
 	req       *list.ReqQueue[K, V]

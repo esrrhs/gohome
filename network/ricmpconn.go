@@ -15,6 +15,10 @@ import (
 	"time"
 )
 
+/*
+RicmpConn 实现了基于 可靠icmp 协议的Conn。
+*/
+
 type RicmpConfig struct {
 	MaxPacketSize      int
 	CutSize            int
