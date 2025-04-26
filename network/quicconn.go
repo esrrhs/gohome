@@ -10,6 +10,10 @@ import (
 	"net"
 )
 
+/*
+QuicConn 实现了基于 Quic 协议的Conn。
+*/
+
 type QuicConn struct {
 	qsession quic.Connection
 	session  *smux.Session

@@ -2,10 +2,37 @@ package lru
 
 import (
 	"container/list"
-	"github.com/esrrhs/gohome/common"
 	"sync"
 	"time"
 )
+
+/*
+LRUCache 实现了基于最近最少使用（LRU）策略的缓存机制，用于高效管理内存中的数据。
+
+该包定义了 LRUCache 结构体，其中封装了控制数据存储和缓存淘汰的逻辑，支持基于键值对的存取操作，并可以设置过期时间（TTL）。
+
+算法原理：
+
+LRUCache 算法通过维护一个双向链表和一个哈希表来实现数据的快速存取和管理，具体流程如下：
+
+1. 初始化状态：算法开始时，设定缓存的最大容量和可选的过期时间（TTL），并创建存储数据的双向链表和哈希表。
+
+2. 数据访问：当请求获取某一具体键的数据时，检查该数据是否存在于缓存中，
+  - 如果存在并且未过期，则返回数据，并将该数据移动到链表的前端（表示最近使用）。
+  - 如果数据存在但已过期，则将其从缓存中删除并返回未找到的状态。
+  - 如果数据不存在，则返回未找到的状态。
+
+3. 数据插入：
+  - 当插入新的键值对时，先检查当前缓存容量是否已满。
+  - 如果已满，则调用淘汰策略（删除最久未使用的数据）以释放空间。
+  - 插入新数据后，将数据插入到双向链表的前端，并更新哈希表。
+
+4. 数据淘汰：当缓存达到最大容量时，通过双向链表的尾部元素（即最久未使用的数据）进行数据的淘汰，确保缓存的有效性。
+
+5. 清空缓存：提供一个清空缓存的接口以便在需要的时候快速释放所有存储的键值对，恢复初始状态。
+
+该算法旨在通过灵活高效的缓存管理，提高数据存取的速度，减少内存的占用，同时确保旧数据不会被频繁访问所干扰。
+*/
 
 type LRUCache[K comparable, V any] struct {
 	capacity int
@@ -98,41 +125,4 @@ func (c *LRUCache[K, V]) Size() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.cache)
-}
-
-type LRUMultiCache[K comparable, V any] struct {
-	caches []*LRUCache[K, V]
-}
-
-func NewLRUMultiCache[K comparable, V any](numCaches int, capacity int, ttl time.Duration) *LRUMultiCache[K, V] {
-	perSize := (capacity + numCaches - 1) / numCaches
-	caches := make([]*LRUCache[K, V], numCaches)
-	for i := 0; i < numCaches; i++ {
-		caches[i] = NewLRUCache[K, V](perSize, ttl)
-	}
-	return &LRUMultiCache[K, V]{caches: caches}
-}
-
-func (c *LRUMultiCache[K, V]) Get(key K) (V, bool) {
-	index := common.HashGeneric(key) % uint64(len(c.caches))
-	return c.caches[index].Get(key)
-}
-
-func (c *LRUMultiCache[K, V]) Set(key K, value V) {
-	index := common.HashGeneric(key) % uint64(len(c.caches))
-	c.caches[index].Set(key, value)
-}
-
-func (c *LRUMultiCache[K, V]) Clear() {
-	for _, cache := range c.caches {
-		cache.Clear()
-	}
-}
-
-func (c *LRUMultiCache[K, V]) Size() int {
-	size := 0
-	for _, cache := range c.caches {
-		size += cache.Size()
-	}
-	return size
 }

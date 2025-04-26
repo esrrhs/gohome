@@ -11,6 +11,10 @@ import (
 	"time"
 )
 
+/*
+RudpConn 实现了基于 可靠udp 协议的Conn。
+*/
+
 type RudpConfig struct {
 	MaxPacketSize      int
 	CutSize            int

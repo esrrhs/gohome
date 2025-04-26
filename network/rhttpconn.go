@@ -17,6 +17,10 @@ import (
 	"time"
 )
 
+/*
+RhttpConn 实现了基于 可靠http 协议的Conn。
+*/
+
 type HttpConfig struct {
 	MaxPacketSize       int
 	RecvChanLen         int

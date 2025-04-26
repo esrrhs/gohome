@@ -10,6 +10,10 @@ import (
 	"sync"
 )
 
+/*
+UdpConn 实现了基于 udp 协议的Conn。
+*/
+
 type UdpConn struct {
 	info          string
 	config        *UdpConfig
