@@ -69,14 +69,14 @@ func (bb *BBCongestion) Init() {
 }
 
 func (bb *BBCongestion) RecvAck(id int, size int) {
-	if size <= 0 {
+	if size < 0 {
 		panic("error size")
 	}
 	bb.flyeddata += size
 }
 
 func (bb *BBCongestion) CanSend(id int, size int) bool {
-	if size <= 0 {
+	if size < 0 {
 		panic("error size")
 	}
 	if bb.flyingdata > bb.maxfly {
