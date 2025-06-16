@@ -2,7 +2,6 @@ package common
 
 import (
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -69,22 +68,11 @@ func ResolveDomainToIP(domain string) (string, error) {
 	// 构造请求URL
 	dohURL := "https://dns.alidns.com/resolve?name=" + url.QueryEscape(domain) + "&type=1&short=true"
 
-	// 加载系统根证书
-	rootCAs, err := x509.SystemCertPool()
-	if err != nil || rootCAs == nil {
-		rootCAs = x509.NewCertPool()
-	}
-
-	// 可选：添加自定义证书（如果你信任 alidns 的某些根证书）
-	// certs, err := os.ReadFile("/path/to/custom-ca.pem")
-	// if err == nil {
-	//     rootCAs.AppendCertsFromPEM(certs)
-	// }
-
+	// 创建一个跳过 TLS 验证的 HTTP 客户端
 	client := &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				RootCAs: rootCAs,
+				InsecureSkipVerify: true,
 			},
 		},
 		Timeout: 5 * time.Second,
