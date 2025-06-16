@@ -1,12 +1,15 @@
 package common
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 func GetOutboundIP() (net.IP, error) {
@@ -56,7 +59,6 @@ func IsPrivateIP(ipStr string) bool {
 
 // ResolveDomainToIP 接收域名或IP，返回解析结果或原始IP
 func ResolveDomainToIP(domain string) (string, error) {
-	// 确保域名末尾有点号（符合DNS规范）
 	domain = strings.TrimSpace(domain)
 
 	// 如果是合法IP地址，直接返回
@@ -67,23 +69,43 @@ func ResolveDomainToIP(domain string) (string, error) {
 	// 构造请求URL
 	dohURL := "https://dns.alidns.com/resolve?name=" + url.QueryEscape(domain) + "&type=1&short=true"
 
-	// 发起GET请求
-	resp, err := http.Get(dohURL)
+	// 加载系统根证书
+	rootCAs, err := x509.SystemCertPool()
+	if err != nil || rootCAs == nil {
+		rootCAs = x509.NewCertPool()
+	}
+
+	// 可选：添加自定义证书（如果你信任 alidns 的某些根证书）
+	// certs, err := os.ReadFile("/path/to/custom-ca.pem")
+	// if err == nil {
+	//     rootCAs.AppendCertsFromPEM(certs)
+	// }
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs: rootCAs,
+			},
+		},
+		Timeout: 5 * time.Second,
+	}
+
+	// 发起 GET 请求
+	resp, err := client.Get(dohURL)
 	if err != nil {
 		return "", fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// 解析JSON响应
+	// 解析 JSON 响应
 	var result []string
-	err = json.NewDecoder(resp.Body).Decode(&result)
-	if err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("JSON decode failed: %w", err)
 	}
 
-	// 提取第一个 A 记录（type == 1）
-	for _, ans := range result {
-		return ans, nil
+	// 返回第一个结果
+	if len(result) > 0 {
+		return result[0], nil
 	}
 
 	return "", fmt.Errorf("no valid A record found for domain: %s", domain)
