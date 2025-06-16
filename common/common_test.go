@@ -251,3 +251,24 @@ func Test0015(t *testing.T) {
 	Sleep(3)
 	fmt.Println("end")
 }
+
+func Test00016(t *testing.T) {
+	testIPs := []string{
+		"192.168.1.1",
+		"3.4.1.1",
+		"10.0.0.55",
+		"172.16.5.4",
+		"8.8.8.8",
+		"fc00::1",
+		"fe80::abcd",
+		"240e::1",
+	}
+
+	for _, ip := range testIPs {
+		fmt.Printf("IP: %-15s → IsPrivate: %v\n", ip, IsPrivateIP(ip))
+	}
+}
+
+func Test00017(t *testing.T) {
+	fmt.Println(ResolveDomainToIP("github.com"))
+}
