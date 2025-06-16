@@ -78,3 +78,7 @@ func (rc *LRUResourceCache[K, V]) ResetReqQueueNewNum() {
 func (rc *LRUResourceCache[K, V]) ResetReqQueueReuseNum() {
 	rc.req.ResetReuseNum()
 }
+
+func (rc *LRUResourceCache[K, V]) Size() int {
+	return rc.cache.Size()
+}
