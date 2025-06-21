@@ -5,7 +5,7 @@ import (
 	"errors"
 	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/thread"
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 	"net"
 	"sync"
 	"time"

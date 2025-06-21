@@ -5,7 +5,7 @@ import (
 	"github.com/esrrhs/gohome/common"
 	glist "github.com/esrrhs/gohome/list"
 	"github.com/esrrhs/gohome/loggo"
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 	"strconv"
 	"sync"
 	"time"

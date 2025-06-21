@@ -4,7 +4,6 @@ go 1.24.4
 
 require (
 	github.com/OneOfOne/xxhash v1.2.8
-	github.com/golang/protobuf v1.5.4
 	github.com/google/uuid v1.6.0
 	github.com/oschwald/geoip2-golang v1.11.0
 	github.com/quic-go/quic-go v0.52.0
