@@ -1,5 +1,5 @@
 syntax = "proto3";
-option go_package = "frame";
+option go_package = "./;network";
 
 message FrameData {
     enum TYPE {
