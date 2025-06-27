@@ -45,8 +45,6 @@ func Ini(config Config) {
 		return
 	}
 
-	rewriteStderrFile()
-
 	gConfig = config
 	if gConfig.Prefix == "" {
 		panic("log prefix is empty")
@@ -58,6 +56,8 @@ func Ini(config Config) {
 
 	gInited = true
 	if !gConfig.NoLogFile {
+		rewriteStderrFile()
+
 		go loopCheck(gConfig)
 	}
 }
