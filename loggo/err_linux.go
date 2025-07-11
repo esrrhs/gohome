@@ -3,7 +3,8 @@ package loggo
 import (
 	"os"
 	"runtime"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 var stdErrFileHandler *os.File
@@ -16,7 +17,7 @@ func rewriteStderrFile() {
 	}
 	stdErrFileHandler = file //把文件句柄保存到全局变量，避免被GC回收
 
-	if err = syscall.Dup2(int(file.Fd()), int(os.Stderr.Fd())); err != nil {
+	if err = unix.Dup2(int(file.Fd()), int(os.Stderr.Fd())); err != nil {
 		panic(err)
 	}
 	// 内存回收前关闭文件描述符
