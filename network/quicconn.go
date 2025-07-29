@@ -4,10 +4,11 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"net"
+
 	"github.com/esrrhs/gohome/common"
 	"github.com/quic-go/quic-go"
 	"github.com/xtaci/smux"
-	"net"
 )
 
 /*
@@ -15,9 +16,9 @@ QuicConn 实现了基于 Quic 协议的Conn。
 */
 
 type QuicConn struct {
-	qsession quic.Connection
+	qsession *quic.Conn
 	session  *smux.Session
-	qsteam   quic.Stream
+	qsteam   *quic.Stream
 	stream   *smux.Stream
 	listener *quic.Listener
 	info     string
