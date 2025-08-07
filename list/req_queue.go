@@ -1,12 +1,14 @@
 package list
 
 import (
-	"github.com/esrrhs/gohome/loggo"
 	"sync"
+
+	"github.com/esrrhs/gohome/loggo"
 )
 
 type Req[V any] struct {
 	value V
+	err   error
 	c     chan bool
 }
 
@@ -39,21 +41,18 @@ func (q *ReqQueue[K, V]) Submit(key K) (V, error) {
 		loggo.Debug("Task %v is already in progress, waiting...", key)
 		<-req.c
 		loggo.Debug("Task %v completed, returning result", key)
-		return req.value, nil
+		return req.value, req.err
 	} else {
 		// 如果没有任务在进行，开始新的任务
 		q.newNum++
 		loggo.Debug("Starting new task for %v", key)
 		result, err := q.requestFunc(key)
-		if err != nil {
-			loggo.Debug("Error processing task %v: %v", key, err)
-			return req.value, err
-		}
 		req.value = result
+		req.err = err
 		q.tasks.Delete(key)
 		close(req.c) // 通知等待的任务完成
 		loggo.Debug("Task %v completed successfully", key)
-		return result, nil
+		return result, err
 	}
 }
 
