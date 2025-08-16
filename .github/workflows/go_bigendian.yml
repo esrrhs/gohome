@@ -1,0 +1,28 @@
+name: Big Endian Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  big-endian-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static docker.io curl
+          curl -OL https://golang.org/dl/go1.24.4.linux-s390x.tar.gz
+          sudo tar -C /usr/local -xzf go1.24.4.linux-s390x.tar.gz
+          export PATH=$PATH:/usr/local/go/bin
+          
+      - name: Run cryptonight tests
+        working-directory: crypto/cryptonight
+        run: |
+          go test -v
