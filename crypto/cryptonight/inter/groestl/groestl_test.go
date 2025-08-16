@@ -24,6 +24,7 @@ func TestGroestl(t *testing.T) {
 
 func TestGroestl_BE(t *testing.T) {
 	common.DebugSetBigEndian(true)
+	defer common.DebugResetBigEndian()
 
 	dst := Sum256([]byte("test"))
 	fmt.Println(dst)

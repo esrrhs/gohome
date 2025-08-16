@@ -67,3 +67,7 @@ func DebugSetBigEndian(isBigEndian bool) {
 		gIsBigEndian = -1 // 小端
 	}
 }
+
+func DebugResetBigEndian() {
+	gIsBigEndian = 0 // 未设置
+}
