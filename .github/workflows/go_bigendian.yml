@@ -24,6 +24,6 @@ jobs:
           docker run --rm -t \
             --platform=linux/s390x \
             -v ${{ github.workspace }}:/workspace \
-            -w /workspace/crypto/cryptonight \
+            -w /workspace/crypto \
             golang:1.24 \
-            go test -v ./cryptonight_test.go
+            go test -v
