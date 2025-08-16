@@ -1,13 +1,16 @@
 package cryptonight
 
 import (
+	"encoding/binary"
+	"hash"
+	"sync"
+	"unsafe"
+
+	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/crypto/cryptonight/inter/blake256"
 	"github.com/esrrhs/gohome/crypto/cryptonight/inter/groestl"
 	"github.com/esrrhs/gohome/crypto/cryptonight/inter/jh"
 	"github.com/esrrhs/gohome/crypto/cryptonight/inter/skein"
-	"hash"
-	"sync"
-	"unsafe"
 )
 
 var hashPool = [...]*sync.Pool{
@@ -21,7 +24,15 @@ func (cc *CryptoNight) finalHash() []byte {
 	hp := hashPool[cc.finalState[0]&0x03]
 	h := hp.Get().(hash.Hash)
 	h.Reset()
-	h.Write((*[200]byte)(unsafe.Pointer(&cc.finalState))[:])
+	if common.IsBigEndian() {
+		buf := make([]byte, 200)
+		for i, v := range cc.finalState {
+			binary.LittleEndian.PutUint64(buf[i*8:i*8+8], v)
+		}
+		h.Write(buf)
+	} else {
+		h.Write((*[200]byte)(unsafe.Pointer(&cc.finalState))[:])
+	}
 	sum := h.Sum(nil)
 	hp.Put(h)
 

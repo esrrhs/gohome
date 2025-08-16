@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"compress/zlib"
 	"crypto/rc4"
-	"github.com/google/uuid"
 	"io"
+	"unsafe"
+
+	"github.com/google/uuid"
 )
 
 func CompressData(src []byte) []byte {
@@ -40,4 +42,10 @@ func Rc4(key string, src []byte) ([]byte, error) {
 
 func Guid() string {
 	return uuid.New().String()
+}
+
+func IsBigEndian() bool {
+	var i uint16 = 0x1
+	b := (*[2]byte)(unsafe.Pointer(&i))
+	return b[0] == 0
 }

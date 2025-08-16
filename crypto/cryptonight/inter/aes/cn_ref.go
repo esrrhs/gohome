@@ -1,8 +1,11 @@
 package aes
 
 import (
+	"encoding/binary"
 	"math/bits"
 	"unsafe"
+
+	"github.com/esrrhs/gohome/common"
 )
 
 func CnExpandKeyGoSoft(key []uint64, rkeys *[40]uint32) {
@@ -23,8 +26,24 @@ func CnExpandKeyGoSoft(key []uint64, rkeys *[40]uint32) {
 }
 
 func CnRoundsGoSoft(dst, src []uint64, rkeys *[40]uint32) {
-	src8 := (*[16]byte)(unsafe.Pointer(&src[0]))
-	dst8 := (*[16]byte)(unsafe.Pointer(&dst[0]))
+	var srcBuf, dstBuf [16]byte
+	var src8, dst8 *[16]byte
+
+	if common.IsBigEndian() {
+		// 大端机：手动按小端写入
+		binary.LittleEndian.PutUint64(srcBuf[0:8], src[0])
+		binary.LittleEndian.PutUint64(srcBuf[8:16], src[1])
+
+		binary.LittleEndian.PutUint64(dstBuf[0:8], dst[0])
+		binary.LittleEndian.PutUint64(dstBuf[8:16], dst[1])
+
+		src8 = &srcBuf
+		dst8 = &dstBuf
+	} else {
+		// 小端机：直接 unsafe 转
+		src8 = (*[16]byte)(unsafe.Pointer(&src[0]))
+		dst8 = (*[16]byte)(unsafe.Pointer(&dst[0]))
+	}
 
 	var s0, s1, s2, s3, t0, t1, t2, t3 uint32
 
@@ -48,9 +67,34 @@ func CnRoundsGoSoft(dst, src []uint64, rkeys *[40]uint32) {
 }
 
 func CnSingleRoundGoSoft(dst, src []uint64, rkey *[2]uint64) {
-	src8 := (*[16]byte)(unsafe.Pointer(&src[0]))
-	dst8 := (*[16]byte)(unsafe.Pointer(&dst[0]))
-	rkey32 := (*[4]uint32)(unsafe.Pointer(&rkey[0]))
+	var srcBuf, dstBuf [16]byte
+	var rkeyBuf [4]uint32
+
+	var src8, dst8 *[16]byte
+	var rkey32 *[4]uint32
+
+	if common.IsBigEndian() {
+		// 大端机：手动按小端写入
+		binary.LittleEndian.PutUint64(srcBuf[0:8], src[0])
+		binary.LittleEndian.PutUint64(srcBuf[8:16], src[1])
+
+		binary.LittleEndian.PutUint64(dstBuf[0:8], dst[0])
+		binary.LittleEndian.PutUint64(dstBuf[8:16], dst[1])
+
+		for i := 0; i < 2; i++ {
+			rkeyBuf[i*2+0] = uint32(rkey[i] & 0xffffffff)
+			rkeyBuf[i*2+1] = uint32((rkey[i] >> 32) & 0xffffffff)
+		}
+
+		src8 = &srcBuf
+		dst8 = &dstBuf
+		rkey32 = &rkeyBuf
+	} else {
+		// 小端机：直接 unsafe.Pointer 转
+		src8 = (*[16]byte)(unsafe.Pointer(&src[0]))
+		dst8 = (*[16]byte)(unsafe.Pointer(&dst[0]))
+		rkey32 = (*[4]uint32)(unsafe.Pointer(&rkey[0]))
+	}
 
 	var t0, t1, t2, t3 uint32
 
@@ -77,9 +121,35 @@ func CnSingleRoundHeavyGo(dst, src []uint64, rkey *[2]uint64) {
 	x[0] = dst[0] ^ 0xffffffffffffffff
 	x[1] = dst[1] ^ 0xffffffffffffffff
 
-	kk := (*[4]uint32)(unsafe.Pointer(&k[0]))
-	xx := (*[4]uint32)(unsafe.Pointer(&x[0]))
-	xxx := (*[16]byte)(unsafe.Pointer(&x[0]))
+	var kkBuf [4]uint32
+	var xxBuf [4]uint32
+	var xxxBuf [16]byte
+
+	var kk *[4]uint32
+	var xx *[4]uint32
+	var xxx *[16]byte
+
+	if common.IsBigEndian() {
+		// 大端机：手动按小端写入
+		for i := 0; i < 2; i++ {
+			kkBuf[i*2+0] = uint32(k[i] & 0xffffffff)
+			kkBuf[i*2+1] = uint32((k[i] >> 32) & 0xffffffff)
+
+			xxBuf[i*2+0] = uint32(x[i] & 0xffffffff)
+			xxBuf[i*2+1] = uint32((x[i] >> 32) & 0xffffffff)
+
+			binary.LittleEndian.PutUint64(xxxBuf[i*8:i*8+8], x[i])
+		}
+
+		kk = &kkBuf
+		xx = &xxBuf
+		xxx = &xxxBuf
+	} else {
+		// 小端机：直接 unsafe.Pointer 转
+		kk = (*[4]uint32)(unsafe.Pointer(&k[0]))
+		xx = (*[4]uint32)(unsafe.Pointer(&x[0]))
+		xxx = (*[16]byte)(unsafe.Pointer(&x[0]))
+	}
 
 	kk[0] ^= ter0[xxx[0*4+0]] ^ ter1[xxx[1*4+1]] ^ ter2[xxx[2*4+2]] ^ ter3[xxx[3*4+3]]
 	xx[0] ^= kk[0]
