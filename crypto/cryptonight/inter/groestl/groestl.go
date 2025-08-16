@@ -32,17 +32,11 @@ const _ = `
 #undef build
 #undef ignore
 
-#define U8_U32_L(a, begin, end) \
-    ( (*[]uint32)(unsafe.Pointer(&a[ (begin) ])) )
-
-#define U32_U8_L(a, begin, end) \
-    ( (*[]uint8)(unsafe.Pointer(&a[ (begin) ])) )
-
 #define U8_U32(a, begin, end) \
-    ( (*[( (end) - (begin) ) / 4]uint32)(unsafe.Pointer( u8_u32(a, begin, end) )) )
+    ( (*[( (end) - (begin) ) / 4]uint32)(unsafe.Pointer(&a[ (begin) ])) )
 
 #define U32_U8(a, begin, end) \
-    ( (*[( (end) - (begin) ) * 4]uint8)(unsafe.Pointer( u32_u8(a, begin, end) )) )
+    ( (*[( (end) - (begin) ) * 4]uint8)(unsafe.Pointer(&a[ (begin) ])) )
 
 #define COLUMN(x, y, i, c0, c1, c2, c3, c4, c5, c6, c7, tv1, tv2, tu, tl, t) \
 	tu = tab[2*uint32(x[4*c0+0])];				\
@@ -114,33 +108,6 @@ type state struct {
 
 	buffer [size512]byte // data buffer
 	bufPtr int           // data buffer pointer
-}
-
-func u8_u32(a []uint8, begin, end int) *[]uint32 {
-	if common.IsBigEndian() {
-		n := (end - begin) / 4
-		res := make([]uint32, n)
-		for i := 0; i < n; i++ {
-			res[i] = binary.LittleEndian.Uint32(a[begin+i*4 : begin+i*4+4])
-		}
-		return &res
-	} else {
-		return U8_U32_L(a, begin, end)
-	}
-}
-
-// U32_U8: []uint32 -> []byte，强制小端写入
-func u32_u8(a []uint32, begin, end int) *[]uint8 {
-	if common.IsBigEndian() {
-		n := (end - begin) * 4
-		res := make([]uint8, n)
-		for i := 0; i < end-begin; i++ {
-			binary.LittleEndian.PutUint32(res[i*4:i*4+4], a[begin+i])
-		}
-		return &res
-	} else {
-		return U32_U8_L(a, begin, end)
-	}
 }
 
 func Sum256(b []byte) []byte {
@@ -243,7 +210,47 @@ func (s *state) Sum(b []byte) []byte {
 	s.outputTransformation()
 
 	// store hash result
-	return append(b, U32_U8(s.chaining[:], hashByteLen/4, size512/4)[:]...)
+	if common.IsBigEndian() {
+		return append(b, u32_u8_be_32(s.chaining[:], hashByteLen/4, size512/4)[:]...)
+	} else {
+		return append(b, U32_U8(s.chaining, hashByteLen/4, size512/4)[:]...)
+	}
+}
+
+func u8_u32_be(a []byte, begin, end int) *[size512 / 4]uint32 {
+	n := (end - begin) / 4
+	if n != size512/4 {
+		panic("u8_u32_be: invalid size")
+	}
+	var res [size512 / 4]uint32
+	for i := 0; i < n; i++ {
+		res[i] = binary.LittleEndian.Uint32(a[begin+i*4 : begin+i*4+4])
+	}
+	return &res
+}
+
+func u32_u8_be_32(a []uint32, begin, end int) *[32]byte {
+	n := (end - begin) * 4
+	if n != 32 {
+		panic("u32_u8_be_32: invalid size")
+	}
+	var res [32]byte
+	for i := 0; i < end-begin; i++ {
+		binary.LittleEndian.PutUint32(res[i*4:i*4+4], a[begin+i])
+	}
+	return &res
+}
+
+func u32_u8_be(a []uint32, begin, end int) *[64]byte {
+	n := (end - begin) * 4
+	if n != 64 {
+		panic("u32_u8_be: invalid size")
+	}
+	var res [64]byte
+	for i := 0; i < end-begin; i++ {
+		binary.LittleEndian.PutUint32(res[i*4:i*4+4], a[begin+i])
+	}
+	return &res
 }
 
 // digest up to msglen bytes of input (full blocks only)
@@ -255,7 +262,11 @@ func (s *state) transform(b []byte) {
 	for n >= size512 {
 		input := b[offset:]
 		// length of input is known and constant
-		f512(&s.chaining, U8_U32(input, 0, size512))
+		if common.IsBigEndian() {
+			f512(&s.chaining, u8_u32_be(input, 0, size512))
+		} else {
+			f512(&s.chaining, U8_U32(input, 0, size512))
+		}
 
 		// increment block counter
 		s.blockCounter1++
@@ -276,16 +287,49 @@ func (s *state) outputTransformation() {
 	for j = 0; j < 2*cols512; j++ {
 		temp[j] = s.chaining[j]
 	}
-	rnd512p(U32_U8(temp[:], 0, 2*cols512), &y, 0x00000000)
-	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000001)
-	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000002)
-	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000003)
-	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000004)
-	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000005)
-	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000006)
-	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000007)
-	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000008)
-	rnd512p(U32_U8(y[:], 0, 2*cols512), &temp, 0x00000009)
+	if common.IsBigEndian() {
+		tmp_temp := u32_u8_be(temp[:], 0, 2*cols512)
+		rnd512p(tmp_temp, &y, 0x00000000)
+		copy(temp[:], u8_u32_be(tmp_temp[:], 0, size512)[:])
+		tmp_y := u32_u8_be(y[:], 0, 2*cols512)
+		rnd512p(tmp_y, &z, 0x00000001)
+		copy(y[:], u8_u32_be(tmp_y[:], 0, size512)[:])
+		tmp_z := u32_u8_be(z[:], 0, 2*cols512)
+		rnd512p(tmp_z, &y, 0x00000002)
+		copy(z[:], u8_u32_be(tmp_z[:], 0, size512)[:])
+		tmp_y = u32_u8_be(y[:], 0, 2*cols512)
+		rnd512p(tmp_y, &z, 0x00000003)
+		copy(y[:], u8_u32_be(tmp_y[:], 0, size512)[:])
+		tmp_z = u32_u8_be(z[:], 0, 2*cols512)
+		rnd512p(tmp_z, &y, 0x00000004)
+		copy(z[:], u8_u32_be(tmp_z[:], 0, size512)[:])
+		tmp_y = u32_u8_be(y[:], 0, 2*cols512)
+		rnd512p(tmp_y, &z, 0x00000005)
+		copy(y[:], u8_u32_be(tmp_y[:], 0, size512)[:])
+		tmp_z = u32_u8_be(z[:], 0, 2*cols512)
+		rnd512p(tmp_z, &y, 0x00000006)
+		copy(z[:], u8_u32_be(tmp_z[:], 0, size512)[:])
+		tmp_y = u32_u8_be(y[:], 0, 2*cols512)
+		rnd512p(tmp_y, &z, 0x00000007)
+		copy(y[:], u8_u32_be(tmp_y[:], 0, size512)[:])
+		tmp_z = u32_u8_be(z[:], 0, 2*cols512)
+		rnd512p(tmp_z, &y, 0x00000008)
+		copy(z[:], u8_u32_be(tmp_z[:], 0, size512)[:])
+		tmp_y = u32_u8_be(y[:], 0, 2*cols512)
+		rnd512p(tmp_y, &temp, 0x00000009)
+		copy(y[:], u8_u32_be(tmp_y[:], 0, size512)[:])
+	} else {
+		rnd512p(U32_U8(temp, 0, 2*cols512), &y, 0x00000000)
+		rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000001)
+		rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000002)
+		rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000003)
+		rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000004)
+		rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000005)
+		rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000006)
+		rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000007)
+		rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000008)
+		rnd512p(U32_U8(y, 0, 2*cols512), &temp, 0x00000009)
+	}
 	for j = 0; j < 2*cols512; j++ {
 		s.chaining[j] ^= temp[j]
 	}
@@ -301,30 +345,95 @@ func f512(h *[16]uint32, m *[size512 / 4]uint32) {
 		Ptmp[i] = h[i] ^ m[i]
 	}
 
-	// compute Q(m)
-	rnd512q(U32_U8(z[:], 0, 2*cols512), &y, 0x00000000)
-	rnd512q(U32_U8(y[:], 0, 2*cols512), &z, 0x01000000)
-	rnd512q(U32_U8(z[:], 0, 2*cols512), &y, 0x02000000)
-	rnd512q(U32_U8(y[:], 0, 2*cols512), &z, 0x03000000)
-	rnd512q(U32_U8(z[:], 0, 2*cols512), &y, 0x04000000)
-	rnd512q(U32_U8(y[:], 0, 2*cols512), &z, 0x05000000)
-	rnd512q(U32_U8(z[:], 0, 2*cols512), &y, 0x06000000)
-	rnd512q(U32_U8(y[:], 0, 2*cols512), &z, 0x07000000)
-	rnd512q(U32_U8(z[:], 0, 2*cols512), &y, 0x08000000)
-	rnd512q(U32_U8(y[:], 0, 2*cols512), &Qtmp, 0x09000000)
+	if common.IsBigEndian() {
+		// compute Q(m)
+		tmp_z := u32_u8_be(z[:], 0, 2*cols512)
+		rnd512q(tmp_z, &y, 0x00000000)
+		copy(z[:], u8_u32_be(tmp_z[:], 0, size512)[:])
+		tmp_y := u32_u8_be(y[:], 0, 2*cols512)
+		rnd512q(tmp_y, &z, 0x01000000)
+		copy(y[:], u8_u32_be(tmp_y[:], 0, size512)[:])
+		tmp_z = u32_u8_be(z[:], 0, 2*cols512)
+		rnd512q(tmp_z, &y, 0x02000000)
+		copy(z[:], u8_u32_be(tmp_z[:], 0, size512)[:])
+		tmp_y = u32_u8_be(y[:], 0, 2*cols512)
+		rnd512q(tmp_y, &z, 0x03000000)
+		copy(y[:], u8_u32_be(tmp_y[:], 0, size512)[:])
+		tmp_z = u32_u8_be(z[:], 0, 2*cols512)
+		rnd512q(tmp_z, &y, 0x04000000)
+		copy(z[:], u8_u32_be(tmp_z[:], 0, size512)[:])
+		tmp_y = u32_u8_be(y[:], 0, 2*cols512)
+		rnd512q(tmp_y, &z, 0x05000000)
+		copy(y[:], u8_u32_be(tmp_y[:], 0, size512)[:])
+		tmp_z = u32_u8_be(z[:], 0, 2*cols512)
+		rnd512q(tmp_z, &y, 0x06000000)
+		copy(z[:], u8_u32_be(tmp_z[:], 0, size512)[:])
+		tmp_y = u32_u8_be(y[:], 0, 2*cols512)
+		rnd512q(tmp_y, &z, 0x07000000)
+		copy(y[:], u8_u32_be(tmp_y[:], 0, size512)[:])
+		tmp_z = u32_u8_be(z[:], 0, 2*cols512)
+		rnd512q(tmp_z, &y, 0x08000000)
+		copy(z[:], u8_u32_be(tmp_z[:], 0, size512)[:])
+		tmp_y = u32_u8_be(y[:], 0, 2*cols512)
+		rnd512q(tmp_y, &Qtmp, 0x09000000)
+		copy(y[:], u8_u32_be(tmp_y[:], 0, size512)[:])
 
-	// compute P(h+m)
-	rnd512p(U32_U8(Ptmp[:], 0, 2*cols512), &y, 0x00000000)
-	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000001)
-	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000002)
-	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000003)
-	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000004)
-	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000005)
-	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000006)
-	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000007)
-	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000008)
-	rnd512p(U32_U8(y[:], 0, 2*cols512), &Ptmp, 0x00000009)
+		// compute P(h+m)
+		tmp_Ptmp := u32_u8_be(Ptmp[:], 0, 2*cols512)
+		rnd512p(tmp_Ptmp, &y, 0x00000000)
+		copy(Ptmp[:], u8_u32_be(tmp_Ptmp[:], 0, size512)[:])
+		tmp_y = u32_u8_be(y[:], 0, 2*cols512)
+		rnd512p(tmp_y, &z, 0x00000001)
+		copy(y[:], u8_u32_be(tmp_y[:], 0, size512)[:])
+		tmp_z = u32_u8_be(z[:], 0, 2*cols512)
+		rnd512p(tmp_z, &y, 0x00000002)
+		copy(z[:], u8_u32_be(tmp_z[:], 0, size512)[:])
+		tmp_y = u32_u8_be(y[:], 0, 2*cols512)
+		rnd512p(tmp_y, &z, 0x00000003)
+		copy(y[:], u8_u32_be(tmp_y[:], 0, size512)[:])
+		tmp_z = u32_u8_be(z[:], 0, 2*cols512)
+		rnd512p(tmp_z, &y, 0x00000004)
+		copy(z[:], u8_u32_be(tmp_z[:], 0, size512)[:])
+		tmp_y = u32_u8_be(y[:], 0, 2*cols512)
+		rnd512p(tmp_y, &z, 0x00000005)
+		copy(y[:], u8_u32_be(tmp_y[:], 0, size512)[:])
+		tmp_z = u32_u8_be(z[:], 0, 2*cols512)
+		rnd512p(tmp_z, &y, 0x00000006)
+		copy(z[:], u8_u32_be(tmp_z[:], 0, size512)[:])
+		tmp_y = u32_u8_be(y[:], 0, 2*cols512)
+		rnd512p(tmp_y, &z, 0x00000007)
+		copy(y[:], u8_u32_be(tmp_y[:], 0, size512)[:])
+		tmp_z = u32_u8_be(z[:], 0, 2*cols512)
+		rnd512p(tmp_z, &y, 0x00000008)
+		copy(z[:], u8_u32_be(tmp_z[:], 0, size512)[:])
+		tmp_y = u32_u8_be(y[:], 0, 2*cols512)
+		rnd512p(tmp_y, &Ptmp, 0x00000009)
+		copy(y[:], u8_u32_be(tmp_y[:], 0, size512)[:])
+	} else {
+		// compute Q(m)
+		rnd512q(U32_U8(z, 0, 2*cols512), &y, 0x00000000)
+		rnd512q(U32_U8(y, 0, 2*cols512), &z, 0x01000000)
+		rnd512q(U32_U8(z, 0, 2*cols512), &y, 0x02000000)
+		rnd512q(U32_U8(y, 0, 2*cols512), &z, 0x03000000)
+		rnd512q(U32_U8(z, 0, 2*cols512), &y, 0x04000000)
+		rnd512q(U32_U8(y, 0, 2*cols512), &z, 0x05000000)
+		rnd512q(U32_U8(z, 0, 2*cols512), &y, 0x06000000)
+		rnd512q(U32_U8(y, 0, 2*cols512), &z, 0x07000000)
+		rnd512q(U32_U8(z, 0, 2*cols512), &y, 0x08000000)
+		rnd512q(U32_U8(y, 0, 2*cols512), &Qtmp, 0x09000000)
 
+		// compute P(h+m)
+		rnd512p(U32_U8(Ptmp, 0, 2*cols512), &y, 0x00000000)
+		rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000001)
+		rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000002)
+		rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000003)
+		rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000004)
+		rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000005)
+		rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000006)
+		rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000007)
+		rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000008)
+		rnd512p(U32_U8(y, 0, 2*cols512), &Ptmp, 0x00000009)
+	}
 	// compute P(h+m) + Q(m) + h
 	for i = 0; i < 2*cols512; i++ {
 		h[i] ^= Ptmp[i] ^ Qtmp[i]
@@ -334,7 +443,12 @@ func f512(h *[16]uint32, m *[size512 / 4]uint32) {
 // compute one round of Q (short variants)
 func rnd512q(x *[64]byte, y *[16]uint32, r uint32) {
 	var temp1, temp2, tempUpperValue, tempLowerValue, temp uint32
-	x32 := U8_U32(x[:], 0, 64)
+	var x32 *[16]uint32
+	if common.IsBigEndian() {
+		x32 = u8_u32_be((*x)[:], 0, 64)
+	} else {
+		x32 = U8_U32(x, 0, 64)
+	}
 	x32[0] = ^x32[0]
 	x32[1] ^= 0xffffffff ^ r
 	x32[2] = ^x32[2]
@@ -351,6 +465,10 @@ func rnd512q(x *[64]byte, y *[16]uint32, r uint32) {
 	x32[13] ^= 0x9fffffff ^ r
 	x32[14] = ^x32[14]
 	x32[15] ^= 0x8fffffff ^ r
+	if common.IsBigEndian() {
+		tmp := u32_u8_be(x32[:], 0, 2*cols512)
+		copy(x[:], tmp[:])
+	}
 	COLUMN(x, y, 0, 2, 6, 10, 14, 1, 5, 9, 13, temp1, temp2, tempUpperValue, tempLowerValue, temp)
 	COLUMN(x, y, 2, 4, 8, 12, 0, 3, 7, 11, 15, temp1, temp2, tempUpperValue, tempLowerValue, temp)
 	COLUMN(x, y, 4, 6, 10, 14, 2, 5, 9, 13, 1, temp1, temp2, tempUpperValue, tempLowerValue, temp)
@@ -364,7 +482,12 @@ func rnd512q(x *[64]byte, y *[16]uint32, r uint32) {
 // compute one round of P (short variants)
 func rnd512p(x *[64]byte, y *[16]uint32, r uint32) {
 	var temp1, temp2, tempUpperValue, tempLowerValue, temp uint32
-	x32 := U8_U32(x[:], 0, 64)
+	var x32 *[16]uint32
+	if common.IsBigEndian() {
+		x32 = u8_u32_be((*x)[:], 0, 64)
+	} else {
+		x32 = U8_U32(x, 0, 64)
+	}
 	x32[0] ^= 0x00000000 ^ r
 	x32[2] ^= 0x00000010 ^ r
 	x32[4] ^= 0x00000020 ^ r
@@ -373,6 +496,10 @@ func rnd512p(x *[64]byte, y *[16]uint32, r uint32) {
 	x32[10] ^= 0x00000050 ^ r
 	x32[12] ^= 0x00000060 ^ r
 	x32[14] ^= 0x00000070 ^ r
+	if common.IsBigEndian() {
+		tmp := u32_u8_be(x32[:], 0, 2*cols512)
+		copy(x[:], tmp[:])
+	}
 	COLUMN(x, y, 0, 0, 2, 4, 6, 9, 11, 13, 15, temp1, temp2, tempUpperValue, tempLowerValue, temp)
 	COLUMN(x, y, 2, 2, 4, 6, 8, 11, 13, 15, 1, temp1, temp2, tempUpperValue, tempLowerValue, temp)
 	COLUMN(x, y, 4, 4, 6, 8, 10, 13, 15, 1, 3, temp1, temp2, tempUpperValue, tempLowerValue, temp)
