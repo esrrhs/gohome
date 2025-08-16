@@ -14,15 +14,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Set up environment
+      - name: Set up QEMU + Docker
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-user-static docker.io curl
-          curl -OL https://golang.org/dl/go1.24.4.linux-s390x.tar.gz
-          sudo tar -C /usr/local -xzf go1.24.4.linux-s390x.tar.gz
-          export PATH=$PATH:/usr/local/go/bin
-          
-      - name: Run cryptonight tests
-        working-directory: crypto/cryptonight
+          sudo apt-get install -y qemu-user-static curl docker.io
+
+      - name: Run Big Endian Test in s390x container
         run: |
-          go test -v
+          docker pull s390x/ubuntu:22.04
+          docker run --rm -v $GITHUB_WORKSPACE:/workspace -w /workspace s390x/ubuntu:22.04 \
+          bash -c "apt update && apt install -y golang && cd ./crypto/cryptonight && go test -v"
