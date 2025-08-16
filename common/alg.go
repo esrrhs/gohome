@@ -44,8 +44,26 @@ func Guid() string {
 	return uuid.New().String()
 }
 
+var gIsBigEndian int
+
 func IsBigEndian() bool {
+	if gIsBigEndian != 0 {
+		return gIsBigEndian == 1
+	}
 	var i uint16 = 0x1
 	b := (*[2]byte)(unsafe.Pointer(&i))
+	if b[1] == 0 {
+		gIsBigEndian = -1 // 小端
+	} else {
+		gIsBigEndian = 1 // 大端
+	}
 	return b[0] == 0
+}
+
+func DebugSetBigEndian(isBigEndian bool) {
+	if isBigEndian {
+		gIsBigEndian = 1 // 大端
+	} else {
+		gIsBigEndian = -1 // 小端
+	}
 }

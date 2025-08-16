@@ -275,4 +275,6 @@ func Test00017(t *testing.T) {
 
 func Test00018(t *testing.T) {
 	fmt.Println(IsBigEndian())
+	fmt.Println(IsBigEndian())
+	fmt.Println(IsBigEndian())
 }
