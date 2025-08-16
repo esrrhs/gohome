@@ -65,7 +65,7 @@ type state struct {
 	bufPtr int           // data buffer pointer
 }
 
-func u8_u32(a []byte, begin, end int) *[]uint32 {
+func u8_u32(a []uint8, begin, end int) *[]uint32 {
 	if common.IsBigEndian() {
 		n := (end - begin) / 4
 		res := make([]uint32, n)
@@ -79,10 +79,10 @@ func u8_u32(a []byte, begin, end int) *[]uint32 {
 }
 
 // U32_U8: []uint32 -> []byte，强制小端写入
-func u32_u8(a []uint32, begin, end int) *[]byte {
+func u32_u8(a []uint32, begin, end int) *[]uint8 {
 	if common.IsBigEndian() {
 		n := (end - begin) * 4
-		res := make([]byte, n)
+		res := make([]uint8, n)
 		for i := 0; i < end-begin; i++ {
 			binary.LittleEndian.PutUint32(res[i*4:i*4+4], a[begin+i])
 		}
