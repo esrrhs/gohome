@@ -64,6 +64,11 @@ func CnRoundsGoSoft(dst, src []uint64, rkeys *[40]uint32) {
 	dst8[4], dst8[5], dst8[6], dst8[7] = byte(s1>>24), byte(s1>>16), byte(s1>>8), byte(s1)
 	dst8[8], dst8[9], dst8[10], dst8[11] = byte(s2>>24), byte(s2>>16), byte(s2>>8), byte(s2)
 	dst8[12], dst8[13], dst8[14], dst8[15] = byte(s3>>24), byte(s3>>16), byte(s3>>8), byte(s3)
+
+	if common.IsBigEndian() {
+		dst[0] = binary.LittleEndian.Uint64(dstBuf[0:8])
+		dst[1] = binary.LittleEndian.Uint64(dstBuf[8:16])
+	}
 }
 
 func CnSingleRoundGoSoft(dst, src []uint64, rkey *[2]uint64) {
@@ -107,6 +112,11 @@ func CnSingleRoundGoSoft(dst, src []uint64, rkey *[2]uint64) {
 	dst8[4], dst8[5], dst8[6], dst8[7] = byte(t1), byte(t1>>8), byte(t1>>16), byte(t1>>24)
 	dst8[8], dst8[9], dst8[10], dst8[11] = byte(t2), byte(t2>>8), byte(t2>>16), byte(t2>>24)
 	dst8[12], dst8[13], dst8[14], dst8[15] = byte(t3), byte(t3>>8), byte(t3>>16), byte(t3>>24)
+
+	if common.IsBigEndian() {
+		dst[0] = binary.LittleEndian.Uint64(dstBuf[0:8])
+		dst[1] = binary.LittleEndian.Uint64(dstBuf[8:16])
+	}
 }
 
 func CnSingleRoundHeavyGo(dst, src []uint64, rkey *[2]uint64) {
@@ -131,15 +141,18 @@ func CnSingleRoundHeavyGo(dst, src []uint64, rkey *[2]uint64) {
 
 	if common.IsBigEndian() {
 		// 大端机：手动按小端写入
-		for i := 0; i < 2; i++ {
-			kkBuf[i*2+0] = uint32(k[i] & 0xffffffff)
-			kkBuf[i*2+1] = uint32((k[i] >> 32) & 0xffffffff)
-
-			xxBuf[i*2+0] = uint32(x[i] & 0xffffffff)
-			xxBuf[i*2+1] = uint32((x[i] >> 32) & 0xffffffff)
-
-			binary.LittleEndian.PutUint64(xxxBuf[i*8:i*8+8], x[i])
-		}
+		kkBuf[0] = uint32(k[0] & 0xffffffff)
+		kkBuf[1] = uint32((k[0] >> 32) & 0xffffffff)
+		kkBuf[2] = uint32(k[1] & 0xffffffff)
+		kkBuf[3] = uint32((k[1] >> 32) & 0xffffffff)
+		xxBuf[0] = uint32(x[0] & 0xffffffff)
+		xxBuf[1] = uint32((x[0] >> 32) & 0xffffffff)
+		xxBuf[2] = uint32(x[1] & 0xffffffff)
+		xxBuf[3] = uint32((x[1] >> 32) & 0xffffffff)
+		binary.LittleEndian.PutUint32(xxxBuf[0:4], xxBuf[0])
+		binary.LittleEndian.PutUint32(xxxBuf[4:8], xxBuf[1])
+		binary.LittleEndian.PutUint32(xxxBuf[8:12], xxBuf[2])
+		binary.LittleEndian.PutUint32(xxxBuf[12:16], xxBuf[3])
 
 		kk = &kkBuf
 		xx = &xxBuf
@@ -151,13 +164,28 @@ func CnSingleRoundHeavyGo(dst, src []uint64, rkey *[2]uint64) {
 		xxx = (*[16]byte)(unsafe.Pointer(&x[0]))
 	}
 
-	kk[0] ^= ter0[xxx[0*4+0]] ^ ter1[xxx[1*4+1]] ^ ter2[xxx[2*4+2]] ^ ter3[xxx[3*4+3]]
-	xx[0] ^= kk[0]
-	kk[1] ^= ter0[xxx[1*4+0]] ^ ter1[xxx[2*4+1]] ^ ter2[xxx[3*4+2]] ^ ter3[xxx[0*4+3]]
-	xx[1] ^= kk[1]
-	kk[2] ^= ter0[xxx[2*4+0]] ^ ter1[xxx[3*4+1]] ^ ter2[xxx[0*4+2]] ^ ter3[xxx[1*4+3]]
-	xx[2] ^= kk[2]
-	kk[3] ^= ter0[xxx[3*4+0]] ^ ter1[xxx[0*4+1]] ^ ter2[xxx[1*4+2]] ^ ter3[xxx[2*4+3]]
+	if common.IsBigEndian() {
+		kk[0] ^= ter0[xxx[0*4+0]] ^ ter1[xxx[1*4+1]] ^ ter2[xxx[2*4+2]] ^ ter3[xxx[3*4+3]]
+		xx[0] ^= kk[0]
+		binary.LittleEndian.PutUint32(xxx[0*4+0:0*4+4], xx[0])
+		kk[1] ^= ter0[xxx[1*4+0]] ^ ter1[xxx[2*4+1]] ^ ter2[xxx[3*4+2]] ^ ter3[xxx[0*4+3]]
+		xx[1] ^= kk[1]
+		binary.LittleEndian.PutUint32(xxx[1*4+0:1*4+4], xx[1])
+		kk[2] ^= ter0[xxx[2*4+0]] ^ ter1[xxx[3*4+1]] ^ ter2[xxx[0*4+2]] ^ ter3[xxx[1*4+3]]
+		xx[2] ^= kk[2]
+		binary.LittleEndian.PutUint32(xxx[2*4+0:2*4+4], xx[2])
+		kk[3] ^= ter0[xxx[3*4+0]] ^ ter1[xxx[0*4+1]] ^ ter2[xxx[1*4+2]] ^ ter3[xxx[2*4+3]]
+		k[0] = (uint64(kk[1]) << 32) | uint64(kk[0])
+		k[1] = (uint64(kk[3]) << 32) | uint64(kk[2])
+	} else {
+		kk[0] ^= ter0[xxx[0*4+0]] ^ ter1[xxx[1*4+1]] ^ ter2[xxx[2*4+2]] ^ ter3[xxx[3*4+3]]
+		xx[0] ^= kk[0]
+		kk[1] ^= ter0[xxx[1*4+0]] ^ ter1[xxx[2*4+1]] ^ ter2[xxx[3*4+2]] ^ ter3[xxx[0*4+3]]
+		xx[1] ^= kk[1]
+		kk[2] ^= ter0[xxx[2*4+0]] ^ ter1[xxx[3*4+1]] ^ ter2[xxx[0*4+2]] ^ ter3[xxx[1*4+3]]
+		xx[2] ^= kk[2]
+		kk[3] ^= ter0[xxx[3*4+0]] ^ ter1[xxx[0*4+1]] ^ ter2[xxx[1*4+2]] ^ ter3[xxx[2*4+3]]
+	}
 
 	dst[0] = k[0]
 	dst[1] = k[1]
