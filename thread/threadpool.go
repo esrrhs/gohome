@@ -1,9 +1,11 @@
 package thread
 
 import (
-	"github.com/esrrhs/gohome/common"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/esrrhs/gohome/common"
 )
 
 /*
@@ -22,6 +24,7 @@ ThreadPool 实现了一个简单的线程池，用于并发处理任务。
 
 type ThreadPool struct {
 	workResultLock sync.WaitGroup
+	workerNum      int32
 	max            int
 	exef           func(interface{})
 	ca             []chan interface{}
@@ -51,6 +54,10 @@ func NewThreadPool(max int, buffer int, exef func(interface{})) *ThreadPool {
 
 	for index := range ca {
 		go tp.run(index)
+	}
+
+	for atomic.LoadInt32(&tp.workerNum) < int32(max) {
+		time.Sleep(10 * time.Millisecond) // 等待所有工作线程启动
 	}
 
 	return tp
@@ -83,6 +90,8 @@ func (tp *ThreadPool) run(index int) {
 
 	tp.workResultLock.Add(1)
 	defer tp.workResultLock.Done()
+
+	atomic.AddInt32(&tp.workerNum, 1)
 
 	for {
 		select {
