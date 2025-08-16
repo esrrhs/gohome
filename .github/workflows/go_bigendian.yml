@@ -24,6 +24,12 @@ jobs:
           docker run --rm -t \
             --platform=linux/s390x \
             -v ${{ github.workspace }}:/workspace \
-            -w /workspace/crypto \
+            -w /workspace \
             golang:1.24 \
-            go test -v
+            bash -c '
+              set -e
+              echo "=== Testing crypto/cryptonight/inter/aes ==="
+              cd /workspace/crypto/cryptonight/inter/aes && go test -v
+      
+              echo "=== Testing crypto/cryptonight/inter/blake256 ==="
+              cd /workspace/crypto/cryptonight/inter/blake256 && go test -v
