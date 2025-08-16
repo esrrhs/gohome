@@ -7,22 +7,23 @@ on:
     branches: [ "master" ]
 
 jobs:
-  big-endian-test:
+  test-s390x:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - name: Set up QEMU + Docker
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-user-static curl
-          curl -fsSL https://get.docker.com -o get-docker.sh
-          sudo sh get-docker.sh
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
-      - name: Run Big Endian Test in s390x container
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Run Go test inside s390x container
         run: |
-          docker pull s390x/ubuntu:22.04
-          docker run --rm -v $GITHUB_WORKSPACE:/workspace -w /workspace s390x/ubuntu:22.04 \
-          bash -c "apt update && apt install -y golang && cd ./crypto/cryptonight && go test -v"
+          docker run --rm -t \
+            --platform=linux/s390x \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace/crypto/cryptonight \
+            golang:1.24 \
+            go test -v ./cryptonight_test.go
