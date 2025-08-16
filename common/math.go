@@ -124,6 +124,11 @@ func RandInt() int32 {
 	return int32(ret)
 }
 
+func RandInt64() int64 {
+	ret := mrand.Int63()
+	return ret
+}
+
 func Shuffle(n int, swap func(i, j int)) {
 	mrand.Shuffle(n, swap)
 }

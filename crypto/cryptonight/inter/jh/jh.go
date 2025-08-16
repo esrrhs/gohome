@@ -220,10 +220,10 @@ func (s *state) Sum(b []byte) []byte {
 
 	if common.IsBigEndian() {
 		var tmp [32]byte // 2 * uint64 = 16 字节
-		binary.BigEndian.PutUint64(tmp[0:8], s.x[6][0])
-		binary.BigEndian.PutUint64(tmp[8:16], s.x[6][1])
-		binary.BigEndian.PutUint64(tmp[16:24], s.x[7][0])
-		binary.BigEndian.PutUint64(tmp[24:32], s.x[7][1])
+		binary.LittleEndian.PutUint64(tmp[0:8], s.x[6][0])
+		binary.LittleEndian.PutUint64(tmp[8:16], s.x[6][1])
+		binary.LittleEndian.PutUint64(tmp[16:24], s.x[7][0])
+		binary.LittleEndian.PutUint64(tmp[24:32], s.x[7][1])
 		return append(b, tmp[:]...)
 	} else {
 		return append(b, (*[32]byte)(unsafe.Pointer(&s.x[6][0]))[:]...)

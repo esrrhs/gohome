@@ -36,4 +36,7 @@ jobs:
           
               echo "=== Testing crypto/cryptonight/inter/groestl ==="
               cd /workspace/crypto/cryptonight/inter/groestl && go test -v
+          
+              echo "=== Testing crypto/cryptonight/inter/jh ==="
+              cd /workspace/crypto/cryptonight/inter/jh && go test -v
             '
