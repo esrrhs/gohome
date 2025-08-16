@@ -2,8 +2,9 @@ package cryptonight
 
 import (
 	"encoding/binary"
-	"github.com/esrrhs/gohome/crypto/cryptonight/inter/blake256"
 	"unsafe"
+
+	"github.com/esrrhs/gohome/crypto/cryptonight/inter/blake256"
 )
 
 const (

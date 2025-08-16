@@ -1,13 +1,15 @@
 // HEAD_PLACEHOLDER
+//go:build ignore
 // +build ignore
 
 // Package groestl implements Grøstl-256 algorithm.
 //
 // This Go implementation is a port of the original C implementation which is
 // included in Monero as follows:
-//     src/crypto/groestl.c
-//     src/crypto/groestl.h
-//     src/crypto/groestl_tables.h
+//
+//	src/crypto/groestl.c
+//	src/crypto/groestl.h
+//	src/crypto/groestl_tables.h
 //
 // Most comments in the original file are copied as well.
 //
@@ -15,8 +17,11 @@
 package groestl
 
 import (
+	"encoding/binary"
 	"hash"
 	"unsafe"
+
+	"github.com/esrrhs/gohome/common"
 )
 
 // This field is for macro definitions.
@@ -27,11 +32,17 @@ const _ = `
 #undef build
 #undef ignore
 
+#define U8_U32_L(a, begin, end) \
+    ( (*[]uint32)(unsafe.Pointer(&a[ (begin) ])) )
+
+#define U32_U8_L(a, begin, end) \
+    ( (*[]uint8)(unsafe.Pointer(&a[ (begin) ])) )
+
 #define U8_U32(a, begin, end) \
-    ( (*[( (end) - (begin) ) / 4]uint32)(unsafe.Pointer(&a[ (begin) ])) )
+    ( (*[( (end) - (begin) ) / 4]uint32)(unsafe.Pointer( u8_u32(a, begin, end) )) )
 
 #define U32_U8(a, begin, end) \
-    ( (*[( (end) - (begin) ) * 4]uint8)(unsafe.Pointer(&a[ (begin) ])) )
+    ( (*[( (end) - (begin) ) * 4]uint8)(unsafe.Pointer( u32_u8(a, begin, end) )) )
 
 #define COLUMN(x, y, i, c0, c1, c2, c3, c4, c5, c6, c7, tv1, tv2, tu, tl, t) \
 	tu = tab[2*uint32(x[4*c0+0])];				\
@@ -103,6 +114,33 @@ type state struct {
 
 	buffer [size512]byte // data buffer
 	bufPtr int           // data buffer pointer
+}
+
+func u8_u32(a []byte, begin, end int) *[]uint32 {
+	if common.IsBigEndian() {
+		n := (end - begin) / 4
+		res := make([]uint32, n)
+		for i := 0; i < n; i++ {
+			res[i] = binary.LittleEndian.Uint32(a[begin+i*4 : begin+i*4+4])
+		}
+		return &res
+	} else {
+		return U8_U32_L(a, begin, end)
+	}
+}
+
+// U32_U8: []uint32 -> []byte，强制小端写入
+func u32_u8(a []uint32, begin, end int) *[]byte {
+	if common.IsBigEndian() {
+		n := (end - begin) * 4
+		res := make([]byte, n)
+		for i := 0; i < end-begin; i++ {
+			binary.LittleEndian.PutUint32(res[i*4:i*4+4], a[begin+i])
+		}
+		return &res
+	} else {
+		return U32_U8_L(a, begin, end)
+	}
 }
 
 func Sum256(b []byte) []byte {
@@ -205,7 +243,7 @@ func (s *state) Sum(b []byte) []byte {
 	s.outputTransformation()
 
 	// store hash result
-	return append(b, U32_U8(s.chaining, hashByteLen/4, size512/4)[:]...)
+	return append(b, U32_U8(s.chaining[:], hashByteLen/4, size512/4)[:]...)
 }
 
 // digest up to msglen bytes of input (full blocks only)
@@ -238,16 +276,16 @@ func (s *state) outputTransformation() {
 	for j = 0; j < 2*cols512; j++ {
 		temp[j] = s.chaining[j]
 	}
-	rnd512p(U32_U8(temp, 0, 2*cols512), &y, 0x00000000)
-	rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000001)
-	rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000002)
-	rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000003)
-	rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000004)
-	rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000005)
-	rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000006)
-	rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000007)
-	rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000008)
-	rnd512p(U32_U8(y, 0, 2*cols512), &temp, 0x00000009)
+	rnd512p(U32_U8(temp[:], 0, 2*cols512), &y, 0x00000000)
+	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000001)
+	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000002)
+	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000003)
+	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000004)
+	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000005)
+	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000006)
+	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000007)
+	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000008)
+	rnd512p(U32_U8(y[:], 0, 2*cols512), &temp, 0x00000009)
 	for j = 0; j < 2*cols512; j++ {
 		s.chaining[j] ^= temp[j]
 	}
@@ -264,28 +302,28 @@ func f512(h *[16]uint32, m *[size512 / 4]uint32) {
 	}
 
 	// compute Q(m)
-	rnd512q(U32_U8(z, 0, 2*cols512), &y, 0x00000000)
-	rnd512q(U32_U8(y, 0, 2*cols512), &z, 0x01000000)
-	rnd512q(U32_U8(z, 0, 2*cols512), &y, 0x02000000)
-	rnd512q(U32_U8(y, 0, 2*cols512), &z, 0x03000000)
-	rnd512q(U32_U8(z, 0, 2*cols512), &y, 0x04000000)
-	rnd512q(U32_U8(y, 0, 2*cols512), &z, 0x05000000)
-	rnd512q(U32_U8(z, 0, 2*cols512), &y, 0x06000000)
-	rnd512q(U32_U8(y, 0, 2*cols512), &z, 0x07000000)
-	rnd512q(U32_U8(z, 0, 2*cols512), &y, 0x08000000)
-	rnd512q(U32_U8(y, 0, 2*cols512), &Qtmp, 0x09000000)
+	rnd512q(U32_U8(z[:], 0, 2*cols512), &y, 0x00000000)
+	rnd512q(U32_U8(y[:], 0, 2*cols512), &z, 0x01000000)
+	rnd512q(U32_U8(z[:], 0, 2*cols512), &y, 0x02000000)
+	rnd512q(U32_U8(y[:], 0, 2*cols512), &z, 0x03000000)
+	rnd512q(U32_U8(z[:], 0, 2*cols512), &y, 0x04000000)
+	rnd512q(U32_U8(y[:], 0, 2*cols512), &z, 0x05000000)
+	rnd512q(U32_U8(z[:], 0, 2*cols512), &y, 0x06000000)
+	rnd512q(U32_U8(y[:], 0, 2*cols512), &z, 0x07000000)
+	rnd512q(U32_U8(z[:], 0, 2*cols512), &y, 0x08000000)
+	rnd512q(U32_U8(y[:], 0, 2*cols512), &Qtmp, 0x09000000)
 
 	// compute P(h+m)
-	rnd512p(U32_U8(Ptmp, 0, 2*cols512), &y, 0x00000000)
-	rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000001)
-	rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000002)
-	rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000003)
-	rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000004)
-	rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000005)
-	rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000006)
-	rnd512p(U32_U8(y, 0, 2*cols512), &z, 0x00000007)
-	rnd512p(U32_U8(z, 0, 2*cols512), &y, 0x00000008)
-	rnd512p(U32_U8(y, 0, 2*cols512), &Ptmp, 0x00000009)
+	rnd512p(U32_U8(Ptmp[:], 0, 2*cols512), &y, 0x00000000)
+	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000001)
+	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000002)
+	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000003)
+	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000004)
+	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000005)
+	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000006)
+	rnd512p(U32_U8(y[:], 0, 2*cols512), &z, 0x00000007)
+	rnd512p(U32_U8(z[:], 0, 2*cols512), &y, 0x00000008)
+	rnd512p(U32_U8(y[:], 0, 2*cols512), &Ptmp, 0x00000009)
 
 	// compute P(h+m) + Q(m) + h
 	for i = 0; i < 2*cols512; i++ {
@@ -296,7 +334,7 @@ func f512(h *[16]uint32, m *[size512 / 4]uint32) {
 // compute one round of Q (short variants)
 func rnd512q(x *[64]byte, y *[16]uint32, r uint32) {
 	var temp1, temp2, tempUpperValue, tempLowerValue, temp uint32
-	x32 := U8_U32(x, 0, 64)
+	x32 := U8_U32(x[:], 0, 64)
 	x32[0] = ^x32[0]
 	x32[1] ^= 0xffffffff ^ r
 	x32[2] = ^x32[2]
@@ -326,7 +364,7 @@ func rnd512q(x *[64]byte, y *[16]uint32, r uint32) {
 // compute one round of P (short variants)
 func rnd512p(x *[64]byte, y *[16]uint32, r uint32) {
 	var temp1, temp2, tempUpperValue, tempLowerValue, temp uint32
-	x32 := U8_U32(x, 0, 64)
+	x32 := U8_U32(x[:], 0, 64)
 	x32[0] ^= 0x00000000 ^ r
 	x32[2] ^= 0x00000010 ^ r
 	x32[4] ^= 0x00000020 ^ r
