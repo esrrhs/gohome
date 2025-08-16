@@ -831,7 +831,7 @@ func TestSum(variant string) bool {
 			in, _ := hex.DecodeString(v.input)
 			result := cn.Sum(in, v.variant, v.height)
 			if hex.EncodeToString(result) != v.output {
-				loggo.Error("need %v get %v", v.output, hex.EncodeToString(result))
+				loggo.Error("%v need %v get %v", variant, v.output, hex.EncodeToString(result))
 				return false
 			}
 		}
@@ -844,7 +844,7 @@ func TestSum(variant string) bool {
 			result := cn.Sum(v.input[0:76], v.variant, v.height)
 			for j, _ := range result {
 				if result[j] != v.output[j] {
-					loggo.Error("need %v get %v", hex.EncodeToString(v.output[0:len(result)]), hex.EncodeToString(result))
+					loggo.Error("%v need %v get %v", variant, hex.EncodeToString(v.output[0:len(result)]), hex.EncodeToString(result))
 					return false
 				}
 			}
@@ -858,7 +858,7 @@ func TestSum(variant string) bool {
 			result := cn.Sum(v.input, v.variant, v.height)
 			for j, _ := range result {
 				if result[j] != v.output[j] {
-					loggo.Error("need %v get %v", hex.EncodeToString(v.output[0:len(result)]), hex.EncodeToString(result))
+					loggo.Error("%v need %v get %v", variant, hex.EncodeToString(v.output[0:len(result)]), hex.EncodeToString(result))
 					return false
 				}
 			}
