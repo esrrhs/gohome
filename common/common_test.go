@@ -271,6 +271,10 @@ func Test00016(t *testing.T) {
 
 func Test00017(t *testing.T) {
 	fmt.Println(ResolveDomainToIP("www.baidu.com"))
+	fmt.Println(ResolveDomainToIP("www.google.com"))
+	fmt.Println(ResolveDomainToIP("www.qq.com"))
+	fmt.Println(ResolveDomainToIP("www.taobao.com"))
+	fmt.Println(ResolveDomainToIP("www.bing.com"))
 }
 
 func Test00018(t *testing.T) {

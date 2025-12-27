@@ -1,6 +1,7 @@
 package common
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -57,6 +58,23 @@ func IsPrivateIP(ipStr string) bool {
 	return false
 }
 
+// 定义全局 client，只初始化一次
+var dohClient *http.Client
+
+func init() {
+	dohClient = &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
+			DisableKeepAlives: false, // 关键：开启连接复用
+			MaxIdleConns:      100,   // 连接池大小
+			IdleConnTimeout:   90 * time.Second,
+		},
+		Timeout: 5 * time.Second,
+	}
+}
+
 // ResolveDomainToIP 接收域名或IP，返回解析结果或原始IP
 func ResolveDomainToIP(domain string) (string, error) {
 	domain = strings.TrimSpace(domain)
@@ -69,22 +87,17 @@ func ResolveDomainToIP(domain string) (string, error) {
 	// 构造请求URL dns.alidns.com
 	dohURL := "https://223.5.5.5/resolve?name=" + url.QueryEscape(domain) + "&type=1&short=true"
 
-	// 创建一个跳过 TLS 验证的 HTTP 客户端
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-			},
-		},
-		Timeout: 5 * time.Second,
+	req, err := http.NewRequestWithContext(context.Background(), "GET", dohURL, nil)
+	if err != nil {
+		return "", err
 	}
 
-	// 发起 GET 请求
-	resp, err := client.Get(dohURL)
+	// 2. 使用全局 client
+	resp, err := dohClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("HTTP request failed: %w", err)
+		return "", fmt.Errorf("DoH request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() // 必须读取完 Body 并 Close 才能复用连接
 
 	// 解析 JSON 响应
 	var result []string
