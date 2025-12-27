@@ -2,12 +2,9 @@ package thread
 
 import (
 	"errors"
-	"fmt"
-	"github.com/esrrhs/gohome/common"
-	"github.com/esrrhs/gohome/loggo"
 	"sync"
-	"sync/atomic"
-	"time"
+
+	"github.com/esrrhs/gohome/common"
 )
 
 /*
@@ -26,15 +23,13 @@ Group 实现了一个 Goroutine 管理工具，用于组织和控制 Goroutine �
 
 type Group struct {
 	father   *Group
-	son      map[*Group]int
-	wg       int32
+	son      sync.Map
+	wg       sync.WaitGroup
 	errOnce  sync.Once
 	err      error
 	isexit   bool
 	exitfunc func()
 	donech   chan int
-	sonname  map[string]int
-	lock     sync.Mutex
 	name     string
 }
 
@@ -43,11 +38,7 @@ func NewGroup(name string, father *Group, exitfunc func()) *Group {
 		father:   father,
 		exitfunc: exitfunc,
 	}
-	g.lock.Lock()
-	defer g.lock.Unlock()
 	g.donech = make(chan int)
-	g.sonname = make(map[string]int)
-	g.son = make(map[*Group]int)
 	g.name = name
 
 	if father != nil {
@@ -58,29 +49,22 @@ func NewGroup(name string, father *Group, exitfunc func()) *Group {
 }
 
 func (g *Group) addson(son *Group) {
-	g.lock.Lock()
-	defer g.lock.Unlock()
-	g.son[son]++
+	g.son.Store(son, 1)
 }
 
 func (g *Group) removeson(son *Group) {
-	g.lock.Lock()
-	defer g.lock.Unlock()
-	if g.son[son] == 0 {
-		//loggo.Debug("removeson fail no son %s %s", g.name, son.name)
-	}
-	delete(g.son, son)
+	g.son.Delete(son)
 }
 
 func (g *Group) add() {
-	atomic.AddInt32(&g.wg, 1)
+	g.wg.Add(1)
 	if g.father != nil {
 		g.father.add()
 	}
 }
 
 func (g *Group) done() {
-	atomic.AddInt32(&g.wg, -1)
+	g.wg.Done()
 	if g.father != nil {
 		g.father.done()
 	}
@@ -103,27 +87,12 @@ func (g *Group) exit(err error) {
 			g.exitfunc()
 		}
 
-		for son, _ := range g.son {
+		g.son.Range(func(soni, _ interface{}) bool {
+			son := soni.(*Group)
 			son.exit(err)
-		}
+			return true
+		})
 	})
-}
-
-func (g *Group) runningmap() string {
-	g.lock.Lock()
-	defer g.lock.Unlock()
-	ret := ""
-	tmp := make(map[string]int)
-	for k, v := range g.sonname {
-		if v > 0 {
-			tmp[k] = v
-		}
-	}
-	ret += fmt.Sprintf("%v", tmp) + "\n"
-	for son, _ := range g.son {
-		ret += son.runningmap()
-	}
-	return ret
 }
 
 func (g *Group) Done() <-chan int {
@@ -131,13 +100,10 @@ func (g *Group) Done() <-chan int {
 }
 
 func (g *Group) Go(name string, f func() error) {
-	g.lock.Lock()
-	defer g.lock.Unlock()
 	if g.isexit {
 		return
 	}
 	g.add()
-	g.sonname[name]++
 
 	go func() {
 		defer common.CrashLog()
@@ -146,10 +112,6 @@ func (g *Group) Go(name string, f func() error) {
 		if err := f(); err != nil {
 			g.exit(err)
 		}
-
-		g.lock.Lock()
-		defer g.lock.Unlock()
-		g.sonname[name]--
 	}()
 }
 
@@ -158,28 +120,28 @@ func (g *Group) Stop() {
 }
 
 func (g *Group) Wait() error {
-	last := int64(0)
-	begin := int64(0)
-	for g.wg != 0 {
-		if g.isexit {
-			cur := time.Now().Unix()
-			if last == 0 {
-				last = cur
-				begin = cur
-			} else {
-				if cur-last > 30 {
-					last = cur
-					loggo.Error("Group Wait too long %s %d %s %v", g.name, g.wg,
-						time.Duration((cur-begin)*int64(time.Second)).String(), g.runningmap())
-				}
-			}
-		} else if g.father != nil {
-			if g.father.IsExit() {
-				g.exit(errors.New("father exit"))
-			}
-		}
-		time.Sleep(time.Millisecond * 100)
+	// 创建一个无缓冲通道，用于接收“任务全部完成”的信号
+	c := make(chan struct{})
+
+	// 启动一个临时的轻量级 goroutine 来守候 wg
+	go func() {
+		g.wg.Wait()
+		close(c) // 任务完成后关闭通道
+	}()
+
+	select {
+	case <-c:
+		// 分支1: 所有任务正常完成 (wg 归零)
+		// 此时不需要做额外操作，直接往下走
+	case <-g.donech:
+		// 分支2: 接收到退出信号
+		// 这里包含两种情况：
+		// 1. 自己调用了 Stop() -> g.donech 被关闭
+		// 2. Father 退出了 -> Father 调用 g.exit() -> g.donech 被关闭
+		// 此时不需要死等子任务结束，直接返回
 	}
+
+	// 清理父子关系
 	if g.father != nil {
 		g.father.removeson(g)
 	}
