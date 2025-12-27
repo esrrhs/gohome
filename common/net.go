@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -97,4 +98,10 @@ func ResolveDomainToIP(domain string) (string, error) {
 	}
 
 	return "", fmt.Errorf("no valid A record found for domain: %s", domain)
+}
+
+// IsValidIP 判断输入字符串是否为合法IP地址
+func IsValidIP(input string) bool {
+	addr, err := netip.ParseAddr(strings.TrimSpace(input))
+	return err == nil && addr.IsValid()
 }
