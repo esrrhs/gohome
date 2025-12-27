@@ -220,3 +220,57 @@ func Test008(t *testing.T) {
 	g.Wait()
 
 }
+
+func Test0009(t *testing.T) {
+	g := NewGroup("", nil, nil)
+	gg1 := NewGroup("gg1", g, nil)
+	gg2 := NewGroup("gg2", g, nil)
+	g.Go("", func() error {
+		for {
+			select {
+			case <-g.Done():
+				return nil
+			case <-time.After(time.Second):
+				fmt.Println("tick father")
+			}
+		}
+		return nil
+	})
+	g.Go("", func() error {
+		time.Sleep(time.Second * 30)
+		return errors.New("done father")
+	})
+	gg1.Go("", func() error {
+		for {
+			select {
+			case <-gg1.Done():
+				return nil
+			case <-time.After(time.Second):
+				fmt.Println("tick1")
+			}
+		}
+		return nil
+	})
+	gg1.Go("", func() error {
+		time.Sleep(time.Second * 5)
+		return errors.New("done1")
+	})
+	gg2.Go("", func() error {
+		for {
+			select {
+			case <-gg2.Done():
+				return nil
+			case <-time.After(time.Second):
+				fmt.Println("tick2")
+			}
+		}
+		return nil
+	})
+	gg2.Go("", func() error {
+		time.Sleep(time.Second * 20)
+		return errors.New("done2")
+	})
+	fmt.Println(gg1.Wait())
+	fmt.Println(gg2.Wait())
+	fmt.Println(g.Wait())
+}
