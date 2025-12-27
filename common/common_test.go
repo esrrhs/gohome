@@ -270,7 +270,7 @@ func Test00016(t *testing.T) {
 }
 
 func Test00017(t *testing.T) {
-	fmt.Println(ResolveDomainToIP("github.com"))
+	fmt.Println(ResolveDomainToIP("www.baidu.com"))
 }
 
 func Test00018(t *testing.T) {
