@@ -62,12 +62,12 @@ func ResolveDomainToIP(domain string) (string, error) {
 	domain = strings.TrimSpace(domain)
 
 	// 如果是合法IP地址，直接返回
-	if net.ParseIP(domain) != nil {
+	if IsValidIP(domain) {
 		return domain, nil
 	}
 
-	// 构造请求URL
-	dohURL := "https://dns.alidns.com/resolve?name=" + url.QueryEscape(domain) + "&type=1&short=true"
+	// 构造请求URL dns.alidns.com
+	dohURL := "https://223.5.5.5/resolve?name=" + url.QueryEscape(domain) + "&type=1&short=true"
 
 	// 创建一个跳过 TLS 验证的 HTTP 客户端
 	client := &http.Client{
