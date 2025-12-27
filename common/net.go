@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 func GetOutboundIP() (net.IP, error) {
@@ -117,4 +119,39 @@ func ResolveDomainToIP(domain string) (string, error) {
 func IsValidIP(input string) bool {
 	addr, err := netip.ParseAddr(strings.TrimSpace(input))
 	return err == nil && addr.IsValid()
+}
+
+// GetRootDomain 提取 eTLD+1 (例如: sub.baidu.com -> baidu.com)
+func GetRootDomain(host string) (string, error) {
+	// 1. 如果包含端口，先去除端口
+	// 注意：net.SplitHostPort 强制要求输入包含冒号，如果没有冒号会报错，所以要判断
+	if strings.Contains(host, ":") {
+		h, _, err := net.SplitHostPort(host)
+		if err == nil {
+			host = h
+		}
+	}
+
+	// 2. 特殊处理 IP 地址 (如果是 IP，publicsuffix 会报错或返回空，视具体逻辑而定)
+	// 如果业务只要域名，可以忽略这一步；如果想保留 IP 原样返回，加上这个判断
+	if net.ParseIP(host) != nil {
+		return host, nil
+	}
+
+	// 3. 【关键】处理 localhost 或无点的主机名
+	// 如果没有 "."，说明它没有后缀，直接返回它自己
+	if !strings.Contains(host, ".") {
+		return host, nil
+	}
+
+	// 4. 使用 eTLD+1 算法提取
+	// EffectiveTLDPlusOne 会自动处理 .co.uk, .com 等逻辑
+	// 例如: "www.baidu.com" -> "baidu.com", nil
+	//      "google.co.uk"  -> "google.co.uk", nil
+	root, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err != nil {
+		return "", err
+	}
+
+	return root, nil
 }

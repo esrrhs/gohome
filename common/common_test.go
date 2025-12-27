@@ -282,3 +282,11 @@ func Test00018(t *testing.T) {
 	fmt.Println(IsBigEndian())
 	fmt.Println(IsBigEndian())
 }
+
+func Test00019(t *testing.T) {
+	fmt.Println(GetRootDomain("www.baidu.com"))
+	fmt.Println(GetRootDomain("sub.domain.example.co.uk"))
+	fmt.Println(GetRootDomain("example.com"))
+	fmt.Println(GetRootDomain("localhost"))
+	fmt.Println(GetRootDomain("a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z.com"))
+}
