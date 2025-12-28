@@ -3,12 +3,15 @@ package network
 import (
 	"context"
 	"errors"
-	"github.com/esrrhs/gohome/common"
-	"github.com/esrrhs/gohome/thread"
-	"google.golang.org/protobuf/proto"
 	"net"
+	"runtime"
 	"sync"
 	"time"
+
+	"github.com/esrrhs/gohome/common"
+	"github.com/esrrhs/gohome/thread"
+	"golang.org/x/net/ipv4"
+	"google.golang.org/protobuf/proto"
 )
 
 /*
@@ -29,6 +32,7 @@ type RudpConfig struct {
 	CloseWaitTimeoutMs int
 	AcceptChanLen      int
 	Congestion         string
+	BatchSendPkgs      int
 }
 
 func DefaultRudpConfig() *RudpConfig {
@@ -46,6 +50,7 @@ func DefaultRudpConfig() *RudpConfig {
 		CloseWaitTimeoutMs: 5000,
 		AcceptChanLen:      128,
 		Congestion:         "bb",
+		BatchSendPkgs:      64,
 	}
 }
 
@@ -595,6 +600,11 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 
 	reason := ""
 
+	pconn := ipv4.NewPacketConn(conn)
+	// 预分配消息数组，避免循环内分配
+	msgs := make([]ipv4.Message, 0, c.config.BatchSendPkgs)
+	count := 0
+
 	for !wg.IsExit() {
 
 		avctive := fm.Update()
@@ -608,13 +618,42 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 				//loggo.Error("MarshalFrame fail %s", err)
 				return err
 			}
-			conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
-			if dstaddr != nil {
-				conn.WriteToUDP(mb, dstaddr)
-				//loggo.Debug("%s send frame to %s %d", c.Info(), dstaddr, f.Id)
+
+			if runtime.GOOS != "linux" {
+				conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
+				if dstaddr != nil {
+					conn.WriteToUDP(mb, dstaddr)
+					//loggo.Debug("%s send frame to %s %d", c.Info(), dstaddr, f.Id)
+				} else {
+					conn.Write(mb)
+					//loggo.Debug("%s send frame %d", c.Info(), f.Id)
+				}
 			} else {
-				conn.Write(mb)
-				//loggo.Debug("%s send frame %d", c.Info(), f.Id)
+				// 构造批量消息
+				msg := ipv4.Message{
+					Buffers: [][]byte{mb}, // 这里直接引用 mb，没有拷贝
+				}
+				if dstaddr != nil {
+					msg.Addr = dstaddr
+				}
+				msgs = append(msgs, msg)
+				count++
+
+				// 如果积攒够了一批，或者列表到头了，就发送
+				if count >= c.config.BatchSendPkgs || e.Next() == nil {
+					conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
+
+					// WriteBatch 会调用底层的 sendmmsg
+					_, err := pconn.WriteBatch(msgs, 0)
+					if err != nil {
+						// 处理错误
+						return err
+					}
+
+					// 重置 slice 长度以便复用 (保留容量)
+					msgs = msgs[:0]
+					count = 0
+				}
 			}
 		}
 
