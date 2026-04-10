@@ -103,7 +103,9 @@ func TestSock5HandshakeByBadVersion(t *testing.T) {
 	}()
 
 	// Send wrong SOCKS version
-	client.Write([]byte{0x04, 1, socks5AuthNone})
+	if _, err := client.Write([]byte{0x04, 1, socks5AuthNone}); err != nil {
+		t.Fatalf("client write failed: %v", err)
+	}
 
 	err := <-errCh
 	if err == nil {
@@ -243,7 +245,9 @@ func TestSock5GetRequestBadVersion(t *testing.T) {
 
 	// Wrong version
 	req := []byte{0x04, socks5Connect, 0x00, Socks5AtypIP4, 127, 0, 0, 1, 0x00, 0x50}
-	client.Write(req)
+	if _, err := client.Write(req); err != nil {
+		t.Fatalf("client write failed: %v", err)
+	}
 
 	res := <-resCh
 	if res.err == nil {
@@ -270,7 +274,9 @@ func TestSock5GetRequestBadCmd(t *testing.T) {
 
 	// Unsupported command (BIND=2)
 	req := []byte{socksVer5, 0x02, 0x00, Socks5AtypIP4, 127, 0, 0, 1, 0x00, 0x50}
-	client.Write(req)
+	if _, err := client.Write(req); err != nil {
+		t.Fatalf("client write failed: %v", err)
+	}
 
 	res := <-resCh
 	if res.err == nil {
