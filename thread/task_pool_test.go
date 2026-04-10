@@ -2,6 +2,7 @@ package thread
 
 import (
 	"testing"
+	"time"
 )
 
 func TestTask(t *testing.T) {
@@ -21,30 +22,33 @@ func TestTask(t *testing.T) {
 }
 
 func TestTaskPool_Stats(t *testing.T) {
-tp := NewTaskPool(2, 10)
+	tp := NewTaskPool(2, 10)
 
-// Add some tasks and wait for them to complete
-for i := 0; i < 5; i++ {
-tp.AddTask(func() {})
-}
+	// Add some tasks and wait for them to complete
+	for i := 0; i < 5; i++ {
+		tp.AddTask(func() {})
+	}
 
-done := tp.DoneNum()
-t.Logf("DoneNum: %d", done)
-if done < 5 {
-t.Errorf("expected DoneNum >= 5, got %d", done)
-}
+	// doneNum is incremented after task.done <- true, so give worker a moment
+	time.Sleep(10 * time.Millisecond)
 
-tp.ResetDoneNum()
-if tp.DoneNum() != 0 {
-t.Errorf("expected DoneNum 0 after reset, got %d", tp.DoneNum())
-}
+	done := tp.DoneNum()
+	t.Logf("DoneNum: %d", done)
+	if done < 5 {
+		t.Errorf("expected DoneNum >= 5, got %d", done)
+	}
 
-taskNum := tp.TaskNum()
-t.Logf("TaskNum: %d", taskNum)
+	tp.ResetDoneNum()
+	if tp.DoneNum() != 0 {
+		t.Errorf("expected DoneNum 0 after reset, got %d", tp.DoneNum())
+	}
 
-sleepNum := tp.SleepNum()
-t.Logf("SleepNum: %d", sleepNum)
+	taskNum := tp.TaskNum()
+	t.Logf("TaskNum: %d", taskNum)
 
-tp.ResetSleepNum()
-t.Logf("SleepNum after reset: %d", tp.SleepNum())
+	sleepNum := tp.SleepNum()
+	t.Logf("SleepNum: %d", sleepNum)
+
+	tp.ResetSleepNum()
+	t.Logf("SleepNum after reset: %d", tp.SleepNum())
 }
