@@ -68,3 +68,22 @@ func TestRList1(t *testing.T) {
 	}
 	fmt.Println("loop end")
 }
+
+func TestRList_SizeCapacity(t *testing.T) {
+rob := NewRList(5)
+if rob.Capacity() != 5 {
+t.Errorf("expected Capacity 5, got %d", rob.Capacity())
+}
+if rob.Size() != 0 {
+t.Errorf("expected Size 0 on empty list, got %d", rob.Size())
+}
+rob.PushBack(1)
+rob.PushBack(2)
+if rob.Size() != 2 {
+t.Errorf("expected Size 2 after two pushes, got %d", rob.Size())
+}
+rob.PopFront()
+if rob.Size() != 1 {
+t.Errorf("expected Size 1 after PopFront, got %d", rob.Size())
+}
+}

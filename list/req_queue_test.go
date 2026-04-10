@@ -34,3 +34,28 @@ func TestReqQueue(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestReqQueue_Stats(t *testing.T) {
+get := func(key string) (string, error) {
+return "result-" + key, nil
+}
+q := NewReqQueue(get)
+
+q.Submit("a")
+q.Submit("b")
+q.Submit("a")
+
+if q.GetNewNum() < 2 {
+t.Errorf("expected GetNewNum >= 2, got %d", q.GetNewNum())
+}
+
+q.ResetNewNum()
+if q.GetNewNum() != 0 {
+t.Errorf("expected GetNewNum 0 after reset, got %d", q.GetNewNum())
+}
+
+q.ResetReuseNum()
+if q.GetReuseNum() != 0 {
+t.Errorf("expected GetReuseNum 0 after reset, got %d", q.GetReuseNum())
+}
+}
