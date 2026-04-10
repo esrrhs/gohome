@@ -1,6 +1,8 @@
 package loggo
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 	"time"
 )
@@ -81,5 +83,30 @@ func TestIsLevel(t *testing.T) {
 				t.Errorf("IsError() = %v, want %v (level=%d)", got, tt.isError, tt.level)
 			}
 		})
+	}
+}
+
+func TestSetPrinter(t *testing.T) {
+	origPrinter := gConfig.printer
+	origNoPrint := gConfig.NoPrint
+	defer func() {
+		gConfig.printer = origPrinter
+		gConfig.NoPrint = origNoPrint
+	}()
+
+	var buf bytes.Buffer
+	SetPrinter(&buf)
+	gConfig.NoPrint = false
+
+	origLevel := gConfig.Level
+	gConfig.Level = LEVEL_DEBUG
+	defer func() { gConfig.Level = origLevel }()
+
+	Debug("printer test message %d", 42)
+
+	output := buf.String()
+	t.Logf("SetPrinter output: %q", output)
+	if !strings.Contains(output, "printer test message 42") {
+		t.Errorf("SetPrinter output %q does not contain expected message", output)
 	}
 }

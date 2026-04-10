@@ -10,3 +10,15 @@
 [DEBUG] [2026-04-10T13:41:34.353494691Z] [req_queue.go:43] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key1 completed, returning result
 [DEBUG] [2026-04-10T13:41:34.353500088Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key2 completed successfully
 [DEBUG] [2026-04-10T13:41:34.353516689Z] [req_queue.go:43] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key2 completed, returning result
+[DEBUG] [2026-04-10T13:44:44.001196072Z] [req_queue.go:48] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Starting new task for key2
+[DEBUG] [2026-04-10T13:44:44.001310564Z] [req_queue.go:48] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Starting new task for key1
+[DEBUG] [2026-04-10T13:44:44.001339498Z] [req_queue.go:41] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key1 is already in progress, waiting...
+[DEBUG] [2026-04-10T13:44:44.001363724Z] [req_queue.go:41] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key2 is already in progress, waiting...
+[DEBUG] [2026-04-10T13:44:44.0013878Z] [req_queue.go:48] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Starting new task for key3
+[DEBUG] [2026-04-10T13:44:44.001415672Z] [req_queue.go:41] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key1 is already in progress, waiting...
+[DEBUG] [2026-04-10T13:44:46.001842963Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key2 completed successfully
+[DEBUG] [2026-04-10T13:44:46.001932187Z] [req_queue.go:43] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key2 completed, returning result
+[DEBUG] [2026-04-10T13:44:46.002005092Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key3 completed successfully
+[DEBUG] [2026-04-10T13:44:46.002111542Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key1 completed successfully
+[DEBUG] [2026-04-10T13:44:46.002172464Z] [req_queue.go:43] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key1 completed, returning result
+[DEBUG] [2026-04-10T13:44:46.002262054Z] [req_queue.go:43] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key1 completed, returning result
