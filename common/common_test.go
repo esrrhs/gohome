@@ -757,3 +757,63 @@ func TestDumpStacks(t *testing.T) {
 	}
 	fmt.Println("DumpStacks contains 'goroutine':", strings.Contains(result, "goroutine"))
 }
+
+func TestCompressDecompressData(t *testing.T) {
+	src := []byte("hello world, this is a test for CompressData and DeCompressData")
+	compressed := CompressData(src)
+	fmt.Println("CompressData original size:", len(src), "compressed size:", len(compressed))
+	if len(compressed) == 0 {
+		t.Errorf("CompressData returned empty result")
+	}
+
+	decompressed, err := DeCompressData(compressed)
+	fmt.Println("DeCompressData error:", err)
+	if err != nil {
+		t.Errorf("DeCompressData returned error: %v", err)
+	}
+	if string(decompressed) != string(src) {
+		t.Errorf("DeCompressData result %q does not match original %q", string(decompressed), string(src))
+	}
+	fmt.Println("DeCompressData result matches original:", string(decompressed) == string(src))
+}
+
+func TestGetMd5String(t *testing.T) {
+	h1 := GetMd5String("hello")
+	h2 := GetMd5String("world")
+	h3 := GetMd5String("hello")
+	fmt.Println("GetMd5String('hello'):", h1)
+	fmt.Println("GetMd5String('world'):", h2)
+	fmt.Println("GetMd5String('hello') again:", h3)
+	if h1 == "" {
+		t.Errorf("GetMd5String returned empty string")
+	}
+	if h1 == h2 {
+		t.Errorf("GetMd5String('hello') == GetMd5String('world'), expected different hashes")
+	}
+	if h1 != h3 {
+		t.Errorf("GetMd5String('hello') returned different values: %s vs %s", h1, h3)
+	}
+}
+
+func TestGetCrc32(t *testing.T) {
+	h1 := GetCrc32([]byte("hello"))
+	h2 := GetCrc32([]byte("world"))
+	h3 := GetCrc32([]byte("hello"))
+	fmt.Println("GetCrc32('hello'):", h1)
+	fmt.Println("GetCrc32('world'):", h2)
+	fmt.Println("GetCrc32('hello') again:", h3)
+	if h1 == "" {
+		t.Errorf("GetCrc32 returned empty string")
+	}
+	if h1 == h2 {
+		t.Errorf("GetCrc32('hello') == GetCrc32('world'), expected different hashes")
+	}
+	if h1 != h3 {
+		t.Errorf("GetCrc32('hello') returned different values: %s vs %s", h1, h3)
+	}
+	empty := GetCrc32([]byte(""))
+	fmt.Println("GetCrc32(''):", empty)
+	if empty == "" {
+		t.Errorf("GetCrc32('') returned empty string")
+	}
+}
