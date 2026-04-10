@@ -1,0 +1,10 @@
+[INFO] [2026-04-10T13:41:21.964541797Z] [loggo_test.go:16] [github.com/esrrhs/gohome/loggo.Test0001] test 0
+[INFO] [2026-04-10T13:41:22.96480424Z] [loggo_test.go:16] [github.com/esrrhs/gohome/loggo.Test0001] test 1
+[INFO] [2026-04-10T13:41:23.96507788Z] [loggo_test.go:16] [github.com/esrrhs/gohome/loggo.Test0001] test 2
+[INFO] [2026-04-10T13:41:24.965291485Z] [loggo_test.go:16] [github.com/esrrhs/gohome/loggo.Test0001] test 3
+[INFO] [2026-04-10T13:41:25.9654823Z] [loggo_test.go:16] [github.com/esrrhs/gohome/loggo.Test0001] test 4
+[INFO] [2026-04-10T13:41:26.965709488Z] [loggo_test.go:16] [github.com/esrrhs/gohome/loggo.Test0001] test 5
+[INFO] [2026-04-10T13:41:27.965932902Z] [loggo_test.go:16] [github.com/esrrhs/gohome/loggo.Test0001] test 6
+[INFO] [2026-04-10T13:41:28.96615958Z] [loggo_test.go:16] [github.com/esrrhs/gohome/loggo.Test0001] test 7
+[INFO] [2026-04-10T13:41:29.966388867Z] [loggo_test.go:16] [github.com/esrrhs/gohome/loggo.Test0001] test 8
+[INFO] [2026-04-10T13:41:30.966594279Z] [loggo_test.go:16] [github.com/esrrhs/gohome/loggo.Test0001] test 9

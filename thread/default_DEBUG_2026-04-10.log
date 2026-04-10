@@ -1,0 +1,20 @@
+[DEBUG] [2026-04-10T13:42:42.67983606Z] [task_pool.go:72] [github.com/esrrhs/gohome/thread.(*TaskPool).worker] Worker 1 got task 1
+[DEBUG] [2026-04-10T13:42:42.679836009Z] [task_pool.go:109] [github.com/esrrhs/gohome/thread.(*TaskPool).AddTask] Task 1 added to the pool
+[DEBUG] [2026-04-10T13:42:42.680065861Z] [task_pool.go:84] [github.com/esrrhs/gohome/thread.(*TaskPool).worker] Worker 1 executing task 1
+[DEBUG] [2026-04-10T13:42:42.680148831Z] [task_pool.go:109] [github.com/esrrhs/gohome/thread.(*TaskPool).AddTask] Task 2 added to the pool
+[DEBUG] [2026-04-10T13:42:42.680181665Z] [task_pool.go:88] [github.com/esrrhs/gohome/thread.(*TaskPool).worker] Task 1 done
+
+[DEBUG] [2026-04-10T13:42:42.68019486Z] [task_pool.go:72] [github.com/esrrhs/gohome/thread.(*TaskPool).worker] Worker 2 got task 2
+[DEBUG] [2026-04-10T13:42:42.680242492Z] [task_pool.go:84] [github.com/esrrhs/gohome/thread.(*TaskPool).worker] Worker 2 executing task 2
+[DEBUG] [2026-04-10T13:42:42.680282122Z] [task_pool.go:88] [github.com/esrrhs/gohome/thread.(*TaskPool).worker] Task 2 done
+
+[DEBUG] [2026-04-10T13:42:42.6803073Z] [task_pool.go:109] [github.com/esrrhs/gohome/thread.(*TaskPool).AddTask] Task 3 added to the pool
+[DEBUG] [2026-04-10T13:42:42.680311035Z] [task_pool.go:72] [github.com/esrrhs/gohome/thread.(*TaskPool).worker] Worker 1 got task 3
+[DEBUG] [2026-04-10T13:42:42.680380505Z] [task_pool.go:84] [github.com/esrrhs/gohome/thread.(*TaskPool).worker] Worker 1 executing task 3
+[DEBUG] [2026-04-10T13:42:42.680414586Z] [task_pool.go:88] [github.com/esrrhs/gohome/thread.(*TaskPool).worker] Task 3 done
+
+[DEBUG] [2026-04-10T13:42:42.680446934Z] [task_pool.go:109] [github.com/esrrhs/gohome/thread.(*TaskPool).AddTask] Task 4 added to the pool
+[DEBUG] [2026-04-10T13:42:42.680470325Z] [task_pool.go:72] [github.com/esrrhs/gohome/thread.(*TaskPool).worker] Worker 1 got task 4
+[DEBUG] [2026-04-10T13:42:42.680503295Z] [task_pool.go:84] [github.com/esrrhs/gohome/thread.(*TaskPool).worker] Worker 1 executing task 4
+[DEBUG] [2026-04-10T13:42:42.680527171Z] [task_pool.go:88] [github.com/esrrhs/gohome/thread.(*TaskPool).worker] Task 4 done
+
