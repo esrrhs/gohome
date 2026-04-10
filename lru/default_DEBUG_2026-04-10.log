@@ -1,0 +1,12 @@
+[DEBUG] [2026-04-10T11:51:18.702427114Z] [req_queue.go:48] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Starting new task for key2
+[DEBUG] [2026-04-10T11:51:18.702552133Z] [req_queue.go:48] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Starting new task for key1
+[DEBUG] [2026-04-10T11:51:18.702558723Z] [req_queue.go:48] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Starting new task for key3
+[DEBUG] [2026-04-10T11:51:18.702564542Z] [req_queue.go:41] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key1 is already in progress, waiting...
+[DEBUG] [2026-04-10T11:51:18.70260303Z] [req_queue.go:41] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key2 is already in progress, waiting...
+[DEBUG] [2026-04-10T11:51:18.702632264Z] [req_queue.go:41] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key1 is already in progress, waiting...
+[DEBUG] [2026-04-10T11:51:20.70299674Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key2 completed successfully
+[DEBUG] [2026-04-10T11:51:20.703034618Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key3 completed successfully
+[DEBUG] [2026-04-10T11:51:20.703056641Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key1 completed successfully
+[DEBUG] [2026-04-10T11:51:20.703079576Z] [req_queue.go:43] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key1 completed, returning result
+[DEBUG] [2026-04-10T11:51:20.703085294Z] [req_queue.go:43] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key2 completed, returning result
+[DEBUG] [2026-04-10T11:51:20.703105685Z] [req_queue.go:43] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task key1 completed, returning result
