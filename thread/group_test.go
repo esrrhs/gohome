@@ -274,3 +274,18 @@ func Test0009(t *testing.T) {
 	fmt.Println(gg2.Wait())
 	fmt.Println(g.Wait())
 }
+
+func TestGroupError(t *testing.T) {
+	g := NewGroup("", nil, nil)
+	// Initially no error
+	if g.Error() != nil {
+		t.Errorf("expected nil error on new group, got %v", g.Error())
+	}
+	// After stop, error should be set
+	g.Stop()
+	g.Wait()
+	if g.Error() == nil {
+		t.Error("expected non-nil error after Stop")
+	}
+	fmt.Println("Group error after Stop:", g.Error())
+}
