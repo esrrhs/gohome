@@ -817,3 +817,111 @@ func TestGetCrc32(t *testing.T) {
 		t.Errorf("GetCrc32('') returned empty string")
 	}
 }
+
+func TestFile_Copy(t *testing.T) {
+src, err := os.CreateTemp("", "copy_src_*.txt")
+if err != nil {
+t.Fatal(err)
+}
+defer os.Remove(src.Name())
+src.WriteString("hello copy")
+src.Close()
+
+dst := src.Name() + ".dst"
+defer os.Remove(dst)
+
+err = Copy(src.Name(), dst)
+if err != nil {
+t.Errorf("Copy returned error: %v", err)
+}
+if !FileExists(dst) {
+t.Error("destination file does not exist after Copy")
+}
+}
+
+func TestFile_FileReplace(t *testing.T) {
+f, err := os.CreateTemp("", "replace_*.txt")
+if err != nil {
+t.Fatal(err)
+}
+defer os.Remove(f.Name())
+f.WriteString("hello world foo bar foo")
+f.Close()
+
+err = FileReplace(f.Name(), "foo", "baz")
+if err != nil {
+t.Errorf("FileReplace returned error: %v", err)
+}
+count := FileFind(f.Name(), "baz")
+fmt.Println("FileFind baz count:", count)
+if count != 1 {
+t.Errorf("expected 1 line with 'baz', got %d", count)
+}
+}
+
+func TestFile_FileFind(t *testing.T) {
+f, err := os.CreateTemp("", "find_*.txt")
+if err != nil {
+t.Fatal(err)
+}
+defer os.Remove(f.Name())
+f.WriteString("apple\nbanana\napricot\norange\n")
+f.Close()
+
+n := FileFind(f.Name(), "ap")
+fmt.Println("FileFind 'ap' count:", n)
+if n != 2 {
+t.Errorf("expected 2 lines matching 'ap', got %d", n)
+}
+n2 := FileFind(f.Name(), "mango")
+if n2 != 0 {
+t.Errorf("expected 0 lines matching 'mango', got %d", n2)
+}
+}
+
+func TestFile_IsSymlink(t *testing.T) {
+f, err := os.CreateTemp("", "symlink_target_*.txt")
+if err != nil {
+t.Fatal(err)
+}
+defer os.Remove(f.Name())
+f.Close()
+
+linkName := f.Name() + ".link"
+defer os.Remove(linkName)
+
+err = os.Symlink(f.Name(), linkName)
+if err != nil {
+t.Skip("cannot create symlink:", err)
+}
+
+if !IsSymlink(linkName) {
+t.Error("expected IsSymlink true for symlink")
+}
+if IsSymlink(f.Name()) {
+t.Error("expected IsSymlink false for regular file")
+}
+if IsSymlink("/nonexistent/path") {
+t.Error("expected IsSymlink false for nonexistent path")
+}
+}
+
+func TestFile_FileLineCount(t *testing.T) {
+f, err := os.CreateTemp("", "linecount_*.txt")
+if err != nil {
+t.Fatal(err)
+}
+defer os.Remove(f.Name())
+f.WriteString("line1\nline2\nline3\n")
+f.Close()
+
+n := FileLineCount(f.Name())
+fmt.Println("FileLineCount:", n)
+if n != 4 {
+t.Errorf("expected FileLineCount 4, got %d", n)
+}
+n2 := FileLineCount("/nonexistent/file.txt")
+if n2 != 0 {
+t.Errorf("expected FileLineCount 0 for nonexistent file, got %d", n2)
+}
+}
