@@ -38,3 +38,19 @@
 [DEBUG] [2026-04-10T11:58:41.067215252Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task 5 completed successfully
 [DEBUG] [2026-04-10T11:58:41.067296665Z] [req_queue.go:48] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Starting new task for x
 [DEBUG] [2026-04-10T11:58:41.067337146Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task x completed successfully
+[DEBUG] [2026-04-10T12:04:00.209378265Z] [req_queue.go:48] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Starting new task for k1
+[DEBUG] [2026-04-10T12:04:00.209476073Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task k1 completed successfully
+[DEBUG] [2026-04-10T12:04:00.209506469Z] [req_queue.go:48] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Starting new task for k2
+[DEBUG] [2026-04-10T12:04:00.209538066Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task k2 completed successfully
+[DEBUG] [2026-04-10T12:04:00.209618137Z] [req_queue.go:48] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Starting new task for 1
+[DEBUG] [2026-04-10T12:04:00.209642855Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task 1 completed successfully
+[DEBUG] [2026-04-10T12:04:00.209675003Z] [req_queue.go:48] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Starting new task for 2
+[DEBUG] [2026-04-10T12:04:00.209690737Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task 2 completed successfully
+[DEBUG] [2026-04-10T12:04:00.209713982Z] [req_queue.go:48] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Starting new task for 3
+[DEBUG] [2026-04-10T12:04:00.209733812Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task 3 completed successfully
+[DEBUG] [2026-04-10T12:04:00.209749566Z] [req_queue.go:48] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Starting new task for 4
+[DEBUG] [2026-04-10T12:04:00.209764368Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task 4 completed successfully
+[DEBUG] [2026-04-10T12:04:00.209779611Z] [req_queue.go:48] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Starting new task for 5
+[DEBUG] [2026-04-10T12:04:00.209802256Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task 5 completed successfully
+[DEBUG] [2026-04-10T12:04:00.209860844Z] [req_queue.go:48] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Starting new task for x
+[DEBUG] [2026-04-10T12:04:00.20988471Z] [req_queue.go:54] [github.com/esrrhs/gohome/list.(*ReqQueue[...]).Submit] Task x completed successfully
