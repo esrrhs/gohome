@@ -1,9 +1,0 @@
-[INFO] [2026-04-10T13:41:34.498289082Z] [shell_test.go:9] [github.com/esrrhs/gohome/platform.TestShell0001] start 1
-[INFO] [2026-04-10T13:41:34.498485668Z] [shell.go:148] [github.com/esrrhs/gohome/platform.ShellRunExeTimeout] shell Run start sleep [5] 
-[WARN] [2026-04-10T13:41:36.500002803Z] [shell.go:156] [github.com/esrrhs/gohome/platform.ShellRunExeTimeout] shell Run fail [sleep 5]  signal: killed
-[INFO] [2026-04-10T13:41:36.500203085Z] [shell_test.go:11] [github.com/esrrhs/gohome/platform.TestShell0001] end 1
-[INFO] [2026-04-10T13:41:36.500281082Z] [shell_test.go:15] [github.com/esrrhs/gohome/platform.TestShell0002] start 2
-[INFO] [2026-04-10T13:41:36.500317627Z] [shell.go:117] [github.com/esrrhs/gohome/platform.ShellRunExe] shell Run start sleep [2] 
-[INFO] [2026-04-10T13:41:38.50215502Z] [shell.go:130] [github.com/esrrhs/gohome/platform.ShellRunExe] shell Run ok [sleep 2] 2.001793757s
-[INFO] [2026-04-10T13:41:38.502259998Z] [shell.go:131] [github.com/esrrhs/gohome/platform.ShellRunExe] 
-[INFO] [2026-04-10T13:41:38.502285166Z] [shell_test.go:17] [github.com/esrrhs/gohome/platform.TestShell0002] end 2
