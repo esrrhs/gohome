@@ -2,6 +2,7 @@ package loggo
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -109,4 +110,101 @@ func TestSetPrinter(t *testing.T) {
 	if !strings.Contains(output, "printer test message 42") {
 		t.Errorf("SetPrinter output %q does not contain expected message", output)
 	}
+}
+
+func TestWarnAndError(t *testing.T) {
+origConfig := gConfig
+defer func() { gConfig = origConfig }()
+
+var buf bytes.Buffer
+SetPrinter(&buf)
+gConfig.Level = LEVEL_DEBUG
+gConfig.NoPrint = false
+gConfig.NoLogFile = true
+
+Warn("warn message %d", 1)
+warnOut := buf.String()
+buf.Reset()
+fmt.Println("Warn output:", warnOut)
+if !strings.Contains(warnOut, "warn message 1") {
+t.Errorf("Warn output %q does not contain expected message", warnOut)
+}
+if !strings.Contains(warnOut, "WARN") {
+t.Errorf("Warn output %q does not contain WARN level", warnOut)
+}
+
+Error("error message %d", 2)
+errOut := buf.String()
+buf.Reset()
+fmt.Println("Error output:", errOut)
+if !strings.Contains(errOut, "error message 2") {
+t.Errorf("Error output %q does not contain expected message", errOut)
+}
+if !strings.Contains(errOut, "ERROR") {
+t.Errorf("Error output %q does not contain ERROR level", errOut)
+}
+}
+
+func TestWarnErrorNotLogged(t *testing.T) {
+origConfig := gConfig
+defer func() { gConfig = origConfig }()
+
+var buf bytes.Buffer
+SetPrinter(&buf)
+gConfig.Level = LEVEL_ERROR
+gConfig.NoPrint = false
+gConfig.NoLogFile = true
+
+// Warn should not be logged when level is ERROR
+Warn("should not appear")
+if buf.Len() != 0 {
+t.Errorf("Warn was logged when level=ERROR: %q", buf.String())
+}
+
+// Error should be logged when level is ERROR
+Error("should appear")
+if !strings.Contains(buf.String(), "should appear") {
+t.Errorf("Error output %q does not contain expected message", buf.String())
+}
+}
+
+func TestLevelName(t *testing.T) {
+tests := []struct {
+level int
+want  string
+}{
+{LEVEL_DEBUG, "DEBUG"},
+{LEVEL_INFO, "INFO"},
+{LEVEL_WARN, "WARN"},
+{LEVEL_ERROR, "ERROR"},
+{-1, "NIL"},
+}
+for _, tt := range tests {
+got := levelName(tt.level)
+if got != tt.want {
+t.Errorf("levelName(%d) = %q, want %q", tt.level, got, tt.want)
+}
+}
+}
+
+func TestGrayscale(t *testing.T) {
+// grayscale is called by color() when r==g==b
+// Test via FgString which calls colorize -> color -> grayscale
+out := FgString("test", 128, 128, 128)
+fmt.Println("grayscale FgString:", out)
+if !strings.Contains(out, "test") {
+t.Errorf("FgString output %q does not contain 'test'", out)
+}
+
+// pure black and white also trigger grayscale
+outBlack := FgString("black", 0, 0, 0)
+outWhite := FgString("white", 255, 255, 255)
+fmt.Println("black:", outBlack)
+fmt.Println("white:", outWhite)
+if !strings.Contains(outBlack, "black") {
+t.Errorf("FgString black output %q does not contain 'black'", outBlack)
+}
+if !strings.Contains(outWhite, "white") {
+t.Errorf("FgString white output %q does not contain 'white'", outWhite)
+}
 }
