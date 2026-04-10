@@ -13,6 +13,6 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
-lru/default_DEBUG_*.log
+*.log
 common/test.json
 common/test.json.back
