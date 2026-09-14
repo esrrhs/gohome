@@ -5,122 +5,124 @@
 [<img src="https://img.shields.io/github/actions/workflow/status/esrrhs/gohome/go.yml?branch=master">](https://github.com/esrrhs/gohome/actions)
 [<img src="https://img.shields.io/badge/go-%3E%3D1.24-blue">](https://golang.org/)
 
-GoHome 是一个功能完备、开箱即用的 Go 语言通用基础设施与核心算法库。提供跨多种可靠与不可靠协议的高性能抽象网络层、拥塞控制、并发协同模型、多级 LRU 缓存、加密算法套件以及丰富的通用工具函数集。
+[中文文档](README_ZH.md)
+
+GoHome is a production-ready, batteries-included general-purpose infrastructure and core algorithm library for Go. It provides a unified abstract networking layer across diverse reliable and unreliable protocols, bandwidth-based adaptive congestion control, structured concurrency and goroutine lifecycle management, low-contention multi-sharded LRU caches, cryptography suites, and a comprehensive collection of daily engineering utilities.
 
 ---
 
-## 目录
+## Table of Contents
 
-- [功能特性](#功能特性)
-- [模块概览](#模块概览)
-  - [network - 网络抽象与协议库](#network---网络抽象与协议库)
-  - [lru - 高并发 LRU 缓存系统](#lru---高并发-lru-缓存系统)
-  - [thread - 并发与协程管理](#thread---并发与协程管理)
-  - [pool - 对象与令牌池](#pool---对象与令牌池)
-  - [list - 数据结构与缓冲队列](#list---数据结构与缓冲队列)
-  - [crypto - 加密套件](#crypto---加密套件)
-  - [loggo - 彩色日志库](#loggo---彩色日志库)
-  - [common - 常用基础设施工具集](#common---常用基础设施工具集)
-  - [platform - 跨平台命令行与脚本执行](#platform---跨平台命令行与脚本执行)
-  - [thirdparty - 第三方集成](#thirdparty---第三方集成)
-- [快速开始](#快速开始)
-  - [安装依赖](#安装依赖)
-  - [网络连接抽象示例](#网络连接抽象示例)
-  - [多层级 LRU 缓存示例](#多层级-lru-缓存示例)
-  - [层级协程管理示例](#层级协程管理示例)
-- [开源协议](#开源协议)
-
----
-
-## 功能特性
-
-- **多协议统一抽象**：通过统一的 `Conn` 接口无缝切换 TCP、UDP、KCP、QUIC、RUDP、RICMP 及 RHTTP。
-- **可靠传输控制**：内置基于滑动窗口与分帧控制的 Reliable Frame Control，以及基于带宽探测的自适应拥塞控制算法（BBCongestion）。
-- **高性能缓存机制**：提供基于泛型的基础 LRU 缓存、多分片低锁竞争的 `LRUMultiCache` 以及带请求合并队列的 `LRUResourceCache`。
-- **结构化并发管理**：具备层级父子关系的协程组管理（`Group`）、多 Worker 任务池（`TaskPool`）与工作线程池（`ThreadPool`）。
-- **专业加密算法**：内置完整适配的 CryptoNight 全系列算法实现及 AES、Blake256、Groestl、JH、RIPEMD160、Skein 等哈希组件。
-- **高复用工具箱**：涵盖 JSON 带备份容灾存取、DNS-over-HTTPS (DoH) 解析、根域名提取、Zlib/Gzip 压缩、RC4 加密及端序检测等。
+- [Features](#features)
+- [Module Overview](#module-overview)
+  - [network - Abstract Network Layer & Protocols](#network---abstract-network-layer--protocols)
+  - [lru - High-Concurrency LRU Cache System](#lru---high-concurrency-lru-cache-system)
+  - [thread - Concurrency & Goroutine Orchestration](#thread---concurrency--goroutine-orchestration)
+  - [pool - Object & Token Pools](#pool---object--token-pools)
+  - [list - Data Structures & Request Queues](#list---data-structures--request-queues)
+  - [crypto - Cryptographic Suite](#crypto---cryptographic-suite)
+  - [loggo - Colorized Logging Library](#loggo---colorized-logging-library)
+  - [common - Core Utilities & Helpers](#common---core-utilities--helpers)
+  - [platform - Cross-Platform Execution & Shell Commands](#platform---cross-platform-execution--shell-commands)
+  - [thirdparty - Third-Party Integrations](#thirdparty---third-party-integrations)
+- [Getting Started](#getting-started)
+  - [Installation](#installation)
+  - [Unified Network Connection Example](#unified-network-connection-example)
+  - [Multi-Sharded LRU Cache Example](#multi-sharded-lru-cache-example)
+  - [Hierarchical Goroutine Management Example](#hierarchical-goroutine-management-example)
+- [License](#license)
 
 ---
 
-## 模块概览
+## Features
 
-### network - 网络抽象与协议库
-- **统一连接接口 (`Conn`)**：标准定义 `Dial`、`Listen`、`Accept` 及 `ReadWriteCloser`，抹平协议差异。
-- **支持传输协议**：
-  - `tcp`：标准 TCP 封装。
-  - `udp`：无连接与会话模拟 UDP 传输。
-  - `kcp`：基于 ARQ 的低延迟可靠传输。
-  - `quic`：基于 QUIC 协议多路复用连接。
-  - `rudp`：自定义轻量级可靠 UDP 实现。
-  - `ricmp`：基于 ICMP 报文构建的隐蔽可靠信道。
-  - `rhttp`：基于 HTTP 协议通道的可靠穿透通信。
-- **帧管理 (`FrameMgr`)**：数据帧序号控制、超时重传、滑动窗口机制与状态探活心跳。
-- **拥塞控制 (`BBCongestion`)**：基于实际带宽与飞行数据量估算并动态调整窗口大小的自适应拥塞算法。
-- **SOCKS5 代理**：轻量级 SOCKS5 客户端及服务端握手与请求转发支持。
-
-### lru - 高并发 LRU 缓存系统
-- **`LRUCache[K, V]`**：基于 Go 泛型和双向链表+哈希表的经典 LRU 缓存，支持全局 TTL 过期淘汰。
-- **`LRUMultiCache[K, V]`**：根据键哈希自动分片至多个独立 LRU 实例，大幅降低多核高并发访问下的锁竞争。
-- **`LRUResourceCache[K, V]`**：集成 `ReqQueue`，当高并发穿透未命中缓存时自动进行并发合并与异步请求复用。
-
-### thread - 并发与协程管理
-- **`Group`**：支持树状父子关系的 Goroutine 管理，具备优雅退出、错误向上冒泡以及 Panic 恢复能力。
-- **`TaskPool`**：适用于 CPU 密集型任务的并发处理池，支持批量任务分发及完成状态同步。
-- **`ThreadPool`**：多通道队列绑定的并发 Worker 线程池，具备状态监控与数据负载统计能力。
-
-### pool - 对象与令牌池
-- **`Pool`**：通用对象池，预分配并复用开销较大的对象，监控占用及空闲数量，降低 GC 压力。
-- **`TokenPool`**：基于 Channel 构建的令牌池与并发限流资源池，支持阻塞申请与归还。
-
-### list - 数据结构与缓冲队列
-- **`RBuffergo`**：高性能并发安全字节循环环形缓冲区（Ring Buffer）。
-- **`ROBuffergo`**：带唯一 ID 索引与标记的环形数据缓冲区。
-- **`Rlistgo`**：固定容量的环形队列。
-- **`ReqQueue`**：同名/同 Key 异步任务请求合并防击穿队列。
-- **`synclist`**：线程安全的双向链表。
-
-### crypto - 加密套件
-- **CryptoNight**：全面支持 CryptoNight 家族算法（包括 cn/0, cn/1, cn/2, cn/r, cn/fast, cn/half, cn/xao, cn/rto, cn/rwz, cn/double, cn-lite 系列, cn-heavy 系列, cn-pico 系列等）。
-- **底层密码学组件**：集成了 AES、Blake256、Groestl、JH、RIPEMD160、SHA-3、Skein 及 Threefish 等底层密码学散列计算。
-
-### loggo - 彩色日志库
-- 支持 `DEBUG`、`INFO`、`WARN`、`ERROR` 多日志级别过滤。
-- 终端 ANSI 真彩色输出与控制。
-- 自动按天切割日志文件并根据保留期限（`MaxDay`）自动清理过期日志。
-- 支持 Crash/Panic 自动捕获与完整堆栈回溯输出。
-
-### common - 常用基础设施工具集
-- **数据压缩**：Zlib / Gzip 快速压缩与解压缩。
-- **算法加解密**：RC4 加解密、通用 UUID 生成、端序判断（Big Endian / Little Endian）。
-- **数学与随机**：类型安全数值计算（`Min`、`Max`、`Abs`、`SafeDivide`）、随机数生成与切片打乱（`Shuffle`）。
-- **哈希函数**：MD5、XXHash、CRC32、FNV-64a 及面向泛型类型的快速哈希 `HashGeneric[T]`。
-- **文件操作**：带 `.back` 自动防损的 JSON 容灾读写、递归 Symlink 遍历（`Walk`）、MD5 校验、文本行统计与批量替换。
-- **网络与 DNS 工具**：外网出口 IP 获取、私有内网 IP 判断、DoH（DNS-over-HTTPS）域名解析及 eTLD+1 根域名提取。
-- **Protobuf**：动态加载 DescriptorSet、反射导出结构以及序列化为完整 JSON。
-
-### platform - 跨平台命令行与脚本执行
-- **`ShellRun` / `ShellRunTimeout`**：跨平台脚本执行与超时控制。
-- **`ShellRunCommand`**：执行原生 Shell 命令并捕获合并标准输出与标准错误。
-- **`ShellRunExe` / `ShellRunExeTimeout`**：二进制可执行程序拉起与执行跟踪。
-
-### thirdparty - 第三方集成
-- **`GeoIP2`**：封装 MaxMind GeoLite2 数据库，支持离线高速解析 IP 所属国家与 ISO 代码。
-- **`TMysql`**：轻量级 MySQL 访问封装与自动过期数据淘汰支持。
+- **Unified Multi-Protocol Abstraction**: Seamlessly switch between TCP, UDP, KCP, QUIC, RUDP, RICMP, and RHTTP via the unified `Conn` interface.
+- **Reliable Transmission Control**: Built-in sliding window protocol, sequence-based frame orchestration (`FrameMgr`), and adaptive congestion control (`BBCongestion`).
+- **High-Performance Caching**: Generic-based LRU cache, multi-sharded `LRUMultiCache` for near-zero lock contention, and `LRUResourceCache` with automatic deduplication of in-flight misses.
+- **Structured Concurrency**: Hierarchical parent-child goroutine management (`Group`), worker-based CPU-intensive task pool (`TaskPool`), and channel-bound worker thread pool (`ThreadPool`).
+- **Cryptographic Suite**: Full implementation of CryptoNight algorithm variants alongside cryptographic primitives including AES, Blake256, Groestl, JH, RIPEMD160, SHA-3, Skein, and Threefish.
+- **Robust Utility Toolkit**: Fault-tolerant JSON serialization with `.back` backups, DoH (DNS-over-HTTPS) resolution, eTLD+1 root domain extraction, Zlib/Gzip streaming, RC4 encryption, and endianness detection.
 
 ---
 
-## 快速开始
+## Module Overview
 
-### 安装依赖
+### network - Abstract Network Layer & Protocols
+- **Unified Connection (`Conn`)**: Uniform API implementing `Dial`, `Listen`, `Accept`, and standard `io.ReadWriteCloser`.
+- **Supported Protocols**:
+  - `tcp`: Standard TCP streams.
+  - `udp`: UDP transport with session simulation.
+  - `kcp`: ARQ-based low-latency reliable transport.
+  - `quic`: Modern QUIC multiplexed streams.
+  - `rudp`: Lightweight reliable UDP protocol.
+  - `ricmp`: Covert reliable channel over ICMP echo packets.
+  - `rhttp`: Reliable tunneling over standard HTTP.
+- **Frame Control (`FrameMgr`)**: Frame sequencing, dynamic ACK feedback, sliding window buffers, heartbeat timeouts, and connection liveness verification.
+- **Congestion Control (`BBCongestion`)**: Real-time bandwidth probing and inflight window scaling algorithm.
+- **SOCKS5 Proxy**: Built-in handshake and request forwarding implementation for SOCKS5 client and server.
+
+### lru - High-Concurrency LRU Cache System
+- **`LRUCache[K, V]`**: Classic doubly-linked list and hash map implementation using Go generics, supporting TTL expiration.
+- **`LRUMultiCache[K, V]`**: Partitioned multi-layer LRU hashing keys across isolated cache shards to minimize lock contention on multicore systems.
+- **`LRUResourceCache[K, V]`**: Combines sharded LRU with `ReqQueue` to merge and deduplicate concurrent external fetches upon cache misses.
+
+### thread - Concurrency & Goroutine Orchestration
+- **`Group`**: Hierarchical tree-structured goroutine manager with cooperative cancellation, parent-child error propagation, and panic recovery.
+- **`TaskPool`**: Thread pool designed for CPU-bound batch tasks, providing worker dispatch and channel synchronization.
+- **`ThreadPool`**: Channel-backed concurrent worker pool with metrics tracking task latency, throughput, and queue depth.
+
+### pool - Object & Token Pools
+- **`Pool`**: Reusable object pool with allocation tracking and metrics to reduce garbage collection pressure.
+- **`TokenPool`**: Channel-based token/slot pool for concurrency rate limiting and resource throttling.
+
+### list - Data Structures & Request Queues
+- **`RBuffergo`**: Thread-safe circular byte ring buffer with read/write bookmarking.
+- **`ROBuffergo`**: Ring buffer with indexed element IDs and slots.
+- **`Rlistgo`**: Fixed-capacity ring queue for arbitrary elements.
+- **`ReqQueue`**: Single-flight concurrent request deduplication queue.
+- **`synclist`**: Mutex-synchronized doubly linked list wrapping `container/list`.
+
+### crypto - Cryptographic Suite
+- **CryptoNight**: Full support for CryptoNight variants (cn/0, cn/1, cn/2, cn/r, cn/fast, cn/half, cn/xao, cn/rto, cn/rwz, cn/double, cn-lite series, cn-heavy series, cn-pico series, etc.).
+- **Hash & Cipher Primitives**: Core modules for AES, Blake256, Groestl, JH, RIPEMD160, SHA-3, Skein, and Threefish.
+
+### loggo - Colorized Logging Library
+- Level-based log routing (`DEBUG`, `INFO`, `WARN`, `ERROR`).
+- Full terminal ANSI true-color styling support.
+- Daily file rotation and automatic retention purging based on `MaxDay`.
+- Built-in panic interceptor dumping formatted goroutine stack traces.
+
+### common - Core Utilities & Helpers
+- **Compression**: High-performance Zlib and Gzip streaming compression.
+- **Security & Encodings**: RC4 stream cipher, UUID generation, native endianness detection.
+- **Math & Numeric**: Generic math helpers (`MinOfInt`, `MaxOfInt`, `AbsInt`, `SafeDivide`), pseudo-random generation, and slice shuffling.
+- **Hashing**: MD5, XXHash, CRC32, FNV-64a, and generic type hasher `HashGeneric[T]`.
+- **Filesystem**: Fault-tolerant JSON loader/saver with automatic `.back` mirroring, symlink-aware recursive traversal (`Walk`), MD5 hashing, and line replacement.
+- **Networking & DNS**: Outbound local IP detection, private IP range checks, DoH (DNS-over-HTTPS) resolution, and eTLD+1 root domain parser.
+- **Protobuf**: Dynamic file descriptor set loading, reflection introspection, and proto-to-JSON serialization.
+
+### platform - Cross-Platform Execution & Shell Commands
+- **`ShellRun` / `ShellRunTimeout`**: Execute shell scripts with structured logging and deadline contexts.
+- **`ShellRunCommand`**: Execute raw shell commands and capture interleaved stdout/stderr.
+- **`ShellRunExe` / `ShellRunExeTimeout`**: Spawn and monitor standalone executable processes.
+
+### thirdparty - Third-Party Integrations
+- **`GeoIP2`**: MaxMind GeoLite2 country and ISO code lookup adapter.
+- **`TMysql`**: MySQL client with automatic timestamp-based record retention.
+
+---
+
+## Getting Started
+
+### Installation
 
 ```bash
 go get -u github.com/esrrhs/gohome
 ```
 
-### 网络连接抽象示例
+### Unified Network Connection Example
 
-使用统一的 `NewConn` 即可创建不同协议的客户端与服务端：
+Create clients and servers across protocols using the unified `NewConn` API:
 
 ```go
 package main
@@ -131,7 +133,7 @@ import (
 )
 
 func main() {
-	// 支持: "tcp", "udp", "rudp", "ricmp", "kcp", "quic", "rhttp"
+	// Supported: "tcp", "udp", "rudp", "ricmp", "kcp", "quic", "rhttp"
 	listener, err := network.NewConn("kcp")
 	if err != nil {
 		panic(err)
@@ -143,7 +145,7 @@ func main() {
 	}
 	defer l.Close()
 
-	// 服务端处理连接
+	// Handle incoming connections
 	go func() {
 		conn, err := l.Accept()
 		if err != nil {
@@ -153,11 +155,11 @@ func main() {
 
 		buf := make([]byte, 1024)
 		n, _ := conn.Read(buf)
-		fmt.Printf("收到消息: %s\n", string(buf[:n]))
+		fmt.Printf("Received: %s\n", string(buf[:n]))
 		conn.Write([]byte("pong"))
 	}()
 
-	// 客户端发起连接
+	// Dial from client
 	client, _ := network.NewConn("kcp")
 	c, err := client.Dial("127.0.0.1:8888")
 	if err != nil {
@@ -168,13 +170,13 @@ func main() {
 	c.Write([]byte("ping"))
 	buf := make([]byte, 1024)
 	n, _ := c.Read(buf)
-	fmt.Printf("客户端响应: %s\n", string(buf[:n]))
+	fmt.Printf("Echo back: %s\n", string(buf[:n]))
 }
 ```
 
-### 多层级 LRU 缓存示例
+### Multi-Sharded LRU Cache Example
 
-利用 `LRUMultiCache` 消除高并发读写热点锁竞争：
+Reduce lock contention under high-throughput workloads with `LRUMultiCache`:
 
 ```go
 package main
@@ -186,20 +188,20 @@ import (
 )
 
 func main() {
-	// 创建分片数=8, 容量=1000, TTL=10分钟的缓存
+	// Create cache with 8 shards, capacity=1000, TTL=10 minutes
 	cache := lru.NewLRUMultiCache[string, int](8, 1000, 10*time.Minute)
 
 	cache.Set("user_1001", 99)
 
 	if val, ok := cache.Get("user_1001"); ok {
-		fmt.Printf("获取到缓存值: %d\n", val)
+		fmt.Printf("Cached value: %d\n", val)
 	}
 }
 ```
 
-### 层级协程管理示例
+### Hierarchical Goroutine Management Example
 
-使用 `thread.Group` 安全管理子 Goroutine 生命周期：
+Coordinate structured goroutines cleanly with `thread.Group`:
 
 ```go
 package main
@@ -212,16 +214,16 @@ import (
 
 func main() {
 	rootGroup := thread.NewGroup("root", nil, func() {
-		fmt.Println("根协程组退出通知")
+		fmt.Println("Root group exited")
 	})
 
-	// 启动子工作任务
+	// Spawn worker task
 	rootGroup.Go(func() {
-		fmt.Println("任务处理中...")
+		fmt.Println("Processing worker job...")
 		time.Sleep(100 * time.Millisecond)
 	})
 
-	// 等待退出
+	// Graceful shutdown
 	rootGroup.Exit()
 	rootGroup.Wait()
 }
@@ -229,6 +231,6 @@ func main() {
 
 ---
 
-## 开源协议
+## License
 
-本项目采用 [MIT 许可证](LICENSE)。
+This project is licensed under the [MIT License](LICENSE).
