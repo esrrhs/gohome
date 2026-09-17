@@ -3,6 +3,7 @@ package thread
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"github.com/esrrhs/gohome/common"
 )
@@ -27,7 +28,7 @@ type Group struct {
 	wg       sync.WaitGroup
 	errOnce  sync.Once
 	err      error
-	isexit   bool
+	isexit   int32
 	exitfunc func()
 	donech   chan int
 	name     string
@@ -71,7 +72,7 @@ func (g *Group) done() {
 }
 
 func (g *Group) IsExit() bool {
-	return g.isexit
+	return atomic.LoadInt32(&g.isexit) != 0
 }
 
 func (g *Group) Error() error {
@@ -81,7 +82,7 @@ func (g *Group) Error() error {
 func (g *Group) exit(err error) {
 	g.errOnce.Do(func() {
 		g.err = err
-		g.isexit = true
+		atomic.StoreInt32(&g.isexit, 1)
 		close(g.donech)
 		if g.exitfunc != nil {
 			g.exitfunc()
@@ -100,7 +101,7 @@ func (g *Group) Done() <-chan int {
 }
 
 func (g *Group) Go(name string, f func() error) {
-	if g.isexit {
+	if atomic.LoadInt32(&g.isexit) != 0 {
 		return
 	}
 	g.add()

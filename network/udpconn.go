@@ -3,11 +3,13 @@ package network
 import (
 	"context"
 	"errors"
+	"net"
+	"sync"
+	"sync/atomic"
+
 	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/loggo"
 	"github.com/esrrhs/gohome/thread"
-	"net"
-	"sync"
 )
 
 /*
@@ -31,7 +33,8 @@ type udpConnListenerSonny struct {
 	dstaddr    *net.UDPAddr
 	fatherconn *net.UDPConn
 	recvch     *common.Channel
-	isclose    bool
+	isclose    int32
+	closeOnce  sync.Once
 }
 
 type udpConnListener struct {
@@ -69,7 +72,7 @@ func (c *UdpConn) Read(p []byte) (n int, err error) {
 	} else if c.listener != nil {
 		return 0, errors.New("listener can not be read")
 	} else if c.listenersonny != nil {
-		if c.listenersonny.isclose {
+		if atomic.LoadInt32(&c.listenersonny.isclose) != 0 {
 			return 0, errors.New("read closed conn")
 		}
 		b := <-c.listenersonny.recvch.Ch()
@@ -94,7 +97,7 @@ func (c *UdpConn) Write(p []byte) (n int, err error) {
 	} else if c.listener != nil {
 		return 0, errors.New("listener can not be write")
 	} else if c.listenersonny != nil {
-		if c.listenersonny.isclose {
+		if atomic.LoadInt32(&c.listenersonny.isclose) != 0 {
 			return 0, errors.New("write closed conn")
 		}
 		return c.listenersonny.fatherconn.WriteToUDP(p, c.listenersonny.dstaddr)
@@ -119,8 +122,10 @@ func (c *UdpConn) Close() error {
 			return true
 		})
 	} else if c.listenersonny != nil {
-		c.listenersonny.recvch.Close()
-		c.listenersonny.isclose = true
+		c.listenersonny.closeOnce.Do(func() {
+			c.listenersonny.recvch.Close()
+			atomic.StoreInt32(&c.listenersonny.isclose, 1)
+		})
 	}
 	return nil
 }
@@ -215,7 +220,7 @@ func (c *UdpConn) Accept() (Conn, error) {
 		if !ok {
 			continue
 		}
-		if sonny.listenersonny.isclose {
+		if atomic.LoadInt32(&sonny.listenersonny.isclose) != 0 {
 			continue
 		}
 		return sonny, nil
@@ -261,7 +266,7 @@ func (c *UdpConn) loopRecv() error {
 
 		c.listener.sonny.Range(func(key, value interface{}) bool {
 			u := value.(*UdpConn)
-			if u.listenersonny.isclose {
+			if atomic.LoadInt32(&u.listenersonny.isclose) != 0 {
 				c.listener.sonny.Delete(key)
 			}
 			return true
