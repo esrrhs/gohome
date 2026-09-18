@@ -520,3 +520,78 @@ func Test0009KCP(t *testing.T) {
 
 	time.Sleep(time.Second)
 }
+
+func TestKcpAcceptImmediateReadWrite(t *testing.T) {
+	l, err := NewConn("kcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := l.Listen("127.0.0.1:58221")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		srv, err := ln.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer srv.Close()
+		buf := make([]byte, 64)
+		n, err := srv.Read(buf)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		_, err = srv.Write(buf[:n])
+		errCh <- err
+	}()
+
+	d, err := NewConn("kcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli, err := d.Dial("127.0.0.1:58221")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cli.Close()
+
+	msg := []byte("kcp-no-smux")
+	if _, err := cli.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	buf := make([]byte, 64)
+	deadline := time.Now().Add(5 * time.Second)
+	var got []byte
+	for time.Now().Before(deadline) {
+		n, err := cli.Read(buf)
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		got = append(got, buf[:n]...)
+		if string(got) == string(msg) {
+			break
+		}
+	}
+	if string(got) != string(msg) {
+		t.Fatalf("echo mismatch: %q", got)
+	}
+	if _, ok := cli.(*KcpConn); !ok {
+		t.Fatal("expected *KcpConn")
+	}
+	if cli.(*KcpConn).sess == nil {
+		t.Fatal("expected direct UDPSession (no smux)")
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server side timed out")
+	}
+}

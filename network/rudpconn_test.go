@@ -487,3 +487,92 @@ func TestRudpAcceptUnblocksOnClose(t *testing.T) {
 		t.Fatal("Accept blocked after Close")
 	}
 }
+
+func TestRudpAcceptImmediateReadWrite(t *testing.T) {
+	c, err := NewConn("rudp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := c.Listen("127.0.0.1:58211")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	srvReady := make(chan Conn, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		srv, err := ln.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		srvReady <- srv
+		buf := make([]byte, 64)
+		n, err := srv.Read(buf)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		_, err = srv.Write(buf[:n])
+		errCh <- err
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cli, err := c.Dial("127.0.0.1:58211")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cli.Close()
+
+	var srv Conn
+	select {
+	case srv = <-srvReady:
+	case err := <-errCh:
+		t.Fatalf("Accept: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Accept timed out")
+	}
+	defer srv.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	msg := []byte("rudp-accept-ready")
+	if _, err := cli.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	readDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 64)
+		var got []byte
+		for {
+			n, err := cli.Read(buf)
+			if err != nil {
+				readDone <- err
+				return
+			}
+			got = append(got, buf[:n]...)
+			if string(got) == string(msg) {
+				readDone <- nil
+				return
+			}
+		}
+	}()
+
+	select {
+	case err := <-readDone:
+		if err != nil {
+			t.Fatalf("client Read: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client Read timed out")
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("server: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server side timed out")
+	}
+}

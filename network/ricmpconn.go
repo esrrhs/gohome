@@ -766,29 +766,35 @@ func (c *RicmpConn) send_icmp(conn *icmp.PacketConn, data []byte, dst net.Addr, 
 
 func (c *RicmpConn) recv_icmp(conn *icmp.PacketConn, bytes []byte) (int, net.Addr, error, string, int, int, int) {
 	n, srcaddr, err := conn.ReadFrom(bytes)
-
 	if err != nil {
 		return 0, srcaddr, err, "", 0, 0, 0
 	}
 
+	payload, id, echoId, echoSeq, flag, err := decodeIcmpPacketPayload(bytes[:n])
+	if err != nil {
+		return 0, srcaddr, err, "", 0, 0, 0
+	}
+	copied := copy(bytes, payload)
+	return copied, srcaddr, nil, id, echoId, echoSeq, flag
+}
+
+// decodeIcmpPacketPayload parses an ICMP echo message buffer (header + IcmpMsg protobuf).
+// packet must start at the ICMP header (type/code/checksum/id/seq).
+func decodeIcmpPacketPayload(packet []byte) (payload []byte, id string, echoId, echoSeq, flag int, err error) {
 	// ICMP echo header is 8 bytes (type/code/checksum/id/seq).
-	if n < 8 {
-		return 0, srcaddr, errors.New("icmp packet too short"), "", 0, 0, 0
+	if len(packet) < 8 {
+		return nil, "", 0, 0, 0, errors.New("icmp packet too short")
 	}
 
-	echoId := int(binary.BigEndian.Uint16(bytes[4:6]))
-	echoSeq := int(binary.BigEndian.Uint16(bytes[6:8]))
+	echoId = int(binary.BigEndian.Uint16(packet[4:6]))
+	echoSeq = int(binary.BigEndian.Uint16(packet[6:8]))
 
 	my := &IcmpMsg{}
-	err = proto.Unmarshal(bytes[8:n], my)
-	if err != nil {
-		return 0, srcaddr, err, "", 0, 0, 0
+	if err = proto.Unmarshal(packet[8:], my); err != nil {
+		return nil, "", 0, 0, 0, err
 	}
-
 	if my.Magic != IcmpMsg_MAGIC {
-		return 0, srcaddr, errors.New("magic error"), "", 0, 0, 0
+		return nil, "", 0, 0, 0, errors.New("magic error")
 	}
-
-	copied := copy(bytes, my.Data)
-	return copied, srcaddr, nil, my.Id, echoId, echoSeq, int(my.Flag)
+	return my.Data, my.Id, echoId, echoSeq, int(my.Flag), nil
 }

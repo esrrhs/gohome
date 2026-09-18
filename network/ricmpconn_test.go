@@ -2,11 +2,13 @@ package network
 
 import (
 	"fmt"
-	"sync/atomic"
-	"github.com/esrrhs/gohome/loggo"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/esrrhs/gohome/loggo"
+	"google.golang.org/protobuf/proto"
 )
 
 func Test000RICMP(t *testing.T) {
@@ -540,4 +542,140 @@ func Test0009RICMP(t *testing.T) {
 	exit.Store(true)
 
 	time.Sleep(time.Second)
+}
+
+func TestDecodeIcmpPacketPayloadShort(t *testing.T) {
+	for _, n := range []int{0, 1, 7} {
+		_, _, _, _, _, err := decodeIcmpPacketPayload(make([]byte, n))
+		if err == nil {
+			t.Fatalf("len=%d: expected error", n)
+		}
+	}
+}
+
+func TestDecodeIcmpPacketPayloadOK(t *testing.T) {
+	msg := &IcmpMsg{
+		Id:    "conn-id-1",
+		Data:  []byte("frame-bytes"),
+		Magic: IcmpMsg_MAGIC,
+		Flag:  IcmpMsg_CLIENT_SEND_FLAG,
+	}
+	body, err := proto.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := make([]byte, 8+len(body))
+	packet[4], packet[5] = 0x12, 0x34 // echo id
+	packet[6], packet[7] = 0x00, 0x09 // echo seq
+	copy(packet[8:], body)
+
+	payload, id, echoId, echoSeq, flag, err := decodeIcmpPacketPayload(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "conn-id-1" || string(payload) != "frame-bytes" {
+		t.Fatalf("id/payload mismatch: %q %q", id, payload)
+	}
+	if echoId != 0x1234 || echoSeq != 9 || flag != int(IcmpMsg_CLIENT_SEND_FLAG) {
+		t.Fatalf("header mismatch: id=%d seq=%d flag=%d", echoId, echoSeq, flag)
+	}
+}
+
+func TestDecodeIcmpPacketPayloadBadMagic(t *testing.T) {
+	msg := &IcmpMsg{Id: "x", Data: []byte("y"), Magic: 0, Flag: IcmpMsg_CLIENT_SEND_FLAG}
+	body, _ := proto.Marshal(msg)
+	packet := make([]byte, 8+len(body))
+	copy(packet[8:], body)
+	if _, _, _, _, _, err := decodeIcmpPacketPayload(packet); err == nil {
+		t.Fatal("expected magic error")
+	}
+}
+
+func TestRicmpAcceptImmediateReadWrite(t *testing.T) {
+	c, err := NewConn("ricmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := c.Listen("127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	srvReady := make(chan Conn, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		srv, err := ln.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		srvReady <- srv
+		buf := make([]byte, 64)
+		n, err := srv.Read(buf)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		_, err = srv.Write(buf[:n])
+		errCh <- err
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cli, err := c.Dial("127.0.0.1")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cli.Close()
+
+	var srv Conn
+	select {
+	case srv = <-srvReady:
+	case err := <-errCh:
+		t.Fatalf("Accept: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Accept timed out")
+	}
+	defer srv.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	msg := []byte("ricmp-accept-ready")
+	if _, err := cli.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	readDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 64)
+		var got []byte
+		for {
+			n, err := cli.Read(buf)
+			if err != nil {
+				readDone <- err
+				return
+			}
+			got = append(got, buf[:n]...)
+			if string(got) == string(msg) {
+				readDone <- nil
+				return
+			}
+		}
+	}()
+
+	select {
+	case err := <-readDone:
+		if err != nil {
+			t.Fatalf("client Read: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client Read timed out")
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("server: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server side timed out")
+	}
 }
