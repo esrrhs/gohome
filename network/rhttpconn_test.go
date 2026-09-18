@@ -656,11 +656,12 @@ func TestRhttpNoTransportFDLeakSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := l.Listen("127.0.0.1:58282")
+	ln, err := l.Listen("127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
+	addr := ln.(*RhttpConn).listener.listenerconn.Addr().String()
 
 	go func() {
 		for {
@@ -688,7 +689,7 @@ func TestRhttpNoTransportFDLeakSmoke(t *testing.T) {
 		cfg := DefaultHttpConfig()
 		cfg.RequestTimeoutMs = 5000
 		d.(*RhttpConn).SetConfig(cfg)
-		conn, err := d.Dial("127.0.0.1:58282")
+		conn, err := d.Dial(addr)
 		if err != nil {
 			t.Fatalf("Dial %d: %v", i, err)
 		}

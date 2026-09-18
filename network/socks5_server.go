@@ -10,16 +10,15 @@ import (
 )
 
 /*
-socks5_server 封装了 SOCKS5 协议的握手和请求处理
+socks5_server 封装了 SOCKS5 协议的握手和请求处理（RFC 1928 CONNECT + RFC 1929）。
 */
 
 var (
-	errAddrType      = errors.New("socks addr type not supported")
-	errVer           = errors.New("socks version not supported")
-	errMethod        = errors.New("socks only support 1 method now")
-	errAuthExtraData = errors.New("socks authentication get extra data")
-	errReqExtraData  = errors.New("socks request get extra data")
-	errCmd           = errors.New("socks command not supported")
+	errAddrType = errors.New("socks addr type not supported")
+	errVer      = errors.New("socks version not supported")
+	errMethod   = errors.New("socks no acceptable authentication method")
+	errAuth     = errors.New("socks authentication failed")
+	errCmd      = errors.New("socks command not supported")
 )
 
 const (
@@ -31,161 +30,213 @@ const (
 	authFailure     = uint8(1)
 )
 
-func Sock5HandshakeBy(conn io.ReadWriter, username string, password string) (err error) {
-	const (
-		idVer     = 0
-		idNmethod = 1
-	)
-	// version identification and method selection message in theory can have
-	// at most 256 methods, plus version and nmethod field in total 258 bytes
-	// the current rfc defines only 3 authentication methods (plus 2 reserved),
-	// so it won't be such long in practice
-
-	buf := make([]byte, 258)
-
-	var n int
-	// make sure we get the nmethod field
-	if n, err = io.ReadAtLeast(conn, buf, idNmethod+1); err != nil {
-		return err
-	}
-	if buf[idVer] != socksVer5 {
-		return errVer
-	}
-	nmethod := int(buf[idNmethod])
-	msgLen := nmethod + 2
-	if n == msgLen { // handshake done, common case
-		// do nothing, jump directly to send confirmation
-	} else if n < msgLen { // has more methods to read, rare case
-		if _, err = io.ReadFull(conn, buf[n:msgLen]); err != nil {
-			return err
-		}
-	} else { // error, should not get extra data
-		return errAuthExtraData
-	}
-
-	if username == "" && password == "" {
-		// send confirmation: version 5, no authentication required
-		_, err = conn.Write([]byte{socksVer5, NoAuth})
-	} else {
-		// Tell the client to use user/pass auth
-		if _, err := conn.Write([]byte{socksVer5, UserPassAuth}); err != nil {
-			return err
-		}
-
-		// Get the version and username length
-		header := []byte{0, 0}
-		if _, err := io.ReadAtLeast(conn, header, 2); err != nil {
-			return err
-		}
-
-		// Ensure we are compatible
-		if header[0] != userAuthVersion {
-			return fmt.Errorf("Unsupported auth version: %v", header[0])
-		}
-
-		// Get the user name
-		userLen := int(header[1])
-		user := make([]byte, userLen)
-		if _, err := io.ReadAtLeast(conn, user, userLen); err != nil {
-			return err
-		}
-
-		// Get the password length
-		if _, err := conn.Read(header[:1]); err != nil {
-			return err
-		}
-
-		// Get the password
-		passLen := int(header[0])
-		pass := make([]byte, passLen)
-		if _, err := io.ReadAtLeast(conn, pass, passLen); err != nil {
-			return err
-		}
-
-		// Verify the password
-		if username == string(user) && password == string(pass) {
-			if _, err := conn.Write([]byte{userAuthVersion, authSuccess}); err != nil {
-				return err
-			}
-		} else {
-			if _, err := conn.Write([]byte{userAuthVersion, authFailure}); err != nil {
-				return err
-			}
+func methodOffered(methods []byte, want byte) bool {
+	for _, m := range methods {
+		if m == want {
+			return true
 		}
 	}
-	return
+	return false
 }
 
+// Sock5HandshakeBy performs RFC 1928 method selection and optional RFC 1929 auth.
+// When username/password are both empty, NoAuth is required; otherwise UserPassAuth.
+func Sock5HandshakeBy(conn io.ReadWriter, username string, password string) (err error) {
+	if conn == nil {
+		return errors.New("socks: nil conn")
+	}
+
+	// RFC 1928 §3: read VER, NMETHODS, then exactly NMETHODS method bytes.
+	var head [2]byte
+	if _, err = io.ReadFull(conn, head[:]); err != nil {
+		return err
+	}
+	if head[0] != socksVer5 {
+		return errVer
+	}
+	nmethod := int(head[1])
+	methods := make([]byte, nmethod)
+	if nmethod > 0 {
+		if _, err = io.ReadFull(conn, methods); err != nil {
+			return err
+		}
+	}
+
+	needAuth := username != "" || password != ""
+	want := NoAuth
+	if needAuth {
+		want = UserPassAuth
+	}
+
+	if !methodOffered(methods, want) {
+		// RFC 1928: X'FF' = NO ACCEPTABLE METHODS
+		_, _ = conn.Write([]byte{socksVer5, socks5NoAcceptable})
+		return errMethod
+	}
+
+	if !needAuth {
+		_, err = conn.Write([]byte{socksVer5, NoAuth})
+		return err
+	}
+
+	if _, err = conn.Write([]byte{socksVer5, UserPassAuth}); err != nil {
+		return err
+	}
+
+	// RFC 1929 sub-negotiation
+	var authHead [2]byte
+	if _, err = io.ReadFull(conn, authHead[:]); err != nil {
+		return err
+	}
+	if authHead[0] != userAuthVersion {
+		return fmt.Errorf("unsupported auth version: %v", authHead[0])
+	}
+
+	userLen := int(authHead[1])
+	user := make([]byte, userLen)
+	if userLen > 0 {
+		if _, err = io.ReadFull(conn, user); err != nil {
+			return err
+		}
+	}
+
+	var passLenBuf [1]byte
+	if _, err = io.ReadFull(conn, passLenBuf[:]); err != nil {
+		return err
+	}
+	passLen := int(passLenBuf[0])
+	pass := make([]byte, passLen)
+	if passLen > 0 {
+		if _, err = io.ReadFull(conn, pass); err != nil {
+			return err
+		}
+	}
+
+	if username == string(user) && password == string(pass) {
+		_, err = conn.Write([]byte{userAuthVersion, authSuccess})
+		return err
+	}
+	_, _ = conn.Write([]byte{userAuthVersion, authFailure})
+	return errAuth
+}
+
+// Sock5GetRequest parses an RFC 1928 CONNECT request.
+// Only CMD=CONNECT is accepted; BIND/UDP ASSOCIATE return errCmd.
 func Sock5GetRequest(conn io.ReadWriter) (rawaddr []byte, host string, err error) {
-	const (
-		idVer   = 0
-		idCmd   = 1
-		idType  = 3 // address type index
-		idIP0   = 4 // ip address start index
-		idDmLen = 4 // domain address length index
-		idDm0   = 5 // domain address start index
+	if conn == nil {
+		return nil, "", errors.New("socks: nil conn")
+	}
 
-		typeIPv4 = 1 // type is ipv4 address
-		typeDm   = 3 // type is domain address
-		typeIPv6 = 4 // type is ipv6 address
-
-		lenIPv4   = 3 + 1 + net.IPv4len + 2 // 3(ver+cmd+rsv) + 1addrType + ipv4 + 2port
-		lenIPv6   = 3 + 1 + net.IPv6len + 2 // 3(ver+cmd+rsv) + 1addrType + ipv6 + 2port
-		lenDmBase = 3 + 1 + 1 + 2           // 3 + 1addrType + 1addrLen + 2port, plus addrLen
-	)
-	// refer to getRequest in server.go for why set buffer size to 263
-	buf := make([]byte, 263)
-	var n int
-	// read till we get possible domain length field
-	if n, err = io.ReadAtLeast(conn, buf, idDmLen+1); err != nil {
+	// VER CMD RSV ATYP
+	var hdr [4]byte
+	if _, err = io.ReadFull(conn, hdr[:]); err != nil {
 		return
 	}
-	// check version and cmd
-	if buf[idVer] != socksVer5 {
+	if hdr[0] != socksVer5 {
 		err = errVer
 		return
 	}
-	if buf[idCmd] != socksCmdConnect {
+	if hdr[1] != socksCmdConnect {
 		err = errCmd
 		return
 	}
+	// hdr[2] is RSV; ignore per RFC (should be 0x00)
 
-	reqLen := -1
-	switch buf[idType] {
-	case typeIPv4:
-		reqLen = lenIPv4
-	case typeIPv6:
-		reqLen = lenIPv6
-	case typeDm:
-		reqLen = int(buf[idDmLen]) + lenDmBase
+	atyp := hdr[3]
+	var addr []byte
+	switch atyp {
+	case Socks5AtypIP4:
+		addr = make([]byte, net.IPv4len)
+		if _, err = io.ReadFull(conn, addr); err != nil {
+			return
+		}
+		host = net.IP(addr).String()
+	case Socks5AtypIP6:
+		addr = make([]byte, net.IPv6len)
+		if _, err = io.ReadFull(conn, addr); err != nil {
+			return
+		}
+		host = net.IP(addr).String()
+	case Socks5AtypDomain:
+		var alen [1]byte
+		if _, err = io.ReadFull(conn, alen[:]); err != nil {
+			return
+		}
+		if alen[0] == 0 {
+			err = errors.New("socks empty domain name")
+			return
+		}
+		addr = make([]byte, int(alen[0]))
+		if _, err = io.ReadFull(conn, addr); err != nil {
+			return
+		}
+		host = string(addr)
 	default:
 		err = errAddrType
 		return
 	}
 
-	if n == reqLen {
-		// common case, do nothing
-	} else if n < reqLen { // rare case
-		if _, err = io.ReadFull(conn, buf[n:reqLen]); err != nil {
-			return
-		}
-	} else {
-		err = errReqExtraData
+	var portBuf [2]byte
+	if _, err = io.ReadFull(conn, portBuf[:]); err != nil {
 		return
 	}
-
-	rawaddr = buf[idType:reqLen]
-
-	switch buf[idType] {
-	case typeIPv4:
-		host = net.IP(buf[idIP0 : idIP0+net.IPv4len]).String()
-	case typeIPv6:
-		host = net.IP(buf[idIP0 : idIP0+net.IPv6len]).String()
-	case typeDm:
-		host = string(buf[idDm0 : idDm0+buf[idDmLen]])
-	}
-	port := binary.BigEndian.Uint16(buf[reqLen-2 : reqLen])
+	port := binary.BigEndian.Uint16(portBuf[:])
 	host = net.JoinHostPort(host, strconv.Itoa(int(port)))
 
+	// rawaddr = ATYP + ADDR + PORT (common for shadowsocks-style callers)
+	rawaddr = make([]byte, 0, 1+len(addr)+2)
+	if atyp == Socks5AtypDomain {
+		rawaddr = append(rawaddr, atyp, byte(len(addr)))
+		rawaddr = append(rawaddr, addr...)
+	} else {
+		rawaddr = append(rawaddr, atyp)
+		rawaddr = append(rawaddr, addr...)
+	}
+	rawaddr = append(rawaddr, portBuf[:]...)
 	return
+}
+
+// Sock5SendConnectReply writes an RFC 1928 CONNECT reply.
+// rep is the REP field (0 = succeeded). bnd should be "host:port"; on parse
+// failure a zero IPv4 bind address is sent.
+func Sock5SendConnectReply(conn io.Writer, rep byte, bnd string) error {
+	if conn == nil {
+		return errors.New("socks: nil conn")
+	}
+
+	reply := []byte{socksVer5, rep, 0 /* RSV */}
+	host, portStr, err := net.SplitHostPort(bnd)
+	if err != nil {
+		reply = append(reply, Socks5AtypIP4, 0, 0, 0, 0, 0, 0)
+		_, werr := conn.Write(reply)
+		return werr
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 0 || port > 65535 {
+		reply = append(reply, Socks5AtypIP4, 0, 0, 0, 0, 0, 0)
+		_, werr := conn.Write(reply)
+		return werr
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			reply = append(reply, Socks5AtypIP4)
+			reply = append(reply, ip4...)
+		} else {
+			ip6 := ip.To16()
+			reply = append(reply, Socks5AtypIP6)
+			reply = append(reply, ip6...)
+		}
+	} else {
+		if len(host) == 0 || len(host) > 255 {
+			reply = append(reply, Socks5AtypIP4, 0, 0, 0, 0, 0, 0)
+			_, werr := conn.Write(reply)
+			return werr
+		}
+		reply = append(reply, Socks5AtypDomain, byte(len(host)))
+		reply = append(reply, host...)
+	}
+	reply = append(reply, byte(port>>8), byte(port))
+	_, err = conn.Write(reply)
+	return err
 }
