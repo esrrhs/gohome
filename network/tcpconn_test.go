@@ -398,3 +398,83 @@ func Test0008TCP(t *testing.T) {
 
 	time.Sleep(time.Second)
 }
+
+func TestTcpAcceptNotListen(t *testing.T) {
+	c, err := NewConn("tcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Accept(); err == nil {
+		t.Fatal("Accept on non-listener should fail")
+	}
+}
+
+func TestTcpDialCancel(t *testing.T) {
+	c, err := NewConn("tcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Dial("203.0.113.1:1")
+		done <- err
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Dial succeeded unexpectedly after Close")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Dial did not return after Close")
+	}
+}
+
+func TestTcpListenCloseJoinEcho(t *testing.T) {
+	c, err := NewConn("tcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := c.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.(*TcpConn).listener.Addr().String()
+
+	accepted := make(chan Conn, 1)
+	go func() {
+		s, err := ln.Accept()
+		if err == nil {
+			accepted <- s
+		}
+	}()
+
+	cli, err := c.Dial(addr)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	srv := <-accepted
+
+	msg := []byte("tcp-echo")
+	if _, err := cli.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	buf := make([]byte, 16)
+	n, err := srv.Read(buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(buf[:n]) != string(msg) {
+		t.Fatalf("got %q want %q", buf[:n], msg)
+	}
+
+	_ = cli.Close()
+	_ = srv.Close()
+	_ = ln.Close()
+}

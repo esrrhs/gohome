@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 )
 
 /*
@@ -13,7 +14,10 @@ TcpConn 实现了基于 tcp 协议的Conn。
 type TcpConn struct {
 	conn     *net.TCPConn
 	listener *net.TCPListener
-	cancel   context.CancelFunc
+
+	dialMu  sync.Mutex
+	cancel  context.CancelFunc
+	dialGen uint64
 }
 
 func (c *TcpConn) Name() string {
@@ -35,9 +39,14 @@ func (c *TcpConn) Write(p []byte) (n int, err error) {
 }
 
 func (c *TcpConn) Close() error {
-	if c.cancel != nil {
-		c.cancel()
+	c.dialMu.Lock()
+	cancel := c.cancel
+	c.cancel = nil
+	if cancel != nil {
+		cancel()
 	}
+	c.dialMu.Unlock()
+
 	if c.conn != nil {
 		return c.conn.Close()
 	} else if c.listener != nil {
@@ -63,7 +72,20 @@ func (c *TcpConn) Dial(dst string) (Conn, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	c.dialMu.Lock()
+	c.dialGen++
+	gen := c.dialGen
 	c.cancel = cancel
+	c.dialMu.Unlock()
+	defer func() {
+		c.dialMu.Lock()
+		if c.dialGen == gen {
+			c.cancel = nil
+		}
+		c.dialMu.Unlock()
+		cancel()
+	}()
+
 	var d net.Dialer
 	if gControlOnConnSetup != nil {
 		d = net.Dialer{Control: gControlOnConnSetup}
@@ -72,8 +94,17 @@ func (c *TcpConn) Dial(dst string) (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.cancel = nil
-	return &TcpConn{conn: conn.(*net.TCPConn)}, nil
+	if ctx.Err() != nil {
+		_ = conn.Close()
+		return nil, errors.New("dial canceled")
+	}
+
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		_ = conn.Close()
+		return nil, errors.New("tcp dial: unexpected conn type")
+	}
+	return &TcpConn{conn: tcpConn}, nil
 }
 
 func (c *TcpConn) Listen(dst string) (Conn, error) {
@@ -89,9 +120,17 @@ func (c *TcpConn) Listen(dst string) (Conn, error) {
 }
 
 func (c *TcpConn) Accept() (Conn, error) {
+	if c.listener == nil {
+		return nil, errors.New("not listen")
+	}
 	conn, err := c.listener.Accept()
 	if err != nil {
 		return nil, err
 	}
-	return &TcpConn{conn: conn.(*net.TCPConn)}, nil
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		_ = conn.Close()
+		return nil, errors.New("tcp accept: unexpected conn type")
+	}
+	return &TcpConn{conn: tcpConn}, nil
 }

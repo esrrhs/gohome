@@ -21,7 +21,10 @@ type UdpConn struct {
 	dialer        *udpConnDialer
 	listenersonny *udpConnListenerSonny
 	listener      *udpConnListener
-	cancel        context.CancelFunc
+
+	dialMu sync.Mutex
+	cancel context.CancelFunc
+	dialGen uint64
 }
 
 type udpConnDialer struct {
@@ -31,6 +34,7 @@ type udpConnDialer struct {
 type udpConnListenerSonny struct {
 	dstaddr    *net.UDPAddr
 	fatherconn *net.UDPConn
+	listener   *udpConnListener
 	recvch     *common.Channel
 	isclose    int32
 	closeOnce  sync.Once
@@ -107,23 +111,35 @@ func (c *UdpConn) Write(p []byte) (n int, err error) {
 func (c *UdpConn) Close() error {
 	c.checkConfig()
 
-	if c.cancel != nil {
-		c.cancel()
+	c.dialMu.Lock()
+	cancel := c.cancel
+	c.cancel = nil
+	if cancel != nil {
+		cancel()
 	}
+	c.dialMu.Unlock()
+
 	if c.dialer != nil {
 		return c.dialer.conn.Close()
 	} else if c.listener != nil {
-		c.listener.wg.Stop()
-		c.listener.wg.Wait()
+		if c.listener.wg != nil {
+			c.listener.wg.Stop()
+			// Join (not Wait): Wait returns as soon as Stop closes donech.
+			_ = c.listener.wg.Join()
+		}
 		c.listener.sonny.Range(func(key, value interface{}) bool {
 			u := value.(*UdpConn)
-			u.Close()
+			_ = u.Close()
 			return true
 		})
 	} else if c.listenersonny != nil {
 		c.listenersonny.closeOnce.Do(func() {
-			c.listenersonny.recvch.Close()
+			// Mark closed before closing the recv channel so Write stops first.
 			atomic.StoreInt32(&c.listenersonny.isclose, 1)
+			c.listenersonny.recvch.Close()
+			if c.listenersonny.listener != nil && c.listenersonny.dstaddr != nil {
+				c.listenersonny.listener.sonny.Delete(c.listenersonny.dstaddr.String())
+			}
 		})
 	}
 	return nil
@@ -152,7 +168,20 @@ func (c *UdpConn) Dial(dst string) (Conn, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	c.dialMu.Lock()
+	c.dialGen++
+	gen := c.dialGen
 	c.cancel = cancel
+	c.dialMu.Unlock()
+	defer func() {
+		c.dialMu.Lock()
+		if c.dialGen == gen {
+			c.cancel = nil
+		}
+		c.dialMu.Unlock()
+		cancel()
+	}()
+
 	var d net.Dialer
 	if gControlOnConnSetup != nil {
 		d = net.Dialer{Control: gControlOnConnSetup}
@@ -161,8 +190,17 @@ func (c *UdpConn) Dial(dst string) (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.cancel = nil
-	dialer := &udpConnDialer{conn: conn.(*net.UDPConn)}
+	if ctx.Err() != nil {
+		_ = conn.Close()
+		return nil, errors.New("dial canceled")
+	}
+
+	udpConn, ok := conn.(*net.UDPConn)
+	if !ok {
+		_ = conn.Close()
+		return nil, errors.New("udp dial: unexpected conn type")
+	}
+	dialer := &udpConnDialer{conn: udpConn}
 	return &UdpConn{config: c.config, dialer: dialer}, nil
 }
 
@@ -203,7 +241,7 @@ func (c *UdpConn) Listen(dst string) (Conn, error) {
 func (c *UdpConn) Accept() (Conn, error) {
 	c.checkConfig()
 
-	if c.listener.wg == nil {
+	if c.listener == nil || c.listener.wg == nil {
 		return nil, errors.New("not listen")
 	}
 	for !c.listener.wg.IsExit() {
@@ -227,10 +265,18 @@ func (c *UdpConn) Accept() (Conn, error) {
 func (c *UdpConn) loopRecv() error {
 	c.checkConfig()
 
+	pushTimeout := c.config.RecvChanPushTimeout
+	if pushTimeout <= 0 {
+		pushTimeout = 100
+	}
+
 	buf := make([]byte, c.config.MaxPacketSize)
 	for !c.listener.wg.IsExit() {
 		n, srcaddr, err := c.listener.listenerconn.ReadFromUDP(buf)
 		if err != nil {
+			if c.listener.wg.IsExit() {
+				return nil
+			}
 			return err
 		}
 
@@ -243,19 +289,28 @@ func (c *UdpConn) loopRecv() error {
 			sonny := &udpConnListenerSonny{
 				dstaddr:    srcaddr,
 				fatherconn: c.listener.listenerconn,
+				listener:   c.listener,
 				recvch:     common.NewChannel(c.config.RecvChanLen),
 			}
 
 			u := &UdpConn{config: c.config, listenersonny: sonny}
-			if !u.listenersonny.recvch.WriteTimeout(data, c.config.RecvChanPushTimeout) {
+			if !u.listenersonny.recvch.WriteTimeout(data, pushTimeout) {
 				loggo.Debug("udp conn %s push %d data to %s recv channel timeout", c.Info(), len(data), u.Info())
 			}
 			c.listener.sonny.Store(srcaddrstr, u)
 
-			c.listener.accept.Write(u)
+			// Non-blocking accept enqueue: blocking here stalls the whole recv loop.
+			if !c.listener.accept.WriteTimeout(u, pushTimeout) {
+				_ = u.Close()
+				continue
+			}
 		} else {
 			u := v.(*UdpConn)
-			if !u.listenersonny.recvch.WriteTimeout(data, c.config.RecvChanPushTimeout) {
+			if atomic.LoadInt32(&u.listenersonny.isclose) != 0 {
+				c.listener.sonny.Delete(srcaddrstr)
+				continue
+			}
+			if !u.listenersonny.recvch.WriteTimeout(data, pushTimeout) {
 				loggo.Debug("udp conn %s push %d data to %s recv channel timeout", c.Info(), len(data), u.Info())
 			}
 		}
