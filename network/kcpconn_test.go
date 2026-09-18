@@ -57,6 +57,33 @@ func Test0002KCP(t *testing.T) {
 	time.Sleep(time.Second)
 }
 
+func TestKcpDialCancel(t *testing.T) {
+	c, err := NewConn("kcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, _ := c.Dial("203.0.113.1:1") // TEST-NET-3; may return quickly
+		if conn != nil {
+			conn.Close()
+		}
+	}()
+
+	time.Sleep(time.Millisecond)
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Dial did not return after Close")
+	}
+}
+
 func Test0003KCP(t *testing.T) {
 	c, err := NewConn("kcp")
 	if err != nil {

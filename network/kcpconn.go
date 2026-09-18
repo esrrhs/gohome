@@ -3,9 +3,12 @@ package network
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
+	"sync"
+
 	"github.com/xtaci/kcp-go"
 	"github.com/xtaci/smux"
-	"net"
 )
 
 /*
@@ -17,6 +20,10 @@ type KcpConn struct {
 	stream   *smux.Stream
 	listener *kcp.Listener
 	info     string
+
+	dialMu    sync.Mutex
+	cancel    context.CancelFunc
+	dialOwned io.Closer // in-flight resource; Close() takes and closes it to abort Dial
 }
 
 func (c *KcpConn) Name() string {
@@ -38,6 +45,19 @@ func (c *KcpConn) Write(p []byte) (n int, err error) {
 }
 
 func (c *KcpConn) Close() error {
+	c.dialMu.Lock()
+	cancel := c.cancel
+	owned := c.dialOwned
+	c.cancel = nil
+	c.dialOwned = nil
+	c.dialMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if owned != nil {
+		owned.Close()
+	}
+
 	if c.session != nil {
 		return c.session.Close()
 	} else if c.listener != nil {
@@ -60,21 +80,70 @@ func (c *KcpConn) Info() string {
 	return c.info
 }
 
+func (c *KcpConn) setDialOwned(closer io.Closer) {
+	c.dialMu.Lock()
+	c.dialOwned = closer
+	c.dialMu.Unlock()
+}
+
+// finishDial clears dial abort state. If ctx was canceled, closes closer and
+// returns false so the caller must not hand closer out as a live connection.
+func (c *KcpConn) finishDial(ctx context.Context, closer io.Closer) bool {
+	c.dialMu.Lock()
+	canceled := ctx.Err() != nil
+	c.cancel = nil
+	c.dialOwned = nil
+	c.dialMu.Unlock()
+	if canceled {
+		if closer != nil {
+			closer.Close()
+		}
+		return false
+	}
+	return true
+}
+
 func (c *KcpConn) Dial(dst string) (Conn, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	c.dialMu.Lock()
+	c.cancel = cancel
+	c.dialOwned = nil
+	c.dialMu.Unlock()
+	defer func() {
+		c.dialMu.Lock()
+		owned := c.dialOwned
+		c.cancel = nil
+		c.dialOwned = nil
+		c.dialMu.Unlock()
+		if owned != nil {
+			owned.Close()
+		}
+		cancel()
+	}()
+
 	var lc net.ListenConfig
 	if gControlOnConnSetup != nil {
 		lc.Control = gControlOnConnSetup
 	}
 
 	laddr := &net.UDPAddr{}
-	pconn, err := lc.ListenPacket(context.Background(), "udp", laddr.String())
+	pconn, err := lc.ListenPacket(ctx, "udp", laddr.String())
 	if err != nil {
 		return nil, err
+	}
+	c.setDialOwned(pconn)
+	if ctx.Err() != nil {
+		return nil, errors.New("dial canceled")
 	}
 
 	conn, err := kcp.NewConn(dst, nil, 0, 0, pconn.(*net.UDPConn))
 	if err != nil {
 		return nil, err
+	}
+	// kcp owns pconn; abort via closing the kcp session.
+	c.setDialOwned(conn)
+	if ctx.Err() != nil {
+		return nil, errors.New("dial canceled")
 	}
 
 	c.setParam(conn)
@@ -83,12 +152,19 @@ func (c *KcpConn) Dial(dst string) (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.setDialOwned(session)
+	if ctx.Err() != nil {
+		return nil, errors.New("dial canceled")
+	}
 
 	stream, err := session.OpenStream()
 	if err != nil {
 		return nil, err
 	}
 
+	if !c.finishDial(ctx, session) {
+		return nil, errors.New("dial canceled")
+	}
 	return &KcpConn{session: session, stream: stream}, nil
 }
 
