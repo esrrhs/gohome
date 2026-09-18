@@ -74,6 +74,7 @@ type rudpConnDialer struct {
 type rudpConnListenerSonny struct {
 	dstaddr    *net.UDPAddr
 	fatherconn *net.UDPConn
+	listener   *rudpConnListener
 	fm         *FrameMgr
 	wg         *thread.Group
 }
@@ -168,6 +169,9 @@ func (c *RudpConn) Write(p []byte) (n int, err error) {
 
 		if size <= 0 {
 			if wg != nil && wg.IsExit() {
+				if cur > 0 {
+					return cur, errors.New("closed conn")
+				}
 				return 0, errors.New("closed conn")
 			}
 			time.Sleep(time.Millisecond * 100)
@@ -184,6 +188,9 @@ func (c *RudpConn) Write(p []byte) (n int, err error) {
 		time.Sleep(time.Millisecond * 100)
 	}
 
+	if cur > 0 {
+		return cur, errors.New("write closed conn")
+	}
 	return 0, errors.New("write closed conn")
 }
 
@@ -201,16 +208,18 @@ func (c *RudpConn) Close() error {
 		return nil
 	}
 
-	//loggo.Debug("start Close %s", c.Info())
+	// Mark closed first so Read/Write observe it before we tear down the socket.
+	c.isclose.Store(true)
 
 	if c.cancel != nil {
 		c.cancel()
+		c.cancel = nil
 	}
 	if c.dialer != nil {
 		if c.dialer.wg != nil {
-			//loggo.Debug("start Close dialer %s", c.Info())
 			c.dialer.wg.Stop()
-			c.dialer.wg.Wait()
+			// Join (not Wait): Wait returns as soon as Stop closes donech.
+			_ = c.dialer.wg.Join()
 		}
 		if c.dialer.conn != nil {
 			c.dialer.conn.Close()
@@ -222,26 +231,24 @@ func (c *RudpConn) Close() error {
 		if c.listener.listenerconn != nil {
 			c.listener.listenerconn.Close()
 		}
+		c.listener.sonny.Range(func(key, value interface{}) bool {
+			u := value.(*RudpConn)
+			_ = u.Close()
+			return true
+		})
 		if c.listener.wg != nil {
-			//loggo.Debug("start Close listener %s", c.Info())
 			c.listener.wg.Stop()
-			c.listener.sonny.Range(func(key, value interface{}) bool {
-				u := value.(*RudpConn)
-				u.Close()
-				return true
-			})
-			c.listener.wg.Wait()
+			_ = c.listener.wg.Join()
 		}
 	} else if c.listenersonny != nil {
 		if c.listenersonny.wg != nil {
-			//loggo.Debug("start Close listenersonny %s", c.Info())
 			c.listenersonny.wg.Stop()
-			c.listenersonny.wg.Wait()
+			_ = c.listenersonny.wg.Join()
+		}
+		if c.listenersonny.listener != nil && c.listenersonny.dstaddr != nil {
+			c.listenersonny.listener.sonny.Delete(c.listenersonny.dstaddr.String())
 		}
 	}
-	c.isclose.Store(true)
-
-	//loggo.Debug("Close ok %s", c.Info())
 
 	return nil
 }
@@ -309,7 +316,7 @@ func (c *RudpConn) Dial(dst string) (Conn, error) {
 		for e := sendlist.Front(); e != nil; e = e.Next() {
 			f := e.Value.(*Frame)
 			mb, _ := u.dialer.fm.MarshalFrame(f)
-			u.dialer.conn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
+			u.dialer.conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
 			u.dialer.conn.Write(mb)
 		}
 
@@ -404,7 +411,7 @@ func (c *RudpConn) Listen(dst string) (Conn, error) {
 func (c *RudpConn) Accept() (Conn, error) {
 	c.checkConfig()
 
-	if c.listener.wg == nil {
+	if c.listener == nil || c.listener.wg == nil {
 		return nil, errors.New("not listen")
 	}
 	for !c.listener.wg.IsExit() {
@@ -465,6 +472,7 @@ func (c *RudpConn) loopListenerRecv() error {
 			sonny := &rudpConnListenerSonny{
 				dstaddr:    srcaddr,
 				fatherconn: c.listener.listenerconn,
+				listener:   c.listener,
 				fm:         fm,
 			}
 
@@ -485,6 +493,10 @@ func (c *RudpConn) loopListenerRecv() error {
 			//loggo.Debug("start accept remote rudp %s %s", u.Info(), id)
 		} else {
 			u := v.(*RudpConn)
+			if u.isclose.Load() {
+				c.listener.sonny.Delete(srcaddrstr)
+				continue
+			}
 
 			f := &Frame{}
 			err := proto.Unmarshal(buf[0:n], f)
@@ -565,8 +577,11 @@ func (c *RudpConn) accept(u *RudpConn) error {
 		return u.updateListenerSonny()
 	})
 
-	// Publish only after wg is wired so Accept()/Read cannot race on nil wg.
-	c.listener.accept.Write(u)
+	// Non-blocking accept enqueue: blocking holds the accept goroutine under backlog.
+	if !c.listener.accept.WriteTimeout(u, 100) {
+		u.Close()
+		return nil
+	}
 
 	//loggo.Debug("accept rudp finish %s", u.Info())
 
@@ -574,10 +589,22 @@ func (c *RudpConn) accept(u *RudpConn) error {
 }
 
 func (c *RudpConn) updateListenerSonny() error {
+	defer func() {
+		c.isclose.Store(true)
+		if c.listenersonny != nil && c.listenersonny.listener != nil && c.listenersonny.dstaddr != nil {
+			c.listenersonny.listener.sonny.Delete(c.listenersonny.dstaddr.String())
+		}
+	}()
 	return c.update_rudp(c.listenersonny.wg, c.listenersonny.fm, c.listenersonny.fatherconn, c.listenersonny.dstaddr, false)
 }
 
 func (c *RudpConn) updateDialerSonny() error {
+	defer func() {
+		c.isclose.Store(true)
+		if c.dialer != nil && c.dialer.conn != nil {
+			c.dialer.conn.Close()
+		}
+	}()
 	return c.update_rudp(c.dialer.wg, c.dialer.fm, c.dialer.conn, nil, true)
 }
 
@@ -634,7 +661,8 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 			mb, err := fm.MarshalFrame(f)
 			if err != nil {
 				//loggo.Error("MarshalFrame fail %s", err)
-				return err
+				reason = "MarshalFrame"
+				break
 			}
 
 			if runtime.GOOS != "linux" {
@@ -664,8 +692,10 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 					// WriteBatch 会调用底层的 sendmmsg
 					_, err := pconn.WriteBatch(msgs, 0)
 					if err != nil {
-						// 处理错误
-						return err
+						reason = "WriteBatch"
+						msgs = msgs[:0]
+						count = 0
+						break
 					}
 
 					// 重置 slice 长度以便复用 (保留容量)
@@ -673,6 +703,10 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 					count = 0
 				}
 			}
+		}
+
+		if reason == "MarshalFrame" || reason == "WriteBatch" {
+			break
 		}
 
 		// timeout
@@ -710,7 +744,7 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 			mb, err := fm.MarshalFrame(f)
 			if err != nil {
 				//loggo.Error("MarshalFrame fail %s", err)
-				return err
+				break
 			}
 			conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
 			if dstaddr != nil {

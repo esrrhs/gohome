@@ -24,14 +24,33 @@ type QuicConn struct {
 	pconn    net.PacketConn // dial-side UDP socket; caller-owned, must Close explicitly
 	listener *quic.Listener
 
-	dialMu    sync.Mutex
-	cancel    context.CancelFunc
-	dialOwned io.Closer // in-flight resource; Close() takes and closes it to abort Dial
+	dialMu       sync.Mutex
+	cancel       context.CancelFunc
+	dialOwned    io.Closer // in-flight resource; Close() takes and closes it to abort Dial
+	acceptCancel context.CancelFunc
+	acceptCtx    context.Context
 }
 
 type closerFunc func() error
 
 func (f closerFunc) Close() error { return f() }
+
+// ownedCloser wraps an io.Closer so dialOwned identity checks use pointer
+// equality (function-typed closers are not comparable and panic on ==).
+type ownedCloser struct {
+	c io.Closer
+}
+
+func (o *ownedCloser) Close() error {
+	if o == nil || o.c == nil {
+		return nil
+	}
+	return o.c.Close()
+}
+
+func newOwnedCloser(c io.Closer) *ownedCloser {
+	return &ownedCloser{c: c}
+}
 
 func (c *QuicConn) Name() string {
 	return "quic"
@@ -57,33 +76,39 @@ func (c *QuicConn) Close() error {
 	owned := c.dialOwned
 	c.cancel = nil
 	c.dialOwned = nil
-	c.dialMu.Unlock()
+	// Cancel while holding dialMu so finishDial observing ctx.Err() cannot
+	// race ahead of cancel and hand out a connection that Close is aborting.
 	if cancel != nil {
 		cancel()
 	}
+	c.dialMu.Unlock()
 	if owned != nil {
 		owned.Close()
 	}
 
+	if c.acceptCancel != nil {
+		c.acceptCancel()
+		c.acceptCancel = nil
+	}
+
 	var firstErr error
+	// Do not nil stream/qsession/pconn: concurrent Read/Write/Info may still
+	// observe the pointers; underlying Close is safe to call concurrently.
 	if c.stream != nil {
 		if err := c.stream.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		c.stream = nil
 	}
 	if c.qsession != nil {
 		if err := c.qsession.CloseWithError(0, "close"); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		c.qsession = nil
 	}
 	// quic.Dial does not own the PacketConn (createdConn=false); close it ourselves.
 	if c.pconn != nil {
 		if err := c.pconn.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		c.pconn = nil
 	}
 	if c.listener != nil {
 		if err := c.listener.Close(); err != nil && firstErr == nil {
@@ -109,16 +134,17 @@ func (c *QuicConn) setDialOwned(closer io.Closer) {
 	c.dialMu.Unlock()
 }
 
-// finishDial clears dial abort state. If ctx was canceled, closes closer and
-// returns false so the caller must not hand closer out as a live connection.
+// finishDial clears dial abort state. Succeeds only if ctx is still live and
+// we still own closer (Close has not stolen dialOwned).
 func (c *QuicConn) finishDial(ctx context.Context, closer io.Closer) bool {
 	c.dialMu.Lock()
-	canceled := ctx.Err() != nil
+	stillOwn := c.dialOwned == closer
+	canceled := ctx.Err() != nil || !stillOwn
 	c.cancel = nil
 	c.dialOwned = nil
 	c.dialMu.Unlock()
 	if canceled {
-		if closer != nil {
+		if closer != nil && stillOwn {
 			closer.Close()
 		}
 		return false
@@ -174,12 +200,17 @@ func (c *QuicConn) Dial(dst string) (Conn, error) {
 		return nil, err
 	}
 	// Always close both session and pconn on abort — Dial does not take pconn ownership.
-	abort := closerFunc(func() error {
+	abort := newOwnedCloser(closerFunc(func() error {
 		_ = session.CloseWithError(0, "dial canceled")
 		return pconn.Close()
-	})
-	c.setDialOwned(abort)
-	if ctx.Err() != nil {
+	}))
+	// Swap ownership under lock immediately so Close cannot close only pconn
+	// while leaving a live session.
+	c.dialMu.Lock()
+	c.dialOwned = abort
+	canceled := ctx.Err() != nil
+	c.dialMu.Unlock()
+	if canceled {
 		return nil, errors.New("dial canceled")
 	}
 
@@ -208,19 +239,29 @@ func (c *QuicConn) Listen(dst string) (Conn, error) {
 		return nil, err
 	}
 
-	return &QuicConn{listener: listener}, nil
+	actx, acancel := context.WithCancel(context.Background())
+	return &QuicConn{listener: listener, acceptCtx: actx, acceptCancel: acancel}, nil
 }
 
 func (c *QuicConn) Accept() (Conn, error) {
-	session, err := c.listener.Accept(context.Background())
+	if c.listener == nil {
+		return nil, errors.New("not listen")
+	}
+
+	actx := c.acceptCtx
+	if actx == nil {
+		actx = context.Background()
+	}
+
+	session, err := c.listener.Accept(actx)
 	if err != nil {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	sctx, cancel := context.WithTimeout(actx, 30*time.Second)
 	defer cancel()
 
-	stream, err := session.AcceptStream(ctx)
+	stream, err := session.AcceptStream(sctx)
 	if err != nil {
 		_ = session.CloseWithError(0, "accept stream fail")
 		return nil, err
