@@ -3,16 +3,18 @@ package network
 import (
 	"encoding/binary"
 	"errors"
+	"math"
+	"math/rand"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+
 	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/thread"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"google.golang.org/protobuf/proto"
-	"math"
-	"math/rand"
-	"net"
-	"sync"
-	"time"
 )
 
 /*
@@ -59,7 +61,7 @@ type RicmpConn struct {
 	dialer        *ricmpConnDialer
 	listenersonny *ricmpConnListenerSonny
 	listener      *ricmpConnListener
-	isclose       bool
+	isclose       atomic.Bool
 	closelock     sync.Mutex
 }
 
@@ -69,7 +71,7 @@ type ricmpConnDialer struct {
 	fm         *FrameMgr
 	wg         *thread.Group
 	icmpId     int
-	icmpSeq    int
+	icmpSeq    int32
 	icmpProto  int
 	icmpFlag   IcmpMsg_TYPE
 }
@@ -80,7 +82,7 @@ type ricmpConnListenerSonny struct {
 	fm         *FrameMgr
 	wg         *thread.Group
 	icmpId     int
-	icmpSeq    int
+	icmpSeq    int32 // written by recv loop, read by send loop
 	icmpProto  int
 	icmpFlag   IcmpMsg_TYPE
 }
@@ -99,7 +101,7 @@ func (c *RicmpConn) Name() string {
 func (c *RicmpConn) Read(p []byte) (n int, err error) {
 	c.checkConfig()
 
-	if c.isclose {
+	if c.isclose.Load() {
 		return 0, errors.New("read closed conn")
 	}
 
@@ -121,7 +123,7 @@ func (c *RicmpConn) Read(p []byte) (n int, err error) {
 		return 0, errors.New("empty conn")
 	}
 
-	for !c.isclose {
+	for !c.isclose.Load() {
 		if fm.GetRecvBufferSize() <= 0 {
 			if wg != nil && wg.IsExit() {
 				return 0, errors.New("closed conn")
@@ -141,7 +143,7 @@ func (c *RicmpConn) Read(p []byte) (n int, err error) {
 func (c *RicmpConn) Write(p []byte) (n int, err error) {
 	c.checkConfig()
 
-	if c.isclose {
+	if c.isclose.Load() {
 		return 0, errors.New("write closed conn")
 	}
 
@@ -166,7 +168,7 @@ func (c *RicmpConn) Write(p []byte) (n int, err error) {
 	totalsize := len(p)
 	cur := 0
 
-	for !c.isclose {
+	for !c.isclose.Load() {
 		size := totalsize - cur
 		svleft := fm.GetSendBufferLeft()
 		if size > svleft {
@@ -197,12 +199,16 @@ func (c *RicmpConn) Write(p []byte) (n int, err error) {
 func (c *RicmpConn) Close() error {
 	c.checkConfig()
 
-	if c.isclose {
+	if c.isclose.Load() {
 		return nil
 	}
 
 	c.closelock.Lock()
 	defer c.closelock.Unlock()
+
+	if c.isclose.Load() {
+		return nil
+	}
 
 	//loggo.Debug("start Close %s", c.Info())
 
@@ -239,7 +245,7 @@ func (c *RicmpConn) Close() error {
 			c.listenersonny.wg.Wait()
 		}
 	}
-	c.isclose = true
+	c.isclose.Store(true)
 
 	//loggo.Debug("Close ok %s", c.Info())
 
@@ -306,7 +312,7 @@ func (c *RicmpConn) Dial(dst string) (Conn, error) {
 			mb, _ := u.dialer.fm.MarshalFrame(f)
 			u.dialer.conn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
 			u.send_icmp(u.dialer.conn, mb, u.dialer.serveraddr,
-				u.id, u.dialer.icmpId, u.dialer.icmpSeq, u.dialer.icmpProto, u.dialer.icmpFlag)
+				u.id, u.dialer.icmpId, int(u.dialer.icmpSeq), u.dialer.icmpProto, u.dialer.icmpFlag)
 			u.dialer.icmpSeq++
 		}
 
@@ -324,7 +330,7 @@ func (c *RicmpConn) Dial(dst string) (Conn, error) {
 			}
 		}
 
-		if c.isclose {
+		if c.isclose.Load() {
 			//loggo.Debug("can not connect remote ricmp %s", u.Info())
 			break
 		}
@@ -340,12 +346,12 @@ func (c *RicmpConn) Dial(dst string) (Conn, error) {
 		time.Sleep(time.Millisecond * 10)
 	}
 
-	if c.isclose {
+	if c.isclose.Load() {
 		u.Close()
 		return nil, errors.New("closed conn")
 	}
 
-	if u.isclose {
+	if u.isclose.Load() {
 		return nil, errors.New("closed conn")
 	}
 
@@ -409,7 +415,7 @@ func (c *RicmpConn) Accept() (Conn, error) {
 		if !ok {
 			continue
 		}
-		if sonny.isclose {
+		if sonny.isclose.Load() {
 			continue
 		}
 		return sonny, nil
@@ -452,7 +458,7 @@ func (c *RicmpConn) loopListenerRecv() error {
 			}
 
 			sonny := &ricmpConnListenerSonny{dstaddr: srcaddr, fatherconn: c.listener.listenerconn, fm: fm,
-				icmpId: echoId, icmpSeq: echoSeq, icmpProto: int(IcmpMsg_PONG_PROTO), icmpFlag: IcmpMsg_SERVER_SEND_FLAG}
+				icmpId: echoId, icmpSeq: int32(echoSeq), icmpProto: int(IcmpMsg_PONG_PROTO), icmpFlag: IcmpMsg_SERVER_SEND_FLAG}
 
 			u := &RicmpConn{id: cid, config: c.config, listenersonny: sonny}
 			c.listener.sonny.Store(cid, u)
@@ -471,7 +477,7 @@ func (c *RicmpConn) loopListenerRecv() error {
 			//loggo.Debug("start accept remote ricmp %s %s", u.Info(), cid)
 		} else {
 			u := v.(*RicmpConn)
-			u.listenersonny.icmpSeq = echoSeq
+			atomic.StoreInt32(&u.listenersonny.icmpSeq, int32(echoSeq))
 
 			f := &Frame{}
 			err := proto.Unmarshal(buf[0:n], f)
@@ -485,7 +491,7 @@ func (c *RicmpConn) loopListenerRecv() error {
 
 		c.listener.sonny.Range(func(key, value interface{}) bool {
 			u := value.(*RicmpConn)
-			if u.isclose {
+			if u.isclose.Load() {
 				c.listener.sonny.Delete(key)
 				//loggo.Debug("delete sonny from map %s", u.Info())
 			}
@@ -521,7 +527,7 @@ func (c *RicmpConn) accept(u *RicmpConn) error {
 			}
 			u.listenersonny.fatherconn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
 			u.send_icmp(u.listenersonny.fatherconn, mb, u.listenersonny.dstaddr,
-				u.id, u.listenersonny.icmpId, u.listenersonny.icmpSeq, u.listenersonny.icmpProto, u.listenersonny.icmpFlag)
+				u.id, u.listenersonny.icmpId, int(atomic.LoadInt32(&u.listenersonny.icmpSeq)), u.listenersonny.icmpProto, u.listenersonny.icmpFlag)
 		}
 
 		now := time.Now()
@@ -546,15 +552,15 @@ func (c *RicmpConn) accept(u *RicmpConn) error {
 
 	//loggo.Debug("server accept ricmp ok %s", u.Info())
 
-	c.listener.accept.Write(u)
-
 	wg := thread.NewGroup("RicmpConn ListenerSonny"+" "+u.Info(), c.listener.wg, nil)
-
 	u.listenersonny.wg = wg
 
 	wg.Go("RicmpConn updateListenerSonny"+" "+u.Info(), func() error {
 		return u.updateListenerSonny()
 	})
+
+	// Publish only after wg is wired so Accept()/Read cannot race on nil wg.
+	c.listener.accept.Write(u)
 
 	//loggo.Debug("accept ricmp finish %s", u.Info())
 
@@ -576,16 +582,22 @@ func (c *RicmpConn) updateDialerSonny() error {
 }
 
 func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.PacketConn, dstaddr net.Addr, readconn bool,
-	recvCheckEchoId int, recvCheckEchoFlag int, id string, icmpId int, icmpSeq *int, icmpProto int, icmpFlag IcmpMsg_TYPE, addIcmpSeq bool) error {
+	recvCheckEchoId int, recvCheckEchoFlag int, id string, icmpId int, icmpSeq *int32, icmpProto int, icmpFlag IcmpMsg_TYPE, addIcmpSeq bool) error {
 
 	//loggo.Debug("start ricmp conn %s", c.Info())
 
-	stage := "open"
+	const (
+		stageOpen      int32 = 0
+		stageClose     int32 = 1
+		stageCloseWait int32 = 2
+	)
+	var stage atomic.Int32
+	stage.Store(stageOpen)
 
 	if readconn {
 		wg.Go("RicmpConn update_ricmp recv"+" "+c.Info(), func() error {
 			bytes := make([]byte, c.config.MaxPacketSize)
-			for !wg.IsExit() && stage != "closewait" {
+			for !wg.IsExit() && stage.Load() != stageCloseWait {
 				// recv icmp
 				conn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
 				n, _, _, id, echoId, _, echoFlag := c.recv_icmp(conn, bytes)
@@ -621,9 +633,10 @@ func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.Pack
 				return err
 			}
 			conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
-			c.send_icmp(conn, mb, dstaddr, id, icmpId, *icmpSeq, icmpProto, icmpFlag)
+			seq := int(atomic.LoadInt32(icmpSeq))
+			c.send_icmp(conn, mb, dstaddr, id, icmpId, seq, icmpProto, icmpFlag)
 			if addIcmpSeq {
-				*icmpSeq++
+				atomic.AddInt32(icmpSeq, 1)
 			}
 			//loggo.Debug("%s send frame to %s %d %v", c.Info(), dstaddr, f.Id, f.String())
 		}
@@ -646,7 +659,7 @@ func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.Pack
 		}
 	}
 
-	stage = "close"
+	stage.Store(stageClose)
 	fm.Close()
 	//loggo.Debug("close ricmp conn fm %s", c.Info())
 
@@ -666,9 +679,10 @@ func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.Pack
 				return err
 			}
 			conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
-			c.send_icmp(conn, mb, dstaddr, id, icmpId, *icmpSeq, icmpProto, icmpFlag)
+			seq := int(atomic.LoadInt32(icmpSeq))
+			c.send_icmp(conn, mb, dstaddr, id, icmpId, seq, icmpProto, icmpFlag)
 			if addIcmpSeq {
-				*icmpSeq++
+				atomic.AddInt32(icmpSeq, 1)
 			}
 			//loggo.Debug("%s send frame to %s %d", c.Info(), dstaddr, f.Id)
 		}
@@ -688,7 +702,7 @@ func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.Pack
 		time.Sleep(time.Millisecond * 10)
 	}
 
-	stage = "closewait"
+	stage.Store(stageCloseWait)
 	//loggo.Debug("close ricmp conn update %s", c.Info())
 
 	startEndTime := time.Now()
@@ -757,8 +771,9 @@ func (c *RicmpConn) recv_icmp(conn *icmp.PacketConn, bytes []byte) (int, net.Add
 		return 0, srcaddr, err, "", 0, 0, 0
 	}
 
-	if n <= 0 {
-		return 0, srcaddr, errors.New("n <= 0"), "", 0, 0, 0
+	// ICMP echo header is 8 bytes (type/code/checksum/id/seq).
+	if n < 8 {
+		return 0, srcaddr, errors.New("icmp packet too short"), "", 0, 0, 0
 	}
 
 	echoId := int(binary.BigEndian.Uint16(bytes[4:6]))
@@ -774,7 +789,6 @@ func (c *RicmpConn) recv_icmp(conn *icmp.PacketConn, bytes []byte) (int, net.Add
 		return 0, srcaddr, errors.New("magic error"), "", 0, 0, 0
 	}
 
-	copy(bytes, my.Data)
-
-	return len(my.Data), srcaddr, nil, my.Id, echoId, echoSeq, int(my.Flag)
+	copied := copy(bytes, my.Data)
+	return copied, srcaddr, nil, my.Id, echoId, echoSeq, int(my.Flag)
 }

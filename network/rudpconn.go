@@ -6,6 +6,7 @@ import (
 	"net"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/esrrhs/gohome/common"
@@ -60,7 +61,7 @@ type RudpConn struct {
 	listenersonny *rudpConnListenerSonny
 	listener      *rudpConnListener
 	cancel        context.CancelFunc
-	isclose       bool
+	isclose       atomic.Bool
 	closelock     sync.Mutex
 }
 
@@ -91,7 +92,7 @@ func (c *RudpConn) Name() string {
 func (c *RudpConn) Read(p []byte) (n int, err error) {
 	c.checkConfig()
 
-	if c.isclose {
+	if c.isclose.Load() {
 		return 0, errors.New("read closed conn")
 	}
 
@@ -113,7 +114,7 @@ func (c *RudpConn) Read(p []byte) (n int, err error) {
 		return 0, errors.New("empty conn")
 	}
 
-	for !c.isclose {
+	for !c.isclose.Load() {
 		if fm.GetRecvBufferSize() <= 0 {
 			if wg != nil && wg.IsExit() {
 				return 0, errors.New("closed conn")
@@ -133,7 +134,7 @@ func (c *RudpConn) Read(p []byte) (n int, err error) {
 func (c *RudpConn) Write(p []byte) (n int, err error) {
 	c.checkConfig()
 
-	if c.isclose {
+	if c.isclose.Load() {
 		return 0, errors.New("write closed conn")
 	}
 
@@ -158,7 +159,7 @@ func (c *RudpConn) Write(p []byte) (n int, err error) {
 	totalsize := len(p)
 	cur := 0
 
-	for !c.isclose {
+	for !c.isclose.Load() {
 		size := totalsize - cur
 		svleft := fm.GetSendBufferLeft()
 		if size > svleft {
@@ -189,12 +190,16 @@ func (c *RudpConn) Write(p []byte) (n int, err error) {
 func (c *RudpConn) Close() error {
 	c.checkConfig()
 
-	if c.isclose {
+	if c.isclose.Load() {
 		return nil
 	}
 
 	c.closelock.Lock()
 	defer c.closelock.Unlock()
+
+	if c.isclose.Load() {
+		return nil
+	}
 
 	//loggo.Debug("start Close %s", c.Info())
 
@@ -234,7 +239,7 @@ func (c *RudpConn) Close() error {
 			c.listenersonny.wg.Wait()
 		}
 	}
-	c.isclose = true
+	c.isclose.Store(true)
 
 	//loggo.Debug("Close ok %s", c.Info())
 
@@ -322,7 +327,7 @@ func (c *RudpConn) Dial(dst string) (Conn, error) {
 			}
 		}
 
-		if c.isclose {
+		if c.isclose.Load() {
 			//loggo.Debug("can not connect remote rudp %s", u.Info())
 			break
 		}
@@ -338,12 +343,12 @@ func (c *RudpConn) Dial(dst string) (Conn, error) {
 		time.Sleep(time.Millisecond * 10)
 	}
 
-	if c.isclose {
+	if c.isclose.Load() {
 		u.Close()
 		return nil, errors.New("closed conn")
 	}
 
-	if u.isclose {
+	if u.isclose.Load() {
 		return nil, errors.New("closed conn")
 	}
 
@@ -412,7 +417,7 @@ func (c *RudpConn) Accept() (Conn, error) {
 		if !ok {
 			continue
 		}
-		if sonny.isclose {
+		if sonny.isclose.Load() {
 			continue
 		}
 		return sonny, nil
@@ -493,7 +498,7 @@ func (c *RudpConn) loopListenerRecv() error {
 
 		c.listener.sonny.Range(func(key, value interface{}) bool {
 			u := value.(*RudpConn)
-			if u.isclose {
+			if u.isclose.Load() {
 				c.listener.sonny.Delete(key)
 				//loggo.Debug("delete sonny from map %s", u.Info())
 			}
@@ -553,15 +558,15 @@ func (c *RudpConn) accept(u *RudpConn) error {
 
 	//loggo.Debug("server accept rudp ok %s", u.Info())
 
-	c.listener.accept.Write(u)
-
 	wg := thread.NewGroup("RudpConn ListenerSonny"+" "+u.Info(), c.listener.wg, nil)
-
 	u.listenersonny.wg = wg
 
 	wg.Go("RudpConn updateListenerSonny"+" "+u.Info(), func() error {
 		return u.updateListenerSonny()
 	})
+
+	// Publish only after wg is wired so Accept()/Read cannot race on nil wg.
+	c.listener.accept.Write(u)
 
 	//loggo.Debug("accept rudp finish %s", u.Info())
 
@@ -580,12 +585,18 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 
 	//loggo.Debug("start rudp conn %s", c.Info())
 
-	stage := "open"
+	const (
+		stageOpen      int32 = 0
+		stageClose     int32 = 1
+		stageCloseWait int32 = 2
+	)
+	var stage atomic.Int32
+	stage.Store(stageOpen)
 
 	if readconn {
 		wg.Go("RudpConn update_rudp recv"+" "+c.Info(), func() error {
 			bytes := make([]byte, c.config.MaxPacketSize)
-			for !wg.IsExit() && stage != "closewait" {
+			for !wg.IsExit() && stage.Load() != stageCloseWait {
 				// recv udp
 				conn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
 				n, _ := conn.Read(bytes)
@@ -682,7 +693,7 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 		}
 	}
 
-	stage = "close"
+	stage.Store(stageClose)
 	fm.Close()
 	//loggo.Debug("close rudp conn fm %s", c.Info())
 
@@ -726,7 +737,7 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 		time.Sleep(time.Millisecond * 10)
 	}
 
-	stage = "closewait"
+	stage.Store(stageCloseWait)
 	//loggo.Debug("close rudp conn update %s", c.Info())
 
 	startEndTime := time.Now()
