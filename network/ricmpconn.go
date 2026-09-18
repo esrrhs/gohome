@@ -54,7 +54,6 @@ func DefaultRicmpConfig() *RicmpConfig {
 }
 
 type RicmpConn struct {
-	info          string
 	id            string
 	config        *RicmpConfig
 	dialer        *ricmpConnDialer
@@ -247,19 +246,16 @@ func (c *RicmpConn) Close() error {
 func (c *RicmpConn) Info() string {
 	c.checkConfig()
 
-	if c.info != "" {
-		return c.info
-	}
 	if c.dialer != nil {
-		c.info = c.dialer.conn.LocalAddr().String() + "<--ricmp dialer " + c.id + "-->" + c.dialer.serveraddr.String()
-	} else if c.listener != nil {
-		c.info = "ricmp listener " + c.id + "--" + c.listener.listenerconn.LocalAddr().String()
-	} else if c.listenersonny != nil {
-		c.info = c.listenersonny.fatherconn.LocalAddr().String() + "<--ricmp listenersonny " + c.id + "-->" + c.listenersonny.dstaddr.String()
-	} else {
-		c.info = "empty ricmp conn"
+		return c.dialer.conn.LocalAddr().String() + "<--ricmp dialer " + c.id + "-->" + c.dialer.serveraddr.String()
 	}
-	return c.info
+	if c.listener != nil {
+		return "ricmp listener " + c.id + "--" + c.listener.listenerconn.LocalAddr().String()
+	}
+	if c.listenersonny != nil {
+		return c.listenersonny.fatherconn.LocalAddr().String() + "<--ricmp listenersonny " + c.id + "-->" + c.listenersonny.dstaddr.String()
+	}
+	return "empty ricmp conn"
 }
 
 func (c *RicmpConn) Dial(dst string) (Conn, error) {
