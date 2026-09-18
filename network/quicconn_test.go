@@ -433,11 +433,12 @@ func TestQuicCloseReleasesSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := l.Listen("127.0.0.1:58191")
+	ln, err := l.Listen("127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
+	addr := ln.(*QuicConn).listener.Addr().String()
 
 	accepted := make(chan Conn, 1)
 	go func() {
@@ -451,7 +452,7 @@ func TestQuicCloseReleasesSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := d.Dial("127.0.0.1:58191")
+	client, err := d.Dial(addr)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -485,11 +486,12 @@ func TestQuicCloseFreesPacketConn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := l.Listen("127.0.0.1:58192")
+	ln, err := l.Listen("127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
+	addr := ln.(*QuicConn).listener.Addr().String()
 
 	go func() {
 		c, err := ln.Accept()
@@ -504,7 +506,7 @@ func TestQuicCloseFreesPacketConn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cli, err := d.Dial("127.0.0.1:58192")
+	cli, err := d.Dial(addr)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -517,10 +519,9 @@ func TestQuicCloseFreesPacketConn(t *testing.T) {
 	if err := cli.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if qc.pconn != nil {
-		t.Fatal("pconn field should be cleared after Close")
-	}
 	// Underlying UDP socket must already be closed (not waiting for GC).
+	// Pointer fields are intentionally left non-nil so concurrent Read/Write
+	// do not race on nil; the PacketConn itself must reject I/O.
 	_, err = pconn.WriteTo([]byte("z"), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1})
 	if err == nil {
 		t.Fatal("expected WriteTo on closed PacketConn to fail")
@@ -597,5 +598,46 @@ func TestQuicAcceptImmediateReadWrite(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("server side timed out")
+	}
+}
+
+func TestQuicAcceptNotListen(t *testing.T) {
+	c, err := NewConn("quic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Accept(); err == nil {
+		t.Fatal("Accept on non-listener should fail")
+	}
+}
+
+func TestQuicListenCloseUnblocksAccept(t *testing.T) {
+	c, err := NewConn("quic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := c.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := ln.Accept()
+		done <- err
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if err := ln.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Accept should fail after listener Close")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Accept not unblocked by listener Close")
 	}
 }

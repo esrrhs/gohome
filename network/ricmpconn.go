@@ -79,6 +79,7 @@ type ricmpConnDialer struct {
 type ricmpConnListenerSonny struct {
 	dstaddr    net.Addr
 	fatherconn *icmp.PacketConn
+	listener   *ricmpConnListener
 	fm         *FrameMgr
 	wg         *thread.Group
 	icmpId     int
@@ -177,6 +178,9 @@ func (c *RicmpConn) Write(p []byte) (n int, err error) {
 
 		if size <= 0 {
 			if wg != nil && wg.IsExit() {
+				if cur > 0 {
+					return cur, errors.New("closed conn")
+				}
 				return 0, errors.New("closed conn")
 			}
 			time.Sleep(time.Millisecond * 100)
@@ -193,6 +197,9 @@ func (c *RicmpConn) Write(p []byte) (n int, err error) {
 		time.Sleep(time.Millisecond * 100)
 	}
 
+	if cur > 0 {
+		return cur, errors.New("write closed conn")
+	}
 	return 0, errors.New("write closed conn")
 }
 
@@ -210,13 +217,14 @@ func (c *RicmpConn) Close() error {
 		return nil
 	}
 
-	//loggo.Debug("start Close %s", c.Info())
+	// Mark closed first so Read/Write observe it before we tear down the socket.
+	c.isclose.Store(true)
 
 	if c.dialer != nil {
 		if c.dialer.wg != nil {
-			//loggo.Debug("start Close dialer %s", c.Info())
 			c.dialer.wg.Stop()
-			c.dialer.wg.Wait()
+			// Join (not Wait): Wait returns as soon as Stop closes donech.
+			_ = c.dialer.wg.Join()
 		}
 		if c.dialer.conn != nil {
 			c.dialer.conn.Close()
@@ -228,26 +236,24 @@ func (c *RicmpConn) Close() error {
 		if c.listener.listenerconn != nil {
 			c.listener.listenerconn.Close()
 		}
+		c.listener.sonny.Range(func(key, value interface{}) bool {
+			u := value.(*RicmpConn)
+			_ = u.Close()
+			return true
+		})
 		if c.listener.wg != nil {
-			//loggo.Debug("start Close listener %s", c.Info())
 			c.listener.wg.Stop()
-			c.listener.sonny.Range(func(key, value interface{}) bool {
-				u := value.(*RicmpConn)
-				u.Close()
-				return true
-			})
-			c.listener.wg.Wait()
+			_ = c.listener.wg.Join()
 		}
 	} else if c.listenersonny != nil {
 		if c.listenersonny.wg != nil {
-			//loggo.Debug("start Close listenersonny %s", c.Info())
 			c.listenersonny.wg.Stop()
-			c.listenersonny.wg.Wait()
+			_ = c.listenersonny.wg.Join()
+		}
+		if c.listenersonny.listener != nil {
+			c.listenersonny.listener.sonny.Delete(c.id)
 		}
 	}
-	c.isclose.Store(true)
-
-	//loggo.Debug("Close ok %s", c.Info())
 
 	return nil
 }
@@ -310,7 +316,7 @@ func (c *RicmpConn) Dial(dst string) (Conn, error) {
 		for e := sendlist.Front(); e != nil; e = e.Next() {
 			f := e.Value.(*Frame)
 			mb, _ := u.dialer.fm.MarshalFrame(f)
-			u.dialer.conn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
+			u.dialer.conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
 			u.send_icmp(u.dialer.conn, mb, u.dialer.serveraddr,
 				u.id, u.dialer.icmpId, int(u.dialer.icmpSeq), u.dialer.icmpProto, u.dialer.icmpFlag)
 			u.dialer.icmpSeq++
@@ -402,7 +408,7 @@ func (c *RicmpConn) Listen(dst string) (Conn, error) {
 func (c *RicmpConn) Accept() (Conn, error) {
 	c.checkConfig()
 
-	if c.listener.wg == nil {
+	if c.listener == nil || c.listener.wg == nil {
 		return nil, errors.New("not listen")
 	}
 	for !c.listener.wg.IsExit() {
@@ -457,7 +463,7 @@ func (c *RicmpConn) loopListenerRecv() error {
 				fm.SetCongestion(&BBCongestion{})
 			}
 
-			sonny := &ricmpConnListenerSonny{dstaddr: srcaddr, fatherconn: c.listener.listenerconn, fm: fm,
+			sonny := &ricmpConnListenerSonny{dstaddr: srcaddr, fatherconn: c.listener.listenerconn, listener: c.listener, fm: fm,
 				icmpId: echoId, icmpSeq: int32(echoSeq), icmpProto: int(IcmpMsg_PONG_PROTO), icmpFlag: IcmpMsg_SERVER_SEND_FLAG}
 
 			u := &RicmpConn{id: cid, config: c.config, listenersonny: sonny}
@@ -477,6 +483,10 @@ func (c *RicmpConn) loopListenerRecv() error {
 			//loggo.Debug("start accept remote ricmp %s %s", u.Info(), cid)
 		} else {
 			u := v.(*RicmpConn)
+			if u.isclose.Load() {
+				c.listener.sonny.Delete(cid)
+				continue
+			}
 			atomic.StoreInt32(&u.listenersonny.icmpSeq, int32(echoSeq))
 
 			f := &Frame{}
@@ -559,8 +569,11 @@ func (c *RicmpConn) accept(u *RicmpConn) error {
 		return u.updateListenerSonny()
 	})
 
-	// Publish only after wg is wired so Accept()/Read cannot race on nil wg.
-	c.listener.accept.Write(u)
+	// Non-blocking accept enqueue: blocking holds the accept goroutine under backlog.
+	if !c.listener.accept.WriteTimeout(u, 100) {
+		u.Close()
+		return nil
+	}
 
 	//loggo.Debug("accept ricmp finish %s", u.Info())
 
@@ -568,6 +581,12 @@ func (c *RicmpConn) accept(u *RicmpConn) error {
 }
 
 func (c *RicmpConn) updateListenerSonny() error {
+	defer func() {
+		c.isclose.Store(true)
+		if c.listenersonny != nil && c.listenersonny.listener != nil {
+			c.listenersonny.listener.sonny.Delete(c.id)
+		}
+	}()
 	return c.update_ricmp(c.listenersonny.wg, c.listenersonny.fm, c.listenersonny.fatherconn, c.listenersonny.dstaddr, false,
 		0, 0,
 		c.id, c.listenersonny.icmpId, &c.listenersonny.icmpSeq, c.listenersonny.icmpProto, c.listenersonny.icmpFlag,
@@ -575,6 +594,12 @@ func (c *RicmpConn) updateListenerSonny() error {
 }
 
 func (c *RicmpConn) updateDialerSonny() error {
+	defer func() {
+		c.isclose.Store(true)
+		if c.dialer != nil && c.dialer.conn != nil {
+			c.dialer.conn.Close()
+		}
+	}()
 	return c.update_ricmp(c.dialer.wg, c.dialer.fm, c.dialer.conn, c.dialer.serveraddr, true,
 		c.dialer.icmpId, int(IcmpMsg_SERVER_SEND_FLAG),
 		c.id, c.dialer.icmpId, &c.dialer.icmpSeq, c.dialer.icmpProto, c.dialer.icmpFlag,
@@ -630,7 +655,8 @@ func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.Pack
 			mb, err := fm.MarshalFrame(f)
 			if err != nil {
 				//loggo.Error("MarshalFrame fail %s", err)
-				return err
+				reason = "MarshalFrame"
+				break
 			}
 			conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
 			seq := int(atomic.LoadInt32(icmpSeq))
@@ -639,6 +665,10 @@ func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.Pack
 				atomic.AddInt32(icmpSeq, 1)
 			}
 			//loggo.Debug("%s send frame to %s %d %v", c.Info(), dstaddr, f.Id, f.String())
+		}
+
+		if reason == "MarshalFrame" {
+			break
 		}
 
 		// timeout
@@ -676,7 +706,7 @@ func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.Pack
 			mb, err := fm.MarshalFrame(f)
 			if err != nil {
 				//loggo.Error("MarshalFrame fail %s", err)
-				return err
+				break
 			}
 			conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
 			seq := int(atomic.LoadInt32(icmpSeq))

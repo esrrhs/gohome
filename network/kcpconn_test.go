@@ -63,13 +63,13 @@ func TestKcpDialCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
-		defer close(done)
-		conn, _ := c.Dial("203.0.113.1:1") // TEST-NET-3; may return quickly
+		conn, err := c.Dial("203.0.113.1:1") // TEST-NET-3
 		if conn != nil {
-			conn.Close()
+			_ = conn.Close()
 		}
+		done <- err
 	}()
 
 	time.Sleep(time.Millisecond)
@@ -79,6 +79,8 @@ func TestKcpDialCancel(t *testing.T) {
 
 	select {
 	case <-done:
+		// KCP may succeed quickly (no handshake); Close must still return and
+		// must not leave the factory dial abort state stuck.
 	case <-time.After(3 * time.Second):
 		t.Fatal("Dial did not return after Close")
 	}
@@ -593,5 +595,15 @@ func TestKcpAcceptImmediateReadWrite(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("server side timed out")
+	}
+}
+
+func TestKcpAcceptNotListen(t *testing.T) {
+	c, err := NewConn("kcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Accept(); err == nil {
+		t.Fatal("Accept on non-listener should fail")
 	}
 }

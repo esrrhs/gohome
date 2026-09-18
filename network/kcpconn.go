@@ -48,10 +48,12 @@ func (c *KcpConn) Close() error {
 	owned := c.dialOwned
 	c.cancel = nil
 	c.dialOwned = nil
-	c.dialMu.Unlock()
+	// Cancel while holding dialMu so finishDial observing ctx.Err() cannot
+	// race ahead of cancel and hand out a connection that Close is aborting.
 	if cancel != nil {
 		cancel()
 	}
+	c.dialMu.Unlock()
 	if owned != nil {
 		owned.Close()
 	}
@@ -80,16 +82,17 @@ func (c *KcpConn) setDialOwned(closer io.Closer) {
 	c.dialMu.Unlock()
 }
 
-// finishDial clears dial abort state. If ctx was canceled, closes closer and
-// returns false so the caller must not hand closer out as a live connection.
+// finishDial clears dial abort state. Succeeds only if ctx is still live and
+// we still own closer (Close has not stolen dialOwned).
 func (c *KcpConn) finishDial(ctx context.Context, closer io.Closer) bool {
 	c.dialMu.Lock()
-	canceled := ctx.Err() != nil
+	stillOwn := c.dialOwned == closer
+	canceled := ctx.Err() != nil || !stillOwn
 	c.cancel = nil
 	c.dialOwned = nil
 	c.dialMu.Unlock()
 	if canceled {
-		if closer != nil {
+		if closer != nil && stillOwn {
 			closer.Close()
 		}
 		return false
@@ -115,6 +118,17 @@ func (c *KcpConn) Dial(dst string) (Conn, error) {
 		cancel()
 	}()
 
+	if ctx.Err() != nil {
+		return nil, errors.New("dial canceled")
+	}
+	// Resolve before binding so cancel has a chance before NewConn.
+	if _, err := net.ResolveUDPAddr("udp", dst); err != nil {
+		return nil, err
+	}
+	if ctx.Err() != nil {
+		return nil, errors.New("dial canceled")
+	}
+
 	var lc net.ListenConfig
 	if gControlOnConnSetup != nil {
 		lc.Control = gControlOnConnSetup
@@ -130,19 +144,29 @@ func (c *KcpConn) Dial(dst string) (Conn, error) {
 		return nil, errors.New("dial canceled")
 	}
 
-	conn, err := kcp.NewConn(dst, nil, 0, 0, pconn.(*net.UDPConn))
+	udpConn, ok := pconn.(*net.UDPConn)
+	if !ok {
+		return nil, errors.New("kcp dial: ListenPacket did not return *net.UDPConn")
+	}
+
+	conn, err := kcp.NewConn(dst, nil, 0, 0, udpConn)
 	if err != nil {
 		return nil, err
 	}
-	// kcp owns pconn; abort via closing the kcp session.
-	c.setDialOwned(conn)
-	if ctx.Err() != nil {
+	// Wrap so finishDial ownership checks stay pointer-comparable if dialOwned
+	// is ever a non-comparable closer elsewhere.
+	owned := &struct{ io.Closer }{conn}
+	c.dialMu.Lock()
+	c.dialOwned = owned
+	canceled := ctx.Err() != nil
+	c.dialMu.Unlock()
+	if canceled {
 		return nil, errors.New("dial canceled")
 	}
 
 	c.setParam(conn)
 
-	if !c.finishDial(ctx, conn) {
+	if !c.finishDial(ctx, owned) {
 		return nil, errors.New("dial canceled")
 	}
 	return &KcpConn{sess: conn}, nil
@@ -154,20 +178,33 @@ func (c *KcpConn) Listen(dst string) (Conn, error) {
 		return nil, err
 	}
 
-	listener.(*kcp.Listener).SetReadBuffer(4 * 1024 * 1024)
-	listener.(*kcp.Listener).SetWriteBuffer(4 * 1024 * 1024)
-	listener.(*kcp.Listener).SetDSCP(46)
+	kl, ok := listener.(*kcp.Listener)
+	if !ok {
+		_ = listener.Close()
+		return nil, errors.New("kcp listen: unexpected listener type")
+	}
+	_ = kl.SetReadBuffer(4 * 1024 * 1024)
+	_ = kl.SetWriteBuffer(4 * 1024 * 1024)
+	_ = kl.SetDSCP(46)
 
-	return &KcpConn{listener: listener.(*kcp.Listener)}, nil
+	return &KcpConn{listener: kl}, nil
 }
 
 func (c *KcpConn) Accept() (Conn, error) {
+	if c.listener == nil {
+		return nil, errors.New("not listen")
+	}
+
 	conn, err := c.listener.Accept()
 	if err != nil {
 		return nil, err
 	}
 
-	sess := conn.(*kcp.UDPSession)
+	sess, ok := conn.(*kcp.UDPSession)
+	if !ok {
+		_ = conn.Close()
+		return nil, errors.New("kcp accept: unexpected session type")
+	}
 	c.setParam(sess)
 	return &KcpConn{sess: sess}, nil
 }

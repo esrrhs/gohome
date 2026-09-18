@@ -680,3 +680,13 @@ func TestRicmpAcceptImmediateReadWrite(t *testing.T) {
 		t.Fatal("server side timed out")
 	}
 }
+
+func TestRicmpAcceptNotListen(t *testing.T) {
+	c, err := NewConn("ricmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Accept(); err == nil {
+		t.Fatal("Accept on non-listener should fail")
+	}
+}
