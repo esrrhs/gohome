@@ -79,6 +79,7 @@ type httpConnDialer struct {
 	index int
 	retry int
 	ctx   context.Context
+	tp    *http.Transport // reused for all posts; closed on Dialer Close
 }
 
 type httpConnListenerSonny struct {
@@ -214,6 +215,10 @@ func (c *RhttpConn) Close() error {
 			c.dialer.wg.Stop()
 			c.dialer.wg.Wait()
 		}
+		if c.dialer.tp != nil {
+			c.dialer.tp.CloseIdleConnections()
+			c.dialer.tp = nil
+		}
 	} else if c.listener != nil {
 		if c.listener.listenerconn != nil {
 			c.listener.listenerconn.Close()
@@ -253,10 +258,27 @@ func (c *RhttpConn) Info() string {
 	return "empty http conn"
 }
 
+func (c *RhttpConn) newHTTPTransport() *http.Transport {
+	tp := &http.Transport{
+		// Critical: never pool idle conns. Creating a Transport per request
+		// without CloseIdleConnections was a long-lived FD leak under load.
+		DisableKeepAlives: true,
+	}
+	tp.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var d net.Dialer
+		if gControlOnConnSetup != nil {
+			d = net.Dialer{Control: gControlOnConnSetup}
+		}
+		return d.DialContext(ctx, network, addr)
+	}
+	return tp
+}
+
 func (c *RhttpConn) postData(ctx context.Context, url string, d []byte) (int, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	c.checkConfig()
 
 	data := bytes.NewReader(d)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, data)
@@ -266,13 +288,16 @@ func (c *RhttpConn) postData(ctx context.Context, url string, d []byte) (int, []
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Close = true
 
-	tp := http.Transport{}
-	tp.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		var d net.Dialer
-		if gControlOnConnSetup != nil {
-			d = net.Dialer{Control: gControlOnConnSetup}
-		}
-		return d.DialContext(ctx, network, addr)
+	var tp *http.Transport
+	ownTP := false
+	if c.dialer != nil && c.dialer.tp != nil {
+		tp = c.dialer.tp
+	} else {
+		tp = c.newHTTPTransport()
+		ownTP = true
+	}
+	if ownTP {
+		defer tp.CloseIdleConnections()
 	}
 
 	timeout := time.Duration(c.config.RequestTimeoutMs) * time.Millisecond
@@ -280,7 +305,7 @@ func (c *RhttpConn) postData(ctx context.Context, url string, d []byte) (int, []
 		timeout = 15 * time.Second
 	}
 	client := &http.Client{
-		Transport: &tp,
+		Transport: tp,
 		Timeout:   timeout,
 	}
 	resp, err := client.Do(req)
@@ -313,8 +338,11 @@ func (c *RhttpConn) Dial(dst string) (Conn, error) {
 		url = "http://" + url
 	}
 
-	code, ret, err := c.postData(ctx, url+"?type="+ProtoConnnect, []byte{})
+	tp := c.newHTTPTransport()
+	tmp := &RhttpConn{config: c.config, dialer: &httpConnDialer{tp: tp, ctx: ctx}}
+	code, ret, err := tmp.postData(ctx, url+"?type="+ProtoConnnect, []byte{})
 	if err != nil {
+		tp.CloseIdleConnections()
 		cancel()
 		c.closelock.Lock()
 		c.cancel = nil
@@ -323,6 +351,7 @@ func (c *RhttpConn) Dial(dst string) (Conn, error) {
 	}
 
 	if code != ProtoCodeOK {
+		tp.CloseIdleConnections()
 		cancel()
 		c.closelock.Lock()
 		c.cancel = nil
@@ -335,7 +364,7 @@ func (c *RhttpConn) Dial(dst string) (Conn, error) {
 	sendb := list.NewRBuffergo(c.config.BufferSize, true)
 	recvb := list.NewRBuffergo(c.config.BufferSize, true)
 
-	dialer := &httpConnDialer{wg: wg, url: url, index: 0, retry: 0, addr: dst, ctx: ctx}
+	dialer := &httpConnDialer{wg: wg, url: url, index: 0, retry: 0, addr: dst, ctx: ctx, tp: tp}
 
 	u := &RhttpConn{id: id, config: c.config, dialer: dialer, sendb: sendb, recvb: recvb, cancel: cancel}
 
@@ -446,7 +475,8 @@ func (c *RhttpConn) updateDialerSonny() error {
 
 	//loggo.Debug("close http conn %s", c.Info())
 
-	c.postData(c.dialer.ctx, c.dialer.url+"?type="+ProtoClose, []byte{})
+	// Graceful close notification must not use the canceled dialer ctx.
+	_, _, _ = c.postData(context.Background(), c.dialer.url+"?type="+ProtoClose, []byte{})
 
 	return errors.New("closed")
 }
@@ -552,7 +582,17 @@ func (c *RhttpConn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		c.listener.sonny.Store(id, u)
 
-		c.listener.accept.Write(u)
+		// Non-blocking accept enqueue: blocking here holds the HTTP TCP conn (FD leak under backlog).
+		timeoutMs := c.config.RecvChanPushTimeout
+		if timeoutMs <= 0 {
+			timeoutMs = 100
+		}
+		if !c.listener.accept.WriteTimeout(u, timeoutMs) {
+			c.listener.sonny.Delete(id)
+			w.WriteHeader(ProtoCodeFull)
+			w.Write([]byte("accept queue full"))
+			return
+		}
 
 		w.WriteHeader(ProtoCodeOK)
 
@@ -568,6 +608,7 @@ func (c *RhttpConn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if ty == ProtoClose {
+			u.isclose = true
 			c.listener.sonny.Delete(u.id)
 			w.WriteHeader(ProtoCodeOK)
 			return
@@ -642,7 +683,18 @@ func (c *RhttpConn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (c *RhttpConn) loopRecv() error {
 	c.checkConfig()
-	http.Serve(c.listener.listenerconn, c)
+	// Explicit timeouts so hung clients cannot pin TCP FDs forever.
+	srv := &http.Server{
+		Handler:           c,
+		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
+	err := srv.Serve(c.listener.listenerconn)
+	if err != nil && !c.listener.wg.IsExit() {
+		return err
+	}
 	return nil
 }
 
