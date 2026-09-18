@@ -148,3 +148,20 @@ func (g *Group) Wait() error {
 	}
 	return g.err
 }
+
+// Join waits until every goroutine started via Go has returned.
+// Prefer Stop() then Join() when callers must reclaim shared resources
+// that those goroutines still touch (e.g. closing an http.Transport).
+func (g *Group) Join() error {
+	done := make(chan struct{})
+	go func() {
+		g.wg.Wait()
+		close(done)
+	}()
+	<-done
+
+	if g.father != nil {
+		g.father.removeson(g)
+	}
+	return g.err
+}

@@ -206,6 +206,14 @@ func Test0009(t *testing.T) {
 	time.Sleep(time.Second)
 }
 
+func TestChannelWriteTimeoutClosed(t *testing.T) {
+	c := NewChannel(1)
+	c.Close()
+	if c.WriteTimeout(1, 100) {
+		t.Fatal("WriteTimeout on closed channel should return false")
+	}
+}
+
 func Test0010(t *testing.T) {
 	a := make([]int, 3)
 	a[0] = 1

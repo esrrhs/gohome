@@ -1,10 +1,14 @@
 package common
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 type Channel struct {
 	ch     chan interface{}
 	closed bool
+	mu     sync.Mutex
 }
 
 func NewChannel(len int) *Channel {
@@ -12,12 +16,8 @@ func NewChannel(len int) *Channel {
 }
 
 func (c *Channel) Close() {
-	defer func() {
-		if recover() != nil {
-			c.closed = true
-		}
-	}()
-
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if !c.closed {
 		c.closed = true
 		close(c.ch)
@@ -25,35 +25,45 @@ func (c *Channel) Close() {
 }
 
 func (c *Channel) Write(v interface{}) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Unlock()
+
 	defer func() {
 		if recover() != nil {
+			c.mu.Lock()
 			c.closed = true
+			c.mu.Unlock()
 		}
 	}()
-
-	if !c.closed {
-		c.ch <- v
-	}
+	c.ch <- v
 }
 
 func (c *Channel) WriteTimeout(v interface{}, timeoutms int) bool {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return false
+	}
+	c.mu.Unlock()
+
 	defer func() {
 		if recover() != nil {
+			c.mu.Lock()
 			c.closed = true
+			c.mu.Unlock()
 		}
 	}()
 
-	if !c.closed {
-
-		select {
-		case c.ch <- v:
-			return true
-		case <-time.After(time.Duration(timeoutms) * time.Millisecond):
-			return false
-		}
+	select {
+	case c.ch <- v:
+		return true
+	case <-time.After(time.Duration(timeoutms) * time.Millisecond):
+		return false
 	}
-
-	return true
 }
 
 func (c *Channel) Ch() <-chan interface{} {
