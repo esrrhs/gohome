@@ -138,9 +138,10 @@ func NewFrameMgr(frame_max_size int, frame_max_id int, buffersize int, windowsiz
 		close: false, remoteclosed: false, closesend: false,
 		lastPingTime: time.Now().UnixNano(), lastPongTime: time.Now().UnixNano(),
 		lastSendHBTime: time.Now().UnixNano(), lastRecvHBTime: time.Now().UnixNano(), lastRecvDataTime: time.Now().UnixNano(),
-		rttns:     (int64)(resend_timems * 1000),
-		reqmap:    make(map[int32]int64),
-		connected: false, openstat: openstat, lastPrintStat: time.Now().UnixNano(),
+		rttns:        int64(resend_timems) * int64(time.Millisecond),
+		reqmap:       make(map[int32]int64),
+		connected:    false, openstat: openstat, lastPrintStat: time.Now().UnixNano(),
+		ctLastSendId: -1,
 	}
 
 	if openstat > 0 {
@@ -201,7 +202,7 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 		fm.sendb.Read(fd.Data)
 
 		if fm.compress > 0 && len(fd.Data) > fm.compress {
-			newb := common.CompressData(fd.Data)
+			newb := common.CompressDataZstd(fd.Data)
 			if len(newb) < len(fd.Data) {
 				fd.Data = newb
 				fd.Compress = true
@@ -230,7 +231,7 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 		fm.sendb.Read(fd.Data)
 
 		if fm.compress > 0 && len(fd.Data) > fm.compress {
-			newb := common.CompressData(fd.Data)
+			newb := common.CompressDataZstd(fd.Data)
 			if len(newb) < len(fd.Data) {
 				fd.Data = newb
 				fd.Compress = true
@@ -274,11 +275,31 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 	}
 }
 
+// sendIdRank returns the forward distance from origin to id in the id ring.
+func (fm *FrameMgr) sendIdRank(origin, id int32) int32 {
+	d := id - origin
+	if d < 0 {
+		d += fm.frame_max_id
+	}
+	return d
+}
+
 func (fm *FrameMgr) calSendList(cur int64) {
+	cursorRank := int32(-1)
+	var origin int32
+	if fm.ct != nil && fm.ctLastSendId >= 0 {
+		err, value := fm.sendwin.Get(int(fm.ctLastSendId))
+		if err != nil || value == nil {
+			fm.ctLastSendId = -1
+		} else if front := fm.sendwin.FrontInter(); front != nil {
+			origin = front.Value.(*Frame).Id
+			cursorRank = fm.sendIdRank(origin, fm.ctLastSendId)
+		}
+	}
 
 	for e := fm.sendwin.FrontInter(); e != nil; e = e.Next() {
 		f := e.Value.(*Frame)
-		if fm.ct != nil && f.Id < fm.ctLastSendId {
+		if cursorRank >= 0 && fm.sendIdRank(origin, f.Id) < cursorRank {
 			continue
 		}
 		if !f.Acked && (f.Resend || cur-f.Sendtime > int64(fm.resend_timems*(int)(time.Millisecond))) &&
@@ -500,15 +521,15 @@ func (fm *FrameMgr) processRecvFrame(f *Frame) bool {
 		if left >= len(f.Data.Data) {
 			src := f.Data.Data
 			if f.Data.Compress {
-				old, err := common.DeCompressData(src)
+				old, err := common.DeCompressDataZstd(src)
 				if err != nil {
-					loggo.Error("recv frame deCompressData error %v", f.Id)
+					loggo.Error("recv frame DeCompressDataZstd error %v", f.Id)
 					return false
 				}
 				if left < len(old) {
 					return false
 				}
-				//loggo.Debug("debugid %v deCompressData recv frame %v %v %v", fm.debugid, f.Id, len(src), len(old))
+				//loggo.Debug("debugid %v DeCompressDataZstd recv frame %v %v %v", fm.debugid, f.Id, len(src), len(old))
 				src = old
 			}
 
@@ -580,10 +601,10 @@ func (fm *FrameMgr) combineWindowToRecvBuffer(cur int64) {
 		f := e.Value.(*Frame)
 		//loggo.Debug("debugid %v start add req id %v %v %v", fm.debugid, fm.recvid, f.Id, id)
 		if f.Id != id {
-			oldReq := fm.reqmap[f.Id]
+			oldReq := fm.reqmap[id]
 			if cur-oldReq > fm.rttns {
 				reqtmp[id]++
-				fm.reqmap[f.Id] = cur
+				fm.reqmap[id] = cur
 				//loggo.Debug("debugid %v add req id %v ", fm.debugid, id)
 			}
 		} else {
