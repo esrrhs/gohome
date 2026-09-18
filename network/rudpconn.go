@@ -37,8 +37,8 @@ type RudpConfig struct {
 
 func DefaultRudpConfig() *RudpConfig {
 	return &RudpConfig{
-		MaxPacketSize:      1024,
-		CutSize:            500,
+		MaxPacketSize:      2048,
+		CutSize:            1200,
 		MaxId:              100000,
 		BufferSize:         1024 * 1024,
 		MaxWin:             10000,
