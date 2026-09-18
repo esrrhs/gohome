@@ -551,6 +551,65 @@ func TestRhttpName(t *testing.T) {
 	}
 }
 
+func TestRhttpCloseJoinNoRace(t *testing.T) {
+	c, err := NewConn("rhttp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := c.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.(*RhttpConn).listener.listenerconn.Addr().String()
+
+	accepted := make(chan Conn, 1)
+	go func() {
+		s, err := ln.Accept()
+		if err == nil {
+			accepted <- s
+		}
+	}()
+
+	cli, err := c.Dial(addr)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	srv := <-accepted
+
+	msg := []byte("close-join")
+	if _, err := cli.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	buf := make([]byte, 64)
+	deadline := time.After(5 * time.Second)
+	var got []byte
+	for {
+		n, err := srv.Read(buf)
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		got = append(got, buf[:n]...)
+		if string(got) == string(msg) {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("incomplete read: %q", got)
+		default:
+		}
+	}
+
+	if err := cli.Close(); err != nil {
+		t.Fatalf("cli Close: %v", err)
+	}
+	if err := srv.Close(); err != nil {
+		t.Fatalf("srv Close: %v", err)
+	}
+	if err := ln.Close(); err != nil {
+		t.Fatalf("ln Close: %v", err)
+	}
+}
+
 func TestRhttpDialCancel(t *testing.T) {
 	c, err := NewConn("rhttp")
 	if err != nil {

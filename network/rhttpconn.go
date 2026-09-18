@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/esrrhs/gohome/common"
-	"github.com/esrrhs/gohome/list"
-	"github.com/esrrhs/gohome/thread"
+	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -14,7 +12,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/esrrhs/gohome/common"
+	"github.com/esrrhs/gohome/list"
+	"github.com/esrrhs/gohome/thread"
 )
 
 /*
@@ -61,7 +64,7 @@ const (
 
 type RhttpConn struct {
 	id            string
-	isclose       bool
+	isclose       atomic.Bool
 	config        *HttpConfig
 	dialer        *httpConnDialer
 	listenersonny *httpConnListenerSonny
@@ -84,16 +87,19 @@ type httpConnDialer struct {
 
 type httpConnListenerSonny struct {
 	fwg          *thread.Group
+	listener     *httpConnListener
 	addr         string
 	expectIndex  int
 	lastRecvTime time.Time
 	lastSend     []byte
+	mu           sync.Mutex
 }
 
 type httpConnListener struct {
 	wg           *thread.Group
 	addr         string
 	listenerconn *net.TCPListener
+	srv          *http.Server
 	sonny        sync.Map
 	accept       *common.Channel
 }
@@ -105,7 +111,7 @@ func (c *RhttpConn) Name() string {
 func (c *RhttpConn) Read(p []byte) (n int, err error) {
 	c.checkConfig()
 
-	if c.isclose {
+	if c.isclose.Load() {
 		return 0, errors.New("read closed conn")
 	}
 
@@ -124,8 +130,9 @@ func (c *RhttpConn) Read(p []byte) (n int, err error) {
 		return 0, errors.New("empty conn")
 	}
 
-	for !c.isclose {
-		if c.recvb.Size() <= 0 {
+	for !c.isclose.Load() {
+		size := c.recvb.Size()
+		if size <= 0 {
 			if wg != nil && wg.IsExit() {
 				return 0, errors.New("closed conn")
 			}
@@ -133,8 +140,13 @@ func (c *RhttpConn) Read(p []byte) (n int, err error) {
 			continue
 		}
 
-		size := copy(p, c.recvb.GetReadLineBuffer())
-		c.recvb.SkipRead(size)
+		if size > len(p) {
+			size = len(p)
+		}
+		if !c.recvb.Read(p[0:size]) {
+			time.Sleep(time.Millisecond * 100)
+			continue
+		}
 		return size, nil
 	}
 
@@ -144,7 +156,7 @@ func (c *RhttpConn) Read(p []byte) (n int, err error) {
 func (c *RhttpConn) Write(p []byte) (n int, err error) {
 	c.checkConfig()
 
-	if c.isclose {
+	if c.isclose.Load() {
 		return 0, errors.New("write closed conn")
 	}
 
@@ -166,7 +178,7 @@ func (c *RhttpConn) Write(p []byte) (n int, err error) {
 	totalsize := len(p)
 	cur := 0
 
-	for !c.isclose {
+	for !c.isclose.Load() {
 		size := totalsize - cur
 		svleft := c.sendb.Capacity() - c.sendb.Size()
 		if size > svleft {
@@ -175,6 +187,9 @@ func (c *RhttpConn) Write(p []byte) (n int, err error) {
 
 		if size <= 0 {
 			if wg != nil && wg.IsExit() {
+				if cur > 0 {
+					return cur, errors.New("closed conn")
+				}
 				return 0, errors.New("closed conn")
 			}
 			time.Sleep(time.Millisecond * 100)
@@ -191,41 +206,44 @@ func (c *RhttpConn) Write(p []byte) (n int, err error) {
 		time.Sleep(time.Millisecond * 100)
 	}
 
+	if cur > 0 {
+		return cur, errors.New("write closed conn")
+	}
 	return 0, errors.New("write closed conn")
 }
 
 func (c *RhttpConn) Close() error {
 	c.checkConfig()
 
-	if c.isclose {
+	if c.isclose.Load() {
 		return nil
 	}
 
 	c.closelock.Lock()
 	defer c.closelock.Unlock()
 
-	if c.isclose {
+	if c.isclose.Load() {
 		return nil
 	}
 
-	//loggo.Debug("start Close %s", c.Info())
+	// Mark closed first so Read/Write/updateDialerSonny observe it.
+	c.isclose.Store(true)
 
 	if c.dialer != nil {
-		// Send ProtoClose before canceling the data-loop context so the peer
-		// can tear down promptly instead of waiting for HB timeout.
-		if c.dialer.url != "" {
-			_, _, _ = c.postData(context.Background(), c.dialer.url+"?type="+ProtoClose, []byte{})
-		}
-		// Mark closed before cancel so loopDialerRecv skips a second ProtoClose.
-		c.isclose = true
 		if c.cancel != nil {
 			c.cancel()
 			c.cancel = nil
 		}
 		if c.dialer.wg != nil {
-			//loggo.Debug("start Close dialer %s", c.Info())
 			c.dialer.wg.Stop()
-			c.dialer.wg.Wait()
+			// Join (not Wait): Wait returns as soon as Stop closes donech and
+			// would race with updateDialerSonny still using the Transport.
+			_ = c.dialer.wg.Join()
+		}
+		// ProtoClose after the data loop has stopped so the server never sees
+		// Close concurrent with an in-flight Data POST for the same id.
+		if c.dialer.url != "" {
+			_, _, _ = c.postData(context.Background(), c.dialer.url+"?type="+ProtoClose, []byte{})
 		}
 		if c.dialer.tp != nil {
 			c.dialer.tp.CloseIdleConnections()
@@ -236,32 +254,35 @@ func (c *RhttpConn) Close() error {
 			c.cancel()
 			c.cancel = nil
 		}
+		if c.listener.srv != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = c.listener.srv.Shutdown(ctx)
+			cancel()
+		}
 		if c.listener.listenerconn != nil {
 			c.listener.listenerconn.Close()
 		}
+		c.listener.sonny.Range(func(key, value interface{}) bool {
+			u := value.(*RhttpConn)
+			_ = u.Close()
+			return true
+		})
 		if c.listener.wg != nil {
-			//loggo.Debug("start Close listener %s", c.Info())
 			c.listener.wg.Stop()
-			c.listener.sonny.Range(func(key, value interface{}) bool {
-				u := value.(*RhttpConn)
-				u.Close()
-				return true
-			})
-			c.listener.wg.Wait()
+			_ = c.listener.wg.Join()
 		}
 	} else if c.listenersonny != nil {
 		if c.cancel != nil {
 			c.cancel()
 			c.cancel = nil
 		}
-		//loggo.Debug("start Close listenersonny %s", c.Info())
+		if c.listenersonny.listener != nil {
+			c.listenersonny.listener.sonny.Delete(c.id)
+		}
 	} else if c.cancel != nil {
 		c.cancel()
 		c.cancel = nil
 	}
-	c.isclose = true
-
-	//loggo.Debug("Close ok %s", c.Info())
 
 	return nil
 }
@@ -411,6 +432,7 @@ func (c *RhttpConn) updateDialerSonny() error {
 	var lastsend []byte
 	lastrecv = nil
 	lastsend = nil
+	var fullSince time.Time
 	for !c.dialer.wg.IsExit() {
 		active := false
 
@@ -445,7 +467,21 @@ func (c *RhttpConn) updateDialerSonny() error {
 		}
 		code, ret, err := c.postData(ctx, c.dialer.url+"?type="+ProtoData+"&index="+strconv.Itoa(c.dialer.index), send)
 		if err != nil || code != ProtoCodeOK {
-			if code != ProtoCodeFull {
+			if code == ProtoCodeFull {
+				// Peer recv buffer full: keep retrying, but bail if stuck too long.
+				if fullSince.IsZero() {
+					fullSince = time.Now()
+				} else {
+					limit := time.Duration(c.config.HBTimeoutMs) * time.Millisecond
+					if limit <= 0 {
+						limit = 10 * time.Second
+					}
+					if time.Since(fullSince) > limit {
+						break
+					}
+				}
+			} else {
+				fullSince = time.Time{}
 				c.dialer.retry++
 				if c.dialer.retry > c.config.MaxRetryNum {
 					//loggo.Error("retry max %d", c.dialer.retry)
@@ -456,6 +492,7 @@ func (c *RhttpConn) updateDialerSonny() error {
 			time.Sleep(time.Millisecond * 100)
 			continue
 		}
+		fullSince = time.Time{}
 		lastsend = nil
 
 		//loggo.Debug("dailer send ok %s %d %d %d", c.Info(), c.dialer.index, len(send), len(ret))
@@ -498,8 +535,9 @@ func (c *RhttpConn) updateDialerSonny() error {
 
 	//loggo.Debug("close http conn %s", c.Info())
 
-	// Best-effort ProtoClose if Close() did not already send one (e.g. loop exit by error).
-	if !c.isclose && c.dialer != nil && c.dialer.url != "" {
+	// Best-effort ProtoClose if Close() did not already take ownership
+	// (e.g. loop exit by error/retry while Close has not run yet).
+	if !c.isclose.Load() && c.dialer != nil && c.dialer.url != "" {
 		_, _, _ = c.postData(context.Background(), c.dialer.url+"?type="+ProtoClose, []byte{})
 	}
 
@@ -533,6 +571,14 @@ func (c *RhttpConn) Listen(dst string) (Conn, error) {
 	}
 
 	u := &RhttpConn{id: common.UniqueId(), config: c.config, listener: listener}
+	srv := &http.Server{
+		Handler:           u,
+		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
+	listener.srv = srv
 	wg.Go("RhttpConn Listen loopRecv"+" "+dst, func() error {
 		return u.loopRecv()
 	})
@@ -546,7 +592,7 @@ func (c *RhttpConn) Listen(dst string) (Conn, error) {
 func (c *RhttpConn) Accept() (Conn, error) {
 	c.checkConfig()
 
-	if c.listener.wg == nil {
+	if c.listener == nil || c.listener.wg == nil {
 		return nil, errors.New("not listen")
 	}
 	for !c.listener.wg.IsExit() {
@@ -559,7 +605,7 @@ func (c *RhttpConn) Accept() (Conn, error) {
 		if !ok {
 			continue
 		}
-		if sonny.isclose {
+		if sonny.isclose.Load() {
 			continue
 		}
 		return sonny, nil
@@ -598,7 +644,13 @@ func (c *RhttpConn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		sonny := &httpConnListenerSonny{fwg: c.listener.wg, expectIndex: 0, lastRecvTime: time.Now(), addr: c.listener.addr}
+		sonny := &httpConnListenerSonny{
+			fwg:          c.listener.wg,
+			listener:     c.listener,
+			expectIndex:  0,
+			lastRecvTime: time.Now(),
+			addr:         c.listener.addr,
+		}
 
 		sendb := list.NewRBuffergo(c.config.BufferSize, true)
 		recvb := list.NewRBuffergo(c.config.BufferSize, true)
@@ -623,6 +675,15 @@ func (c *RhttpConn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	} else {
 		u := v.(*RhttpConn)
+		u.listenersonny.mu.Lock()
+		defer u.listenersonny.mu.Unlock()
+
+		if u.isclose.Load() {
+			w.WriteHeader(ProtoCodeFail)
+			w.Write([]byte("sonny closed"))
+			return
+		}
+
 		u.listenersonny.lastRecvTime = time.Now()
 
 		if ty != ProtoData && ty != ProtoClose {
@@ -633,7 +694,7 @@ func (c *RhttpConn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if ty == ProtoClose {
-			u.isclose = true
+			u.isclose.Store(true)
 			c.listener.sonny.Delete(u.id)
 			w.WriteHeader(ProtoCodeOK)
 			return
@@ -671,11 +732,20 @@ func (c *RhttpConn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if newrecv {
-			body, err := ioutil.ReadAll(r.Body)
+			maxBody := int64(c.config.MaxPacketSize)
+			if maxBody <= 0 {
+				maxBody = 1024 * 100
+			}
+			body, err := ioutil.ReadAll(io.LimitReader(r.Body, maxBody+1))
 			if err != nil {
 				//loggo.Error("read body fail %v", r.RequestURI)
 				w.WriteHeader(ProtoCodeFail)
 				w.Write([]byte("read body fail"))
+				return
+			}
+			if int64(len(body)) > maxBody {
+				w.WriteHeader(ProtoCodeFail)
+				w.Write([]byte("body too large"))
 				return
 			}
 
@@ -708,16 +778,12 @@ func (c *RhttpConn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (c *RhttpConn) loopRecv() error {
 	c.checkConfig()
-	// Explicit timeouts so hung clients cannot pin TCP FDs forever.
-	srv := &http.Server{
-		Handler:           c,
-		ReadHeaderTimeout: 30 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       30 * time.Second,
+	srv := c.listener.srv
+	if srv == nil {
+		return errors.New("nil http server")
 	}
 	err := srv.Serve(c.listener.listenerconn)
-	if err != nil && !c.listener.wg.IsExit() {
+	if err != nil && !c.listener.wg.IsExit() && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
@@ -732,8 +798,11 @@ func (c *RhttpConn) checkSonnyClose() error {
 			if hb <= 0 {
 				hb = 10 * time.Second
 			}
-			if u.isclose || time.Since(u.listenersonny.lastRecvTime) > hb {
-				u.isclose = true
+			u.listenersonny.mu.Lock()
+			expired := u.isclose.Load() || time.Since(u.listenersonny.lastRecvTime) > hb
+			u.listenersonny.mu.Unlock()
+			if expired {
+				u.isclose.Store(true)
 				c.listener.sonny.Delete(key)
 			}
 			return true
