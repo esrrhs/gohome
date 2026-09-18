@@ -466,6 +466,13 @@ func (c *RudpConn) loopListenerRecv() error {
 			u := &RudpConn{config: c.config, listenersonny: sonny}
 			c.listener.sonny.Store(srcaddrstr, u)
 
+			// Feed the first packet (often CONNECT) into FrameMgr immediately;
+			// previously it was dropped and relied solely on retransmission.
+			f := &Frame{}
+			if err := proto.Unmarshal(buf[0:n], f); err == nil {
+				u.listenersonny.fm.OnRecvFrame(f)
+			}
+
 			c.listener.wg.Go("RudpConn accept"+" "+u.Info(), func() error {
 				return c.accept(u)
 			})
