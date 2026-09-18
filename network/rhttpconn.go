@@ -60,7 +60,6 @@ const (
 type RhttpConn struct {
 	id            string
 	isclose       bool
-	info          string
 	config        *HttpConfig
 	dialer        *httpConnDialer
 	listenersonny *httpConnListenerSonny
@@ -239,19 +238,16 @@ func (c *RhttpConn) Close() error {
 func (c *RhttpConn) Info() string {
 	c.checkConfig()
 
-	if c.info != "" {
-		return c.info
-	}
 	if c.dialer != nil {
-		c.info = c.id + "<--rhttp dialer-->" + c.dialer.addr
-	} else if c.listener != nil {
-		c.info = "rhttp listener--" + c.listener.addr
-	} else if c.listenersonny != nil {
-		c.info = c.id + "<--rhttp listenersonny-->" + c.listenersonny.addr
-	} else {
-		c.info = "empty http conn"
+		return c.id + "<--rhttp dialer-->" + c.dialer.addr
 	}
-	return c.info
+	if c.listener != nil {
+		return "rhttp listener--" + c.listener.addr
+	}
+	if c.listenersonny != nil {
+		return c.id + "<--rhttp listenersonny-->" + c.listenersonny.addr
+	}
+	return "empty http conn"
 }
 
 func (c *RhttpConn) postData(url string, d []byte) (int, []byte, error) {

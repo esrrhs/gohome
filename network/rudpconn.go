@@ -55,7 +55,6 @@ func DefaultRudpConfig() *RudpConfig {
 }
 
 type RudpConn struct {
-	info          string
 	config        *RudpConfig
 	dialer        *rudpConnDialer
 	listenersonny *rudpConnListenerSonny
@@ -242,19 +241,16 @@ func (c *RudpConn) Close() error {
 func (c *RudpConn) Info() string {
 	c.checkConfig()
 
-	if c.info != "" {
-		return c.info
-	}
 	if c.dialer != nil {
-		c.info = c.dialer.conn.LocalAddr().String() + "<--rudp-->" + c.dialer.conn.RemoteAddr().String()
-	} else if c.listener != nil {
-		c.info = "rudp--" + c.listener.listenerconn.LocalAddr().String()
-	} else if c.listenersonny != nil {
-		c.info = c.listenersonny.fatherconn.LocalAddr().String() + "<--rudp-->" + c.listenersonny.dstaddr.String()
-	} else {
-		c.info = "empty rudp conn"
+		return c.dialer.conn.LocalAddr().String() + "<--rudp-->" + c.dialer.conn.RemoteAddr().String()
 	}
-	return c.info
+	if c.listener != nil {
+		return "rudp--" + c.listener.listenerconn.LocalAddr().String()
+	}
+	if c.listenersonny != nil {
+		return c.listenersonny.fatherconn.LocalAddr().String() + "<--rudp-->" + c.listenersonny.dstaddr.String()
+	}
+	return "empty rudp conn"
 }
 
 func (c *RudpConn) Dial(dst string) (Conn, error) {

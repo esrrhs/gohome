@@ -17,7 +17,6 @@ UdpConn 实现了基于 udp 协议的Conn。
 */
 
 type UdpConn struct {
-	info          string
 	config        *UdpConfig
 	dialer        *udpConnDialer
 	listenersonny *udpConnListenerSonny
@@ -133,19 +132,16 @@ func (c *UdpConn) Close() error {
 func (c *UdpConn) Info() string {
 	c.checkConfig()
 
-	if c.info != "" {
-		return c.info
-	}
 	if c.dialer != nil {
-		c.info = c.dialer.conn.LocalAddr().String() + "<--udp-->" + c.dialer.conn.RemoteAddr().String()
-	} else if c.listener != nil {
-		c.info = "udp--" + c.listener.listenerconn.LocalAddr().String()
-	} else if c.listenersonny != nil {
-		c.info = c.listenersonny.fatherconn.LocalAddr().String() + "<--udp-->" + c.listenersonny.dstaddr.String()
-	} else {
-		c.info = "empty udp conn"
+		return c.dialer.conn.LocalAddr().String() + "<--udp-->" + c.dialer.conn.RemoteAddr().String()
 	}
-	return c.info
+	if c.listener != nil {
+		return "udp--" + c.listener.listenerconn.LocalAddr().String()
+	}
+	if c.listenersonny != nil {
+		return c.listenersonny.fatherconn.LocalAddr().String() + "<--udp-->" + c.listenersonny.dstaddr.String()
+	}
+	return "empty udp conn"
 }
 
 func (c *UdpConn) Dial(dst string) (Conn, error) {

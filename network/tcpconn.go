@@ -14,7 +14,6 @@ type TcpConn struct {
 	conn     *net.TCPConn
 	listener *net.TCPListener
 	cancel   context.CancelFunc
-	info     string
 }
 
 func (c *TcpConn) Name() string {
@@ -48,17 +47,14 @@ func (c *TcpConn) Close() error {
 }
 
 func (c *TcpConn) Info() string {
-	if c.info != "" {
-		return c.info
-	}
+	// Compute each call so concurrent readers never race on a lazy cache.
 	if c.conn != nil {
-		c.info = c.conn.LocalAddr().String() + "<--tcp-->" + c.conn.RemoteAddr().String()
-	} else if c.listener != nil {
-		c.info = "tcp--" + c.listener.Addr().String()
-	} else {
-		c.info = "empty tcp conn"
+		return c.conn.LocalAddr().String() + "<--tcp-->" + c.conn.RemoteAddr().String()
 	}
-	return c.info
+	if c.listener != nil {
+		return "tcp--" + c.listener.Addr().String()
+	}
+	return "empty tcp conn"
 }
 
 func (c *TcpConn) Dial(dst string) (Conn, error) {

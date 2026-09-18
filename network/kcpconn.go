@@ -19,7 +19,6 @@ type KcpConn struct {
 	session  *smux.Session
 	stream   *smux.Stream
 	listener *kcp.Listener
-	info     string
 
 	dialMu    sync.Mutex
 	cancel    context.CancelFunc
@@ -67,17 +66,13 @@ func (c *KcpConn) Close() error {
 }
 
 func (c *KcpConn) Info() string {
-	if c.info != "" {
-		return c.info
-	}
 	if c.session != nil {
-		c.info = c.session.LocalAddr().String() + "<--kcp-->" + c.session.RemoteAddr().String()
-	} else if c.listener != nil {
-		c.info = "kcp--" + c.listener.Addr().String()
-	} else {
-		c.info = "empty kcp conn"
+		return c.session.LocalAddr().String() + "<--kcp-->" + c.session.RemoteAddr().String()
 	}
-	return c.info
+	if c.listener != nil {
+		return "kcp--" + c.listener.Addr().String()
+	}
+	return "empty kcp conn"
 }
 
 func (c *KcpConn) setDialOwned(closer io.Closer) {

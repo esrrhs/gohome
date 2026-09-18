@@ -23,7 +23,6 @@ type QuicConn struct {
 	qsteam   *quic.Stream
 	stream   *smux.Stream
 	listener *quic.Listener
-	info     string
 
 	dialMu    sync.Mutex
 	cancel    context.CancelFunc
@@ -75,17 +74,13 @@ func (c *QuicConn) Close() error {
 }
 
 func (c *QuicConn) Info() string {
-	if c.info != "" {
-		return c.info
-	}
 	if c.session != nil {
-		c.info = c.qsession.LocalAddr().String() + "<--quic-->" + c.qsession.RemoteAddr().String()
-	} else if c.listener != nil {
-		c.info = "quic--" + c.listener.Addr().String()
-	} else {
-		c.info = "empty quic conn"
+		return c.qsession.LocalAddr().String() + "<--quic-->" + c.qsession.RemoteAddr().String()
 	}
-	return c.info
+	if c.listener != nil {
+		return "quic--" + c.listener.Addr().String()
+	}
+	return "empty quic conn"
 }
 
 func (c *QuicConn) setDialOwned(closer io.Closer) {
