@@ -540,3 +540,54 @@ func Test0009RHTTP(t *testing.T) {
 
 	time.Sleep(time.Second)
 }
+
+func TestRhttpName(t *testing.T) {
+	c, err := NewConn("rhttp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Name() != "rhttp" {
+		t.Fatalf("Name()=%q want rhttp", c.Name())
+	}
+}
+
+func TestRhttpDialCancel(t *testing.T) {
+	c, err := NewConn("rhttp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultHttpConfig()
+	cfg.RequestTimeoutMs = 30000
+	c.(*RhttpConn).SetConfig(cfg)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Dial("203.0.113.1:9") // TEST-NET-3 blackhole
+		done <- err
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Dial succeeded unexpectedly")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Dial was not canceled within 5s")
+	}
+}
+
+func TestRhttpHBTimeoutUsesMilliseconds(t *testing.T) {
+	cfg := DefaultHttpConfig()
+	hb := time.Duration(cfg.HBTimeoutMs) * time.Millisecond
+	if hb != 10*time.Second {
+		t.Fatalf("HB duration=%v want 10s (was wrongly using time.Second*HBTimeoutMs)", hb)
+	}
+	if time.Second*time.Duration(cfg.HBTimeoutMs) < time.Hour {
+		t.Fatal("sanity: old buggy formula should be huge")
+	}
+}

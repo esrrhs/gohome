@@ -1,6 +1,7 @@
 package network
 
 import (
+	"context"
 	"fmt"
 	"github.com/esrrhs/gohome/loggo"
 	"strconv"
@@ -424,4 +425,53 @@ func Test0008Quic(t *testing.T) {
 	exit = true
 
 	time.Sleep(time.Second)
+}
+
+func TestQuicCloseReleasesSession(t *testing.T) {
+	l, err := NewConn("quic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := l.Listen("127.0.0.1:58191")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			accepted <- c
+		}
+	}()
+
+	d, err := NewConn("quic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := d.Dial("127.0.0.1:58191")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	qc := client.(*QuicConn)
+	if qc.qsession == nil || qc.session == nil {
+		t.Fatal("missing quic/smux session after dial")
+	}
+	qsession := qc.qsession
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Closed quic session should reject new streams.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := qsession.OpenStreamSync(ctx); err == nil {
+		t.Fatal("expected OpenStreamSync to fail after Close")
+	}
+
+	select {
+	case ac := <-accepted:
+		_ = ac.Close()
+	case <-time.After(3 * time.Second):
+	}
 }

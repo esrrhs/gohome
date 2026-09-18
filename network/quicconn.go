@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/esrrhs/gohome/common"
 	"github.com/quic-go/quic-go"
@@ -65,12 +66,31 @@ func (c *QuicConn) Close() error {
 		owned.Close()
 	}
 
+	var firstErr error
 	if c.stream != nil {
-		return c.stream.Close()
-	} else if c.listener != nil {
-		return c.listener.Close()
+		if err := c.stream.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return nil
+	if c.session != nil {
+		if err := c.session.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if c.qsteam != nil {
+		_ = c.qsteam.Close()
+	}
+	if c.qsession != nil {
+		if err := c.qsession.CloseWithError(0, "close"); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if c.listener != nil {
+		if err := c.listener.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func (c *QuicConn) Info() string {
@@ -219,18 +239,26 @@ func (c *QuicConn) Accept() (Conn, error) {
 		return nil, err
 	}
 
-	stream, err := session.AcceptStream(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	stream, err := session.AcceptStream(ctx)
 	if err != nil {
+		_ = session.CloseWithError(0, "accept stream fail")
 		return nil, err
 	}
 
 	ss, err := smux.Server(stream, nil)
 	if err != nil {
+		_ = stream.Close()
+		_ = session.CloseWithError(0, "smux fail")
 		return nil, err
 	}
 
 	st, err := ss.AcceptStream()
 	if err != nil {
+		_ = ss.Close()
+		_ = session.CloseWithError(0, "accept smux stream fail")
 		return nil, err
 	}
 

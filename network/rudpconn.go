@@ -211,6 +211,12 @@ func (c *RudpConn) Close() error {
 			c.dialer.conn.Close()
 		}
 	} else if c.listener != nil {
+		if c.listener.accept != nil {
+			c.listener.accept.Close()
+		}
+		if c.listener.listenerconn != nil {
+			c.listener.listenerconn.Close()
+		}
 		if c.listener.wg != nil {
 			//loggo.Debug("start Close listener %s", c.Info())
 			c.listener.wg.Stop()
@@ -220,9 +226,6 @@ func (c *RudpConn) Close() error {
 				return true
 			})
 			c.listener.wg.Wait()
-		}
-		if c.listener.listenerconn != nil {
-			c.listener.listenerconn.Close()
 		}
 	} else if c.listenersonny != nil {
 		if c.listenersonny.wg != nil {
@@ -345,6 +348,7 @@ func (c *RudpConn) Dial(dst string) (Conn, error) {
 	}
 
 	if !u.dialer.fm.IsConnected() {
+		u.Close()
 		return nil, errors.New("connect timeout")
 	}
 

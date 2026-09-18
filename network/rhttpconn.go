@@ -31,6 +31,7 @@ type HttpConfig struct {
 	CloseWaitTimeoutMs  int
 	HBTimeoutMs         int
 	MaxMsgIndex         int
+	RequestTimeoutMs    int // per-request HTTP timeout; 0 means default
 }
 
 func DefaultHttpConfig() *HttpConfig {
@@ -44,6 +45,7 @@ func DefaultHttpConfig() *HttpConfig {
 		CloseWaitTimeoutMs:  5000,
 		HBTimeoutMs:         10000,
 		MaxMsgIndex:         100,
+		RequestTimeoutMs:    15000,
 	}
 }
 
@@ -76,6 +78,7 @@ type httpConnDialer struct {
 	url   string
 	index int
 	retry int
+	ctx   context.Context
 }
 
 type httpConnListenerSonny struct {
@@ -95,7 +98,7 @@ type httpConnListener struct {
 }
 
 func (c *RhttpConn) Name() string {
-	return "http"
+	return "rhttp"
 }
 
 func (c *RhttpConn) Read(p []byte) (n int, err error) {
@@ -250,10 +253,13 @@ func (c *RhttpConn) Info() string {
 	return "empty http conn"
 }
 
-func (c *RhttpConn) postData(url string, d []byte) (int, []byte, error) {
+func (c *RhttpConn) postData(ctx context.Context, url string, d []byte) (int, []byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	data := bytes.NewReader(d)
-	req, err := http.NewRequest("POST", url, data)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, data)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -261,16 +267,22 @@ func (c *RhttpConn) postData(url string, d []byte) (int, []byte, error) {
 	req.Close = true
 
 	tp := http.Transport{}
-	tp.Dial = func(network, addr string) (net.Conn, error) {
+	tp.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		var d net.Dialer
 		if gControlOnConnSetup != nil {
 			d = net.Dialer{Control: gControlOnConnSetup}
 		}
-		return d.Dial(network, addr)
+		return d.DialContext(ctx, network, addr)
 	}
 
-	client := &http.Client{}
-	client.Transport = &tp
+	timeout := time.Duration(c.config.RequestTimeoutMs) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	client := &http.Client{
+		Transport: &tp,
+		Timeout:   timeout,
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
@@ -288,6 +300,11 @@ func (c *RhttpConn) postData(url string, d []byte) (int, []byte, error) {
 func (c *RhttpConn) Dial(dst string) (Conn, error) {
 	c.checkConfig()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	c.closelock.Lock()
+	c.cancel = cancel
+	c.closelock.Unlock()
+
 	id := common.UniqueId()
 
 	url := dst + "/" + id
@@ -296,12 +313,20 @@ func (c *RhttpConn) Dial(dst string) (Conn, error) {
 		url = "http://" + url
 	}
 
-	code, ret, err := c.postData(url+"?type="+ProtoConnnect, []byte{})
+	code, ret, err := c.postData(ctx, url+"?type="+ProtoConnnect, []byte{})
 	if err != nil {
+		cancel()
+		c.closelock.Lock()
+		c.cancel = nil
+		c.closelock.Unlock()
 		return nil, err
 	}
 
 	if code != ProtoCodeOK {
+		cancel()
+		c.closelock.Lock()
+		c.cancel = nil
+		c.closelock.Unlock()
 		return nil, errors.New("dial fail " + string(ret))
 	}
 
@@ -310,9 +335,13 @@ func (c *RhttpConn) Dial(dst string) (Conn, error) {
 	sendb := list.NewRBuffergo(c.config.BufferSize, true)
 	recvb := list.NewRBuffergo(c.config.BufferSize, true)
 
-	dialer := &httpConnDialer{wg: wg, url: url, index: 0, retry: 0, addr: dst}
+	dialer := &httpConnDialer{wg: wg, url: url, index: 0, retry: 0, addr: dst, ctx: ctx}
 
-	u := &RhttpConn{id: id, config: c.config, dialer: dialer, sendb: sendb, recvb: recvb}
+	u := &RhttpConn{id: id, config: c.config, dialer: dialer, sendb: sendb, recvb: recvb, cancel: cancel}
+
+	c.closelock.Lock()
+	c.cancel = nil // ownership moved to returned conn
+	c.closelock.Unlock()
 
 	wg.Go("RhttpConn updateDialerSonny"+" "+u.Info(), func() error {
 		return u.updateDialerSonny()
@@ -358,7 +387,11 @@ func (c *RhttpConn) updateDialerSonny() error {
 			active = true
 		}
 
-		code, ret, err := c.postData(c.dialer.url+"?type="+ProtoData+"&index="+strconv.Itoa(c.dialer.index), send)
+		ctx := c.dialer.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		code, ret, err := c.postData(ctx, c.dialer.url+"?type="+ProtoData+"&index="+strconv.Itoa(c.dialer.index), send)
 		if err != nil || code != ProtoCodeOK {
 			if code != ProtoCodeFull {
 				c.dialer.retry++
@@ -413,7 +446,7 @@ func (c *RhttpConn) updateDialerSonny() error {
 
 	//loggo.Debug("close http conn %s", c.Info())
 
-	c.postData(c.dialer.url+"?type="+ProtoClose, []byte{})
+	c.postData(c.dialer.ctx, c.dialer.url+"?type="+ProtoClose, []byte{})
 
 	return errors.New("closed")
 }
@@ -618,7 +651,12 @@ func (c *RhttpConn) checkSonnyClose() error {
 	for !c.listener.wg.IsExit() {
 		c.listener.sonny.Range(func(key, value interface{}) bool {
 			u := value.(*RhttpConn)
-			if u.isclose || time.Now().Sub(u.listenersonny.lastRecvTime) > time.Second*time.Duration(c.config.HBTimeoutMs) {
+			hb := time.Duration(c.config.HBTimeoutMs) * time.Millisecond
+			if hb <= 0 {
+				hb = 10 * time.Second
+			}
+			if u.isclose || time.Since(u.listenersonny.lastRecvTime) > hb {
+				u.isclose = true
 				c.listener.sonny.Delete(key)
 			}
 			return true
