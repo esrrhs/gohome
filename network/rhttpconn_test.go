@@ -591,3 +591,53 @@ func TestRhttpHBTimeoutUsesMilliseconds(t *testing.T) {
 		t.Fatal("sanity: old buggy formula should be huge")
 	}
 }
+
+func TestRhttpNoTransportFDLeakSmoke(t *testing.T) {
+	l, err := NewConn("rhttp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := l.Listen("127.0.0.1:58282")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn Conn) {
+				buf := make([]byte, 64)
+				for {
+					if _, err := conn.Read(buf); err != nil {
+						conn.Close()
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+
+	for i := 0; i < 50; i++ {
+		d, err := NewConn("rhttp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := DefaultHttpConfig()
+		cfg.RequestTimeoutMs = 5000
+		d.(*RhttpConn).SetConfig(cfg)
+		conn, err := d.Dial("127.0.0.1:58282")
+		if err != nil {
+			t.Fatalf("Dial %d: %v", i, err)
+		}
+		if _, err := conn.Write([]byte("ping")); err != nil {
+			t.Fatalf("Write %d: %v", i, err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Fatalf("Close %d: %v", i, err)
+		}
+	}
+}
