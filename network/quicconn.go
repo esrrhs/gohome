@@ -11,18 +11,17 @@ import (
 
 	"github.com/esrrhs/gohome/common"
 	"github.com/quic-go/quic-go"
-	"github.com/xtaci/smux"
 )
 
 /*
 QuicConn 实现了基于 Quic 协议的Conn。
+单条 QUIC stream 直接作为读写通道（不再叠 smux）。
 */
 
 type QuicConn struct {
 	qsession *quic.Conn
-	session  *smux.Session
-	qsteam   *quic.Stream
-	stream   *smux.Stream
+	stream   *quic.Stream
+	pconn    net.PacketConn // dial-side UDP socket; caller-owned, must Close explicitly
 	listener *quic.Listener
 
 	dialMu    sync.Mutex
@@ -71,19 +70,20 @@ func (c *QuicConn) Close() error {
 		if err := c.stream.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
-	}
-	if c.session != nil {
-		if err := c.session.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	if c.qsteam != nil {
-		_ = c.qsteam.Close()
+		c.stream = nil
 	}
 	if c.qsession != nil {
 		if err := c.qsession.CloseWithError(0, "close"); err != nil && firstErr == nil {
 			firstErr = err
 		}
+		c.qsession = nil
+	}
+	// quic.Dial does not own the PacketConn (createdConn=false); close it ourselves.
+	if c.pconn != nil {
+		if err := c.pconn.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		c.pconn = nil
 	}
 	if c.listener != nil {
 		if err := c.listener.Close(); err != nil && firstErr == nil {
@@ -94,7 +94,7 @@ func (c *QuicConn) Close() error {
 }
 
 func (c *QuicConn) Info() string {
-	if c.session != nil {
+	if c.qsession != nil {
 		return c.qsession.LocalAddr().String() + "<--quic-->" + c.qsession.RemoteAddr().String()
 	}
 	if c.listener != nil {
@@ -107,12 +107,6 @@ func (c *QuicConn) setDialOwned(closer io.Closer) {
 	c.dialMu.Lock()
 	c.dialOwned = closer
 	c.dialMu.Unlock()
-}
-
-func quicSessionCloser(session *quic.Conn) io.Closer {
-	return closerFunc(func() error {
-		return session.CloseWithError(0, "dial canceled")
-	})
 }
 
 // finishDial clears dial abort state. If ctx was canceled, closes closer and
@@ -179,7 +173,12 @@ func (c *QuicConn) Dial(dst string) (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.setDialOwned(quicSessionCloser(session))
+	// Always close both session and pconn on abort — Dial does not take pconn ownership.
+	abort := closerFunc(func() error {
+		_ = session.CloseWithError(0, "dial canceled")
+		return pconn.Close()
+	})
+	c.setDialOwned(abort)
 	if ctx.Err() != nil {
 		return nil, errors.New("dial canceled")
 	}
@@ -192,31 +191,10 @@ func (c *QuicConn) Dial(dst string) (Conn, error) {
 		return nil, errors.New("dial canceled")
 	}
 
-	ss, err := smux.Client(stream, nil)
-	if err != nil {
-		return nil, err
-	}
-	c.setDialOwned(closerFunc(func() error {
-		_ = ss.Close()
-		return session.CloseWithError(0, "dial canceled")
-	}))
-	if ctx.Err() != nil {
+	if !c.finishDial(ctx, abort) {
 		return nil, errors.New("dial canceled")
 	}
-
-	st, err := ss.OpenStream()
-	if err != nil {
-		return nil, err
-	}
-
-	final := closerFunc(func() error {
-		_ = ss.Close()
-		return session.CloseWithError(0, "dial canceled")
-	})
-	if !c.finishDial(ctx, final) {
-		return nil, errors.New("dial canceled")
-	}
-	return &QuicConn{qsession: session, session: ss, qsteam: stream, stream: st}, nil
+	return &QuicConn{qsession: session, stream: stream, pconn: pconn}, nil
 }
 
 func (c *QuicConn) Listen(dst string) (Conn, error) {
@@ -248,21 +226,5 @@ func (c *QuicConn) Accept() (Conn, error) {
 		return nil, err
 	}
 
-	ss, err := smux.Server(stream, nil)
-	if err != nil {
-		_ = stream.Close()
-		_ = session.CloseWithError(0, "smux fail")
-		return nil, err
-	}
-
-	_ = ss.SetDeadline(time.Now().Add(30 * time.Second))
-	st, err := ss.AcceptStream()
-	_ = ss.SetDeadline(time.Time{})
-	if err != nil {
-		_ = ss.Close()
-		_ = session.CloseWithError(0, "accept smux stream fail")
-		return nil, err
-	}
-
-	return &QuicConn{qsession: session, session: ss, qsteam: stream, stream: st}, nil
+	return &QuicConn{qsession: session, stream: stream}, nil
 }

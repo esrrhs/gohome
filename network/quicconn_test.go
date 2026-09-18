@@ -455,8 +455,11 @@ func TestQuicCloseReleasesSession(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 	qc := client.(*QuicConn)
-	if qc.qsession == nil || qc.session == nil {
-		t.Fatal("missing quic/smux session after dial")
+	if qc.qsession == nil || qc.stream == nil {
+		t.Fatal("missing quic session/stream after dial")
+	}
+	if qc.pconn == nil {
+		t.Fatal("missing dial-side PacketConn after dial")
 	}
 	qsession := qc.qsession
 	if err := client.Close(); err != nil {

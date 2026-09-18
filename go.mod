@@ -9,7 +9,6 @@ require (
 	github.com/oschwald/geoip2-golang v1.13.0
 	github.com/quic-go/quic-go v0.62.0
 	github.com/xtaci/kcp-go v5.4.20+incompatible
-	github.com/xtaci/smux v1.5.57
 	golang.org/x/net v0.59.0
 	golang.org/x/sys v0.48.0
 	google.golang.org/protobuf v1.36.12
