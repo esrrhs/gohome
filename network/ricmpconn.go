@@ -38,7 +38,7 @@ type RicmpConfig struct {
 func DefaultRicmpConfig() *RicmpConfig {
 	return &RicmpConfig{
 		MaxPacketSize:      2048,
-		CutSize:            800,
+		CutSize:            1200,
 		MaxId:              100000,
 		BufferSize:         1024 * 1024,
 		MaxWin:             10000,

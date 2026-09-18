@@ -208,6 +208,6 @@ func (c *KcpConn) setParam(conn *kcp.UDPSession) {
 	conn.SetReadBuffer(16 * 1024 * 1024)
 	conn.SetWriteBuffer(16 * 1024 * 1024)
 	conn.SetNoDelay(0, 100, 1, 1)
-	conn.SetMtu(500)
+	conn.SetMtu(1200)
 	conn.SetACKNoDelay(false)
 }
