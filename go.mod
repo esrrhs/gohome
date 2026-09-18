@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/OneOfOne/xxhash v1.2.8
 	github.com/google/uuid v1.6.0
+	github.com/klauspost/compress v1.18.0
 	github.com/oschwald/geoip2-golang v1.13.0
 	github.com/quic-go/quic-go v0.62.0
 	github.com/xtaci/kcp-go v5.4.20+incompatible

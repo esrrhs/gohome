@@ -1,6 +1,8 @@
 package common
 
 import (
+	"bytes"
+	"crypto/rc4"
 	"fmt"
 	"image/color"
 	"os"
@@ -775,6 +777,60 @@ func TestCompressDecompressData(t *testing.T) {
 		t.Errorf("DeCompressData result %q does not match original %q", string(decompressed), string(src))
 	}
 	fmt.Println("DeCompressData result matches original:", string(decompressed) == string(src))
+}
+
+func TestCompressDecompressDataZstd(t *testing.T) {
+	src := []byte("hello world, this is a test for CompressDataZstd and DeCompressDataZstd")
+	compressed := CompressDataZstd(src)
+	if len(compressed) == 0 {
+		t.Errorf("CompressDataZstd returned empty result")
+	}
+	decompressed, err := DeCompressDataZstd(compressed)
+	if err != nil {
+		t.Errorf("DeCompressDataZstd returned error: %v", err)
+	}
+	if string(decompressed) != string(src) {
+		t.Errorf("DeCompressDataZstd result %q does not match original %q", string(decompressed), string(src))
+	}
+
+	// Exercise buffer pool reuse with larger payloads.
+	big := bytes.Repeat([]byte("0123456789abcdefghijklmnopqrstuvwxyz"), 2048)
+	for i := 0; i < 8; i++ {
+		c := CompressDataZstd(big)
+		d, err := DeCompressDataZstd(c)
+		if err != nil {
+			t.Fatalf("DeCompressDataZstd roundtrip %d: %v", i, err)
+		}
+		if !bytes.Equal(d, big) {
+			t.Fatalf("DeCompressDataZstd roundtrip %d mismatch", i)
+		}
+	}
+}
+
+func TestRc4MatchesStd(t *testing.T) {
+	key := "default"
+	src := bytes.Repeat([]byte("rc4-compat-check-payload"), 100)
+	got, err := Rc4(key, src)
+	if err != nil {
+		t.Fatalf("Rc4: %v", err)
+	}
+	std, err := rc4.NewCipher([]byte(key))
+	if err != nil {
+		t.Fatalf("NewCipher: %v", err)
+	}
+	want := make([]byte, len(src))
+	std.XORKeyStream(want, src)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("Rc4 output differs from crypto/rc4")
+	}
+	// Second call must also start from keystream 0 (independent frames).
+	got2, err := Rc4(key, src)
+	if err != nil {
+		t.Fatalf("Rc4 second: %v", err)
+	}
+	if !bytes.Equal(got, got2) {
+		t.Fatalf("Rc4 not idempotent per call")
+	}
 }
 
 func TestGetMd5String(t *testing.T) {
