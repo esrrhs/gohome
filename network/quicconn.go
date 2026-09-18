@@ -255,7 +255,9 @@ func (c *QuicConn) Accept() (Conn, error) {
 		return nil, err
 	}
 
+	_ = ss.SetDeadline(time.Now().Add(30 * time.Second))
 	st, err := ss.AcceptStream()
+	_ = ss.SetDeadline(time.Time{})
 	if err != nil {
 		_ = ss.Close()
 		_ = session.CloseWithError(0, "accept smux stream fail")

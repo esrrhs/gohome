@@ -204,12 +204,24 @@ func (c *RhttpConn) Close() error {
 	c.closelock.Lock()
 	defer c.closelock.Unlock()
 
+	if c.isclose {
+		return nil
+	}
+
 	//loggo.Debug("start Close %s", c.Info())
 
-	if c.cancel != nil {
-		c.cancel()
-	}
 	if c.dialer != nil {
+		// Send ProtoClose before canceling the data-loop context so the peer
+		// can tear down promptly instead of waiting for HB timeout.
+		if c.dialer.url != "" {
+			_, _, _ = c.postData(context.Background(), c.dialer.url+"?type="+ProtoClose, []byte{})
+		}
+		// Mark closed before cancel so loopDialerRecv skips a second ProtoClose.
+		c.isclose = true
+		if c.cancel != nil {
+			c.cancel()
+			c.cancel = nil
+		}
 		if c.dialer.wg != nil {
 			//loggo.Debug("start Close dialer %s", c.Info())
 			c.dialer.wg.Stop()
@@ -220,6 +232,10 @@ func (c *RhttpConn) Close() error {
 			c.dialer.tp = nil
 		}
 	} else if c.listener != nil {
+		if c.cancel != nil {
+			c.cancel()
+			c.cancel = nil
+		}
 		if c.listener.listenerconn != nil {
 			c.listener.listenerconn.Close()
 		}
@@ -234,7 +250,14 @@ func (c *RhttpConn) Close() error {
 			c.listener.wg.Wait()
 		}
 	} else if c.listenersonny != nil {
+		if c.cancel != nil {
+			c.cancel()
+			c.cancel = nil
+		}
 		//loggo.Debug("start Close listenersonny %s", c.Info())
+	} else if c.cancel != nil {
+		c.cancel()
+		c.cancel = nil
 	}
 	c.isclose = true
 
@@ -475,8 +498,10 @@ func (c *RhttpConn) updateDialerSonny() error {
 
 	//loggo.Debug("close http conn %s", c.Info())
 
-	// Graceful close notification must not use the canceled dialer ctx.
-	_, _, _ = c.postData(context.Background(), c.dialer.url+"?type="+ProtoClose, []byte{})
+	// Best-effort ProtoClose if Close() did not already send one (e.g. loop exit by error).
+	if !c.isclose && c.dialer != nil && c.dialer.url != "" {
+		_, _, _ = c.postData(context.Background(), c.dialer.url+"?type="+ProtoClose, []byte{})
+	}
 
 	return errors.New("closed")
 }
