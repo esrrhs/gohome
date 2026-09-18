@@ -455,3 +455,34 @@ func Test0008RUDP(t *testing.T) {
 
 	time.Sleep(time.Second)
 }
+
+func TestRudpAcceptUnblocksOnClose(t *testing.T) {
+	c, err := NewConn("rudp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := c.Listen("127.0.0.1:58201")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := ln.Accept()
+		done <- err
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if err := ln.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Accept should fail after Close")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Accept blocked after Close")
+	}
+}

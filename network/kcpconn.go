@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/xtaci/kcp-go"
 	"github.com/xtaci/smux"
@@ -186,11 +187,15 @@ func (c *KcpConn) Accept() (Conn, error) {
 
 	session, err := smux.Server(conn, nil)
 	if err != nil {
+		conn.Close()
 		return nil, err
 	}
 
+	_ = session.SetDeadline(time.Now().Add(30 * time.Second))
 	stream, err := session.AcceptStream()
+	_ = session.SetDeadline(time.Time{})
 	if err != nil {
+		session.Close()
 		return nil, err
 	}
 
