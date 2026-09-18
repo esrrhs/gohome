@@ -361,3 +361,74 @@ func Test0008UDP(t *testing.T) {
 
 	time.Sleep(time.Second)
 }
+
+func TestUdpAcceptNotListen(t *testing.T) {
+	c, err := NewConn("udp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Accept(); err == nil {
+		t.Fatal("Accept on non-listener should fail")
+	}
+}
+
+func TestUdpCloseJoinEcho(t *testing.T) {
+	c, err := NewConn("udp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := c.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.(*UdpConn).listener.listenerconn.LocalAddr().String()
+
+	accepted := make(chan Conn, 1)
+	go func() {
+		s, err := ln.Accept()
+		if err == nil {
+			accepted <- s
+		}
+	}()
+
+	cli, err := c.Dial(addr)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+
+	msg := []byte("udp-close-join")
+	if _, err := cli.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	var srv Conn
+	select {
+	case srv = <-accepted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Accept timed out")
+	}
+
+	buf := make([]byte, 64)
+	n, err := srv.Read(buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(buf[:n]) != string(msg) {
+		t.Fatalf("got %q want %q", buf[:n], msg)
+	}
+
+	if _, err := srv.Write([]byte("pong")); err != nil {
+		t.Fatalf("srv Write: %v", err)
+	}
+	n, err = cli.Read(buf)
+	if err != nil {
+		t.Fatalf("cli Read: %v", err)
+	}
+	if string(buf[:n]) != "pong" {
+		t.Fatalf("got %q want pong", buf[:n])
+	}
+
+	_ = cli.Close()
+	_ = srv.Close()
+	_ = ln.Close()
+}
