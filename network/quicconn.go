@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"net"
+	"sync"
 
 	"github.com/esrrhs/gohome/common"
 	"github.com/quic-go/quic-go"
@@ -22,7 +24,15 @@ type QuicConn struct {
 	stream   *smux.Stream
 	listener *quic.Listener
 	info     string
+
+	dialMu    sync.Mutex
+	cancel    context.CancelFunc
+	dialOwned io.Closer // in-flight resource; Close() takes and closes it to abort Dial
 }
+
+type closerFunc func() error
+
+func (f closerFunc) Close() error { return f() }
 
 func (c *QuicConn) Name() string {
 	return "quic"
@@ -43,6 +53,19 @@ func (c *QuicConn) Write(p []byte) (n int, err error) {
 }
 
 func (c *QuicConn) Close() error {
+	c.dialMu.Lock()
+	cancel := c.cancel
+	owned := c.dialOwned
+	c.cancel = nil
+	c.dialOwned = nil
+	c.dialMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if owned != nil {
+		owned.Close()
+	}
+
 	if c.stream != nil {
 		return c.stream.Close()
 	} else if c.listener != nil {
@@ -65,7 +88,53 @@ func (c *QuicConn) Info() string {
 	return c.info
 }
 
+func (c *QuicConn) setDialOwned(closer io.Closer) {
+	c.dialMu.Lock()
+	c.dialOwned = closer
+	c.dialMu.Unlock()
+}
+
+func quicSessionCloser(session *quic.Conn) io.Closer {
+	return closerFunc(func() error {
+		return session.CloseWithError(0, "dial canceled")
+	})
+}
+
+// finishDial clears dial abort state. If ctx was canceled, closes closer and
+// returns false so the caller must not hand closer out as a live connection.
+func (c *QuicConn) finishDial(ctx context.Context, closer io.Closer) bool {
+	c.dialMu.Lock()
+	canceled := ctx.Err() != nil
+	c.cancel = nil
+	c.dialOwned = nil
+	c.dialMu.Unlock()
+	if canceled {
+		if closer != nil {
+			closer.Close()
+		}
+		return false
+	}
+	return true
+}
+
 func (c *QuicConn) Dial(dst string) (Conn, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	c.dialMu.Lock()
+	c.cancel = cancel
+	c.dialOwned = nil
+	c.dialMu.Unlock()
+	defer func() {
+		c.dialMu.Lock()
+		owned := c.dialOwned
+		c.cancel = nil
+		c.dialOwned = nil
+		c.dialMu.Unlock()
+		if owned != nil {
+			owned.Close()
+		}
+		cancel()
+	}()
+
 	tlsConf := &tls.Config{
 		InsecureSkipVerify: true,
 		NextProtos:         []string{"QuicConn"},
@@ -77,9 +146,13 @@ func (c *QuicConn) Dial(dst string) (Conn, error) {
 	}
 
 	laddr := &net.UDPAddr{}
-	pconn, err := lc.ListenPacket(context.Background(), "udp", laddr.String())
+	pconn, err := lc.ListenPacket(ctx, "udp", laddr.String())
 	if err != nil {
 		return nil, err
+	}
+	c.setDialOwned(pconn)
+	if ctx.Err() != nil {
+		return nil, errors.New("dial canceled")
 	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", dst)
@@ -87,19 +160,33 @@ func (c *QuicConn) Dial(dst string) (Conn, error) {
 		return nil, err
 	}
 
-	session, err := quic.Dial(context.Background(), pconn, udpAddr, tlsConf, nil)
+	session, err := quic.Dial(ctx, pconn, udpAddr, tlsConf, nil)
 	if err != nil {
 		return nil, err
 	}
+	c.setDialOwned(quicSessionCloser(session))
+	if ctx.Err() != nil {
+		return nil, errors.New("dial canceled")
+	}
 
-	stream, err := session.OpenStreamSync(context.Background())
+	stream, err := session.OpenStreamSync(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if ctx.Err() != nil {
+		return nil, errors.New("dial canceled")
 	}
 
 	ss, err := smux.Client(stream, nil)
 	if err != nil {
 		return nil, err
+	}
+	c.setDialOwned(closerFunc(func() error {
+		_ = ss.Close()
+		return session.CloseWithError(0, "dial canceled")
+	}))
+	if ctx.Err() != nil {
+		return nil, errors.New("dial canceled")
 	}
 
 	st, err := ss.OpenStream()
@@ -107,6 +194,13 @@ func (c *QuicConn) Dial(dst string) (Conn, error) {
 		return nil, err
 	}
 
+	final := closerFunc(func() error {
+		_ = ss.Close()
+		return session.CloseWithError(0, "dial canceled")
+	})
+	if !c.finishDial(ctx, final) {
+		return nil, errors.New("dial canceled")
+	}
 	return &QuicConn{qsession: session, session: ss, qsteam: stream, stream: st}, nil
 }
 

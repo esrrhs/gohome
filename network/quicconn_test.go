@@ -52,6 +52,33 @@ func Test0002Quic(t *testing.T) {
 	time.Sleep(time.Second)
 }
 
+func TestQuicDialCancel(t *testing.T) {
+	c, err := NewConn("quic")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Dial("203.0.113.1:1") // TEST-NET-3, blackhole
+		done <- err
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Dial succeeded unexpectedly")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Dial was not canceled within 3s")
+	}
+}
+
 func Test0003Quic(t *testing.T) {
 	c, err := NewConn("quic")
 	if err != nil {
