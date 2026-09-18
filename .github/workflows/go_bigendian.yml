@@ -25,7 +25,7 @@ jobs:
             --platform=linux/s390x \
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
-            golang:1.24 \
+            golang:1.26 \
             bash -c '
               set -e
               echo "=== Testing crypto/cryptonight/inter/aes ==="
