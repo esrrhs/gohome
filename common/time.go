@@ -13,7 +13,10 @@ func init() {
 }
 
 func GetNowUpdateInSecond() time.Time {
-	return gnowsecond.Load().(time.Time)
+	if val := gnowsecond.Load(); val != nil {
+		return val.(time.Time)
+	}
+	return time.Now()
 }
 
 func updateNowInSecond() {

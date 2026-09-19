@@ -60,9 +60,12 @@ type RudpConn struct {
 	dialer        *rudpConnDialer
 	listenersonny *rudpConnListenerSonny
 	listener      *rudpConnListener
+	dialMu        sync.Mutex
 	cancel        context.CancelFunc
+	dialGen       uint64
 	isclose       atomic.Bool
 	closelock     sync.Mutex
+	cfgMu         sync.RWMutex
 }
 
 type rudpConnDialer struct {
@@ -211,10 +214,13 @@ func (c *RudpConn) Close() error {
 	// Mark closed first so Read/Write observe it before we tear down the socket.
 	c.isclose.Store(true)
 
-	if c.cancel != nil {
-		c.cancel()
-		c.cancel = nil
+	c.dialMu.Lock()
+	cancel := c.cancel
+	c.cancel = nil
+	if cancel != nil {
+		cancel()
 	}
+	c.dialMu.Unlock()
 	if c.dialer != nil {
 		if c.dialer.wg != nil {
 			c.dialer.wg.Stop()
@@ -276,7 +282,20 @@ func (c *RudpConn) Dial(dst string) (Conn, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	c.dialMu.Lock()
+	c.dialGen++
+	gen := c.dialGen
 	c.cancel = cancel
+	c.dialMu.Unlock()
+	defer func() {
+		c.dialMu.Lock()
+		if c.dialGen == gen {
+			c.cancel = nil
+		}
+		c.dialMu.Unlock()
+		cancel()
+	}()
+
 	var d net.Dialer
 	if gControlOnConnSetup != nil {
 		d = net.Dialer{Control: gControlOnConnSetup}
@@ -285,7 +304,10 @@ func (c *RudpConn) Dial(dst string) (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.cancel = nil
+	if ctx.Err() != nil {
+		_ = conn.Close()
+		return nil, errors.New("dial canceled")
+	}
 
 	id := common.Guid()
 	fm := NewFrameMgr(c.config.CutSize, c.config.MaxId, c.config.BufferSize, c.config.MaxWin, c.config.ResendTimems, c.config.Compress, c.config.Stat)
@@ -433,18 +455,27 @@ func (c *RudpConn) Accept() (Conn, error) {
 }
 
 func (c *RudpConn) checkConfig() {
+	c.cfgMu.Lock()
 	if c.config == nil {
 		c.config = DefaultRudpConfig()
 	}
+	c.cfgMu.Unlock()
 }
 
 func (c *RudpConn) SetConfig(config *RudpConfig) {
+	c.cfgMu.Lock()
 	c.config = config
+	c.cfgMu.Unlock()
 }
 
 func (c *RudpConn) GetConfig() *RudpConfig {
-	c.checkConfig()
-	return c.config
+	c.cfgMu.Lock()
+	if c.config == nil {
+		c.config = DefaultRudpConfig()
+	}
+	cfg := c.config
+	c.cfgMu.Unlock()
+	return cfg
 }
 
 func (c *RudpConn) loopListenerRecv() error {

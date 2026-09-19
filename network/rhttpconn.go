@@ -73,6 +73,7 @@ type RhttpConn struct {
 	sendb         *list.RBuffergo
 	recvb         *list.RBuffergo
 	closelock     sync.Mutex
+	cfgMu         sync.RWMutex
 }
 
 type httpConnDialer struct {
@@ -813,16 +814,25 @@ func (c *RhttpConn) checkSonnyClose() error {
 }
 
 func (c *RhttpConn) checkConfig() {
+	c.cfgMu.Lock()
 	if c.config == nil {
 		c.config = DefaultHttpConfig()
 	}
+	c.cfgMu.Unlock()
 }
 
 func (c *RhttpConn) SetConfig(config *HttpConfig) {
+	c.cfgMu.Lock()
 	c.config = config
+	c.cfgMu.Unlock()
 }
 
 func (c *RhttpConn) GetConfig() *HttpConfig {
-	c.checkConfig()
-	return c.config
+	c.cfgMu.Lock()
+	if c.config == nil {
+		c.config = DefaultHttpConfig()
+	}
+	cfg := c.config
+	c.cfgMu.Unlock()
+	return cfg
 }
