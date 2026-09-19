@@ -74,116 +74,105 @@ func print(str string) {
 	}
 }
 
+// hasOutput reports whether any sink would receive a log line.
+// When both NoLogFile and NoPrint are set, callers must return before
+// fmt.Sprintf / getFunc / Error()/String() on arguments.
+func hasOutput() bool {
+	return !gConfig.NoLogFile || !gConfig.NoPrint
+}
+
+func enabled(level int) bool {
+	return gConfig.Level <= level && hasOutput()
+}
+
+func writeFile(level int, str string) {
+	file := openLog(level)
+	file.WriteString(str)
+	file.Close()
+}
+
 func Debug(format string, a ...interface{}) {
-	if gConfig.Level <= LEVEL_DEBUG {
-		str := genLog(LEVEL_DEBUG, format, a...)
-		if !gConfig.NoLogFile {
-			file := openLog(LEVEL_DEBUG)
-			defer file.Close()
-			file.WriteString(str)
-		}
-		if !gConfig.NoPrint {
-			if !gConfig.NoLogColor {
-				print(FgString(str, 0, 0, 255))
-			} else {
-				print(str)
-			}
+	if !enabled(LEVEL_DEBUG) {
+		return
+	}
+	str := genLog(LEVEL_DEBUG, format, a...)
+	if !gConfig.NoLogFile {
+		writeFile(LEVEL_DEBUG, str)
+	}
+	if !gConfig.NoPrint {
+		if !gConfig.NoLogColor {
+			print(FgString(str, 0, 0, 255))
+		} else {
+			print(str)
 		}
 	}
 }
 
 func Info(format string, a ...interface{}) {
-	if gConfig.Level <= LEVEL_INFO {
-		str := genLog(LEVEL_INFO, format, a...)
-		if !gConfig.NoLogFile {
-			file := openLog(LEVEL_INFO)
-			defer file.Close()
-			file.WriteString(str)
-		}
+	if !enabled(LEVEL_INFO) {
+		return
+	}
+	str := genLog(LEVEL_INFO, format, a...)
+	if !gConfig.NoLogFile {
+		writeFile(LEVEL_INFO, str)
 		if gConfig.Level <= LEVEL_DEBUG {
-			if !gConfig.NoLogFile {
-				file1 := openLog(LEVEL_DEBUG)
-				defer file1.Close()
-				file1.WriteString(str)
-			}
+			writeFile(LEVEL_DEBUG, str)
 		}
-		if !gConfig.NoPrint {
-			if !gConfig.NoLogColor {
-				print(FgString(str, 0, 255, 0))
-			} else {
-				print(str)
-			}
+	}
+	if !gConfig.NoPrint {
+		if !gConfig.NoLogColor {
+			print(FgString(str, 0, 255, 0))
+		} else {
+			print(str)
 		}
 	}
 }
 
 func Warn(format string, a ...interface{}) {
-	if gConfig.Level <= LEVEL_WARN {
-		str := genLog(LEVEL_WARN, format, a...)
-		if !gConfig.NoLogFile {
-			file := openLog(LEVEL_WARN)
-			defer file.Close()
-			file.WriteString(str)
-		}
+	if !enabled(LEVEL_WARN) {
+		return
+	}
+	str := genLog(LEVEL_WARN, format, a...)
+	if !gConfig.NoLogFile {
+		writeFile(LEVEL_WARN, str)
 		if gConfig.Level <= LEVEL_INFO {
-			if !gConfig.NoLogFile {
-				file1 := openLog(LEVEL_INFO)
-				defer file1.Close()
-				file1.WriteString(str)
-			}
+			writeFile(LEVEL_INFO, str)
 		}
 		if gConfig.Level <= LEVEL_DEBUG {
-			if !gConfig.NoLogFile {
-				file2 := openLog(LEVEL_DEBUG)
-				defer file2.Close()
-				file2.WriteString(str)
-			}
+			writeFile(LEVEL_DEBUG, str)
 		}
-		if !gConfig.NoPrint {
-			if !gConfig.NoLogColor {
-				print(FgString(str, 255, 255, 0))
-			} else {
-				print(str)
-			}
+	}
+	if !gConfig.NoPrint {
+		if !gConfig.NoLogColor {
+			print(FgString(str, 255, 255, 0))
+		} else {
+			print(str)
 		}
 	}
 }
 
 func Error(format string, a ...interface{}) {
-	if gConfig.Level <= LEVEL_ERROR {
-		str := genLog(LEVEL_ERROR, format, a...)
-		if !gConfig.NoLogFile {
-			file := openLog(LEVEL_ERROR)
-			defer file.Close()
-			file.WriteString(str)
-		}
+	if !enabled(LEVEL_ERROR) {
+		return
+	}
+	str := genLog(LEVEL_ERROR, format, a...)
+	if !gConfig.NoLogFile {
+		writeFile(LEVEL_ERROR, str)
 		if gConfig.Level <= LEVEL_WARN {
-			if !gConfig.NoLogFile {
-				file0 := openLog(LEVEL_WARN)
-				defer file0.Close()
-				file0.WriteString(str)
-			}
+			writeFile(LEVEL_WARN, str)
 		}
 		if gConfig.Level <= LEVEL_INFO {
-			if !gConfig.NoLogFile {
-				file1 := openLog(LEVEL_INFO)
-				defer file1.Close()
-				file1.WriteString(str)
-			}
+			writeFile(LEVEL_INFO, str)
 		}
 		if gConfig.Level <= LEVEL_DEBUG {
-			if !gConfig.NoLogFile {
-				file2 := openLog(LEVEL_DEBUG)
-				defer file2.Close()
-				file2.WriteString(str)
-			}
+			writeFile(LEVEL_DEBUG, str)
 		}
-		if !gConfig.NoPrint {
-			if !gConfig.NoLogColor {
-				print(FgString(str, 255, 0, 0))
-			} else {
-				print(str)
-			}
+	}
+	if !gConfig.NoPrint {
+		if !gConfig.NoLogColor {
+			print(FgString(str, 255, 0, 0))
+		} else {
+			print(str)
 		}
 	}
 }

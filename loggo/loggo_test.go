@@ -187,6 +187,47 @@ t.Errorf("levelName(%d) = %q, want %q", tt.level, got, tt.want)
 }
 }
 
+type stringBoom struct{}
+
+func (stringBoom) String() string { panic("must not call String when sinks disabled") }
+
+type errBoom struct{}
+
+func (*errBoom) Error() string { panic("must not call Error when sinks disabled") }
+
+func TestNoOutputShortCircuit(t *testing.T) {
+	origConfig := gConfig
+	defer func() { gConfig = origConfig }()
+
+	gConfig.Level = LEVEL_DEBUG
+	gConfig.NoLogFile = true
+	gConfig.NoPrint = true
+
+	var buf bytes.Buffer
+	SetPrinter(&buf)
+
+	// String()/Error() run only inside fmt.Sprintf; must not run when sinks are off.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("log call evaluated arguments with sinks disabled: %v", r)
+		}
+	}()
+	Debug("debug %v", stringBoom{})
+	Info("info %s", stringBoom{})
+	Warn("warn %v", stringBoom{})
+	Error("error %v", &errBoom{})
+
+	if buf.Len() != 0 {
+		t.Fatalf("expected no output with NoLogFile+NoPrint, got %q", buf.String())
+	}
+
+	gConfig.NoPrint = false
+	Info("visible %d", 7)
+	if !strings.Contains(buf.String(), "visible 7") {
+		t.Fatalf("expected visible log after re-enabling print, got %q", buf.String())
+	}
+}
+
 func TestGrayscale(t *testing.T) {
 // grayscale is called by color() when r==g==b
 // Test via FgString which calls colorize -> color -> grayscale
