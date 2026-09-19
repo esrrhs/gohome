@@ -8,7 +8,7 @@ import (
 type Channel struct {
 	ch     chan interface{}
 	closed bool
-	mu     sync.Mutex
+	mu     sync.RWMutex
 }
 
 func NewChannel(len int) *Channel {
@@ -25,38 +25,20 @@ func (c *Channel) Close() {
 }
 
 func (c *Channel) Write(v interface{}) {
-	c.mu.Lock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if c.closed {
-		c.mu.Unlock()
 		return
 	}
-	c.mu.Unlock()
-
-	defer func() {
-		if recover() != nil {
-			c.mu.Lock()
-			c.closed = true
-			c.mu.Unlock()
-		}
-	}()
 	c.ch <- v
 }
 
 func (c *Channel) WriteTimeout(v interface{}, timeoutms int) bool {
-	c.mu.Lock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if c.closed {
-		c.mu.Unlock()
 		return false
 	}
-	c.mu.Unlock()
-
-	defer func() {
-		if recover() != nil {
-			c.mu.Lock()
-			c.closed = true
-			c.mu.Unlock()
-		}
-	}()
 
 	if timeoutms <= 0 {
 		select {

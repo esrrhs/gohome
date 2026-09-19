@@ -63,6 +63,7 @@ type RicmpConn struct {
 	listener      *ricmpConnListener
 	isclose       atomic.Bool
 	closelock     sync.Mutex
+	cfgMu         sync.RWMutex
 }
 
 type ricmpConnDialer struct {
@@ -430,18 +431,27 @@ func (c *RicmpConn) Accept() (Conn, error) {
 }
 
 func (c *RicmpConn) checkConfig() {
+	c.cfgMu.Lock()
 	if c.config == nil {
 		c.config = DefaultRicmpConfig()
 	}
+	c.cfgMu.Unlock()
 }
 
 func (c *RicmpConn) SetConfig(config *RicmpConfig) {
+	c.cfgMu.Lock()
 	c.config = config
+	c.cfgMu.Unlock()
 }
 
 func (c *RicmpConn) GetConfig() *RicmpConfig {
-	c.checkConfig()
-	return c.config
+	c.cfgMu.Lock()
+	if c.config == nil {
+		c.config = DefaultRicmpConfig()
+	}
+	cfg := c.config
+	c.cfgMu.Unlock()
+	return cfg
 }
 
 func (c *RicmpConn) loopListenerRecv() error {

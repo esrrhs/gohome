@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/esrrhs/gohome/loggo"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -150,7 +151,7 @@ func Test0005TCP(t *testing.T) {
 		return
 	}
 
-	exit := false
+	var exit atomic.Bool
 
 	go func() {
 		cc, err := cc.Accept()
@@ -161,7 +162,7 @@ func Test0005TCP(t *testing.T) {
 		defer cc.Close()
 		fmt.Println("accept done")
 		buf := make([]byte, 10)
-		for !exit {
+		for !exit.Load() {
 			n, err := cc.Read(buf)
 			if err != nil {
 				fmt.Println(err)
@@ -180,7 +181,7 @@ func Test0005TCP(t *testing.T) {
 	}
 
 	go func() {
-		for i := 0; i < 10000 && !exit; i++ {
+		for i := 0; i < 10000 && !exit.Load(); i++ {
 			_, err := ccc.Write([]byte("hahaha" + strconv.Itoa(i)))
 			if err != nil {
 				fmt.Println(err)
@@ -195,7 +196,7 @@ func Test0005TCP(t *testing.T) {
 	cc.Close()
 	ccc.Close()
 
-	exit = true
+	exit.Store(true)
 
 	time.Sleep(time.Second)
 }
@@ -213,7 +214,7 @@ func Test0005TCP1(t *testing.T) {
 		return
 	}
 
-	exit := false
+	var exit atomic.Bool
 
 	go func() {
 		cc, err := cc.Accept()
@@ -222,7 +223,7 @@ func Test0005TCP1(t *testing.T) {
 			return
 		}
 		fmt.Println("accept done")
-		for i := 0; i < 10000 && !exit; i++ {
+		for i := 0; i < 10000 && !exit.Load(); i++ {
 			_, err := cc.Write([]byte("hahaha" + strconv.Itoa(i)))
 			if err != nil {
 				fmt.Println(err)
@@ -240,7 +241,7 @@ func Test0005TCP1(t *testing.T) {
 
 	go func() {
 		buf := make([]byte, 10)
-		for !exit {
+		for !exit.Load() {
 			n, err := ccc.Read(buf)
 			if err != nil {
 				fmt.Println(err)
@@ -258,7 +259,7 @@ func Test0005TCP1(t *testing.T) {
 	cc.Close()
 	ccc.Close()
 
-	exit = true
+	exit.Store(true)
 
 	time.Sleep(time.Second)
 }
@@ -327,7 +328,7 @@ func Test0008TCP(t *testing.T) {
 		return
 	}
 
-	exit := false
+	var exit atomic.Bool
 
 	go func() {
 		cc, err := cc.Accept()
@@ -339,7 +340,7 @@ func Test0008TCP(t *testing.T) {
 		data := make([]byte, 1024*1024)
 		start := time.Now()
 		speed := 0
-		for !exit {
+		for !exit.Load() {
 			//fmt.Println("start Write")
 			_, err := cc.Write(data)
 			if err != nil {
@@ -369,7 +370,7 @@ func Test0008TCP(t *testing.T) {
 		buf := make([]byte, 1024*1024)
 		start := time.Now()
 		speed := 0
-		for !exit {
+		for !exit.Load() {
 			//fmt.Println("start Read")
 			n, err := ccc.Read(buf)
 			//fmt.Println("start Read")
@@ -394,7 +395,7 @@ func Test0008TCP(t *testing.T) {
 	cc.Close()
 	ccc.Close()
 
-	exit = true
+	exit.Store(true)
 
 	time.Sleep(time.Second)
 }

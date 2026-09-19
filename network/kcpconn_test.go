@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/esrrhs/gohome/loggo"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -184,7 +185,7 @@ func Test0005KCP(t *testing.T) {
 		return
 	}
 
-	exit := false
+	var exit atomic.Bool
 
 	go func() {
 		cc, err := cc.Accept()
@@ -195,7 +196,7 @@ func Test0005KCP(t *testing.T) {
 		defer cc.Close()
 		fmt.Println("accept done")
 		buf := make([]byte, 10)
-		for !exit {
+		for !exit.Load() {
 			n, err := cc.Read(buf)
 			if err != nil {
 				fmt.Println(err)
@@ -214,7 +215,7 @@ func Test0005KCP(t *testing.T) {
 	}
 
 	go func() {
-		for i := 0; i < 10000 && !exit; i++ {
+		for i := 0; i < 10000 && !exit.Load(); i++ {
 			_, err := ccc.Write([]byte("hahaha" + strconv.Itoa(i)))
 			if err != nil {
 				fmt.Println(err)
@@ -229,7 +230,7 @@ func Test0005KCP(t *testing.T) {
 	cc.Close()
 	ccc.Close()
 
-	exit = true
+	exit.Store(true)
 
 	time.Sleep(time.Second)
 }
@@ -247,7 +248,7 @@ func Test0005KCP1(t *testing.T) {
 		return
 	}
 
-	exit := false
+	var exit atomic.Bool
 
 	go func() {
 		//fmt.Println("start Accept")
@@ -257,7 +258,7 @@ func Test0005KCP1(t *testing.T) {
 			return
 		}
 		//fmt.Println("end Accept")
-		for i := 0; i < 10000 && !exit; i++ {
+		for i := 0; i < 10000 && !exit.Load(); i++ {
 			_, err := cc.Write([]byte("hahaha" + strconv.Itoa(i)))
 			if err != nil {
 				fmt.Println(err)
@@ -267,6 +268,7 @@ func Test0005KCP1(t *testing.T) {
 		fmt.Println("write done")
 	}()
 
+	fmt.Println("start Dial")
 	ccc, err := c.Dial("127.0.0.1:58680")
 	if err != nil {
 		fmt.Println("Dial " + err.Error())
@@ -276,7 +278,7 @@ func Test0005KCP1(t *testing.T) {
 
 	go func() {
 		buf := make([]byte, 10)
-		for !exit {
+		for !exit.Load() {
 			//fmt.Println("start Read")
 			n, err := ccc.Read(buf)
 			//fmt.Println("end Read")
@@ -297,7 +299,7 @@ func Test0005KCP1(t *testing.T) {
 	cc.Close()
 	ccc.Close()
 
-	exit = true
+	exit.Store(true)
 
 	time.Sleep(time.Second)
 }
@@ -366,7 +368,7 @@ func Test0008KCP(t *testing.T) {
 		return
 	}
 
-	exit := false
+	var exit atomic.Bool
 
 	go func() {
 		cc, err := cc.Accept()
@@ -378,7 +380,7 @@ func Test0008KCP(t *testing.T) {
 		data := make([]byte, 1024)
 		start := time.Now()
 		speed := 0
-		for !exit {
+		for !exit.Load() {
 			//fmt.Println("start Write")
 			_, err := cc.Write(data)
 			if err != nil {
@@ -408,7 +410,7 @@ func Test0008KCP(t *testing.T) {
 		buf := make([]byte, 1024)
 		start := time.Now()
 		speed := 0
-		for !exit {
+		for !exit.Load() {
 			//fmt.Println("start Read")
 			n, err := ccc.Read(buf)
 			//fmt.Println("start Read")
@@ -433,7 +435,7 @@ func Test0008KCP(t *testing.T) {
 	cc.Close()
 	ccc.Close()
 
-	exit = true
+	exit.Store(true)
 
 	time.Sleep(time.Second)
 }
@@ -451,7 +453,7 @@ func Test0009KCP(t *testing.T) {
 		return
 	}
 
-	exit := false
+	var exit atomic.Bool
 
 	go func() {
 		cc, err := cc.Accept()
@@ -463,7 +465,7 @@ func Test0009KCP(t *testing.T) {
 		data := make([]byte, 1024)
 		start := time.Now()
 		speed := 0
-		for !exit {
+		for !exit.Load() {
 			//fmt.Println("start Read")
 			n, err := cc.Read(data)
 			//fmt.Println("start Read")
@@ -494,7 +496,7 @@ func Test0009KCP(t *testing.T) {
 		buf := make([]byte, 1024)
 		start := time.Now()
 		speed := 0
-		for !exit {
+		for !exit.Load() {
 			//fmt.Println("start Write")
 			_, err := ccc.Write(buf)
 			if err != nil {
@@ -518,7 +520,7 @@ func Test0009KCP(t *testing.T) {
 	cc.Close()
 	ccc.Close()
 
-	exit = true
+	exit.Store(true)
 
 	time.Sleep(time.Second)
 }

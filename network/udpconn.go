@@ -25,6 +25,7 @@ type UdpConn struct {
 	dialMu sync.Mutex
 	cancel context.CancelFunc
 	dialGen uint64
+	cfgMu sync.RWMutex
 }
 
 type udpConnDialer struct {
@@ -327,16 +328,25 @@ func (c *UdpConn) loopRecv() error {
 }
 
 func (c *UdpConn) checkConfig() {
+	c.cfgMu.Lock()
 	if c.config == nil {
 		c.config = DefaultUdpConfig()
 	}
+	c.cfgMu.Unlock()
 }
 
 func (c *UdpConn) SetConfig(config *UdpConfig) {
+	c.cfgMu.Lock()
 	c.config = config
+	c.cfgMu.Unlock()
 }
 
 func (c *UdpConn) GetConfig() *UdpConfig {
-	c.checkConfig()
-	return c.config
+	c.cfgMu.Lock()
+	if c.config == nil {
+		c.config = DefaultUdpConfig()
+	}
+	cfg := c.config
+	c.cfgMu.Unlock()
+	return cfg
 }

@@ -44,17 +44,17 @@ func NewConn(proto string) (Conn, error) {
 	if proto == "tcp" {
 		return &TcpConn{}, nil
 	} else if proto == "udp" {
-		return &UdpConn{}, nil
+		return &UdpConn{config: DefaultUdpConfig()}, nil
 	} else if proto == "rudp" {
-		return &RudpConn{}, nil
+		return &RudpConn{config: DefaultRudpConfig()}, nil
 	} else if proto == "ricmp" {
-		return &RicmpConn{id: common.UniqueId()}, nil
+		return &RicmpConn{id: common.UniqueId(), config: DefaultRicmpConfig()}, nil
 	} else if proto == "kcp" {
 		return &KcpConn{}, nil
 	} else if proto == "quic" {
 		return &QuicConn{}, nil
 	} else if proto == "rhttp" {
-		return &RhttpConn{}, nil
+		return &RhttpConn{config: DefaultHttpConfig()}, nil
 	}
 	return nil, errors.New("undefined proto " + proto)
 }
