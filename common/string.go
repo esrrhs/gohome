@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io/ioutil"
-	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -108,10 +107,14 @@ func (s *StrTable) String(prefix string) string {
 
 	for _, l := range s.lines {
 		ret += strings.Repeat("-", totalcol) + "\n" + prefix
-		for i, d := range l.cols {
-			ret += "|" + WrapString(d, colmax[i])
+		n := len(l.cols)
+		if n > len(colmax) {
+			n = len(colmax)
 		}
-		for i := len(l.cols); i < len(colmax); i++ {
+		for i := 0; i < n; i++ {
+			ret += "|" + WrapString(l.cols[i], colmax[i])
+		}
+		for i := n; i < len(colmax); i++ {
 			ret += "|" + WrapString("", colmax[i])
 		}
 		ret += "|" + "\n" + prefix
@@ -187,24 +190,57 @@ const (
 )
 
 func NumToHex(num, n int) string {
+	if n < 2 || n > len(num2char) {
+		return ""
+	}
+	if num == 0 {
+		return "0"
+	}
+	neg := num < 0
+	var u uint64
+	if neg {
+		// avoid overflow on math.MinInt
+		u = uint64(-(num + 1)) + 1
+	} else {
+		u = uint64(num)
+	}
 	num_str := ""
-	for num != 0 {
-		yu := num % n
+	base := uint64(n)
+	for u != 0 {
+		yu := u % base
 		num_str = string(num2char[yu]) + num_str
-		num = num / n
+		u = u / base
+	}
+	if neg {
+		return "-" + num_str
 	}
 	return num_str
 }
 
 func Hex2Num(str string, n int) int {
-	v := 0.0
-	length := len(str)
-	for i := 0; i < length; i++ {
-		s := string(str[i])
-		index := strings.Index(num2char, s)
-		v += float64(index) * math.Pow(float64(n), float64(length-1-i))
+	if n < 2 || n > len(num2char) || str == "" {
+		return 0
 	}
-	return int(v)
+	neg := false
+	if str[0] == '-' {
+		neg = true
+		str = str[1:]
+		if str == "" {
+			return 0
+		}
+	}
+	v := 0
+	for i := 0; i < len(str); i++ {
+		index := strings.IndexByte(num2char, str[i])
+		if index < 0 || index >= n {
+			return 0
+		}
+		v = v*n + index
+	}
+	if neg {
+		return -v
+	}
+	return v
 }
 
 func GzipString(data string) string {

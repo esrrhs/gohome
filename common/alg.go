@@ -6,6 +6,7 @@ import (
 	"crypto/rc4"
 	"io"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/google/uuid"
@@ -26,9 +27,11 @@ func DeCompressData(src []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer r.Close()
 	var out bytes.Buffer
-	io.Copy(&out, r)
-	r.Close()
+	if _, err := io.Copy(&out, r); err != nil {
+		return nil, err
+	}
 	return out.Bytes(), nil
 }
 
@@ -46,6 +49,7 @@ var (
 	zstdDecoder, _ = zstd.NewReader(nil,
 		zstd.WithDecoderConcurrency(1),
 		zstd.WithDecoderLowmem(false),
+		zstd.WithDecoderMaxMemory(zstdMaxDecoded),
 	)
 
 	zstdEncBufPool = sync.Pool{New: func() any {
@@ -75,11 +79,16 @@ func CompressDataZstd(src []byte) []byte {
 func DeCompressDataZstd(src []byte) ([]byte, error) {
 	// Fast path: EncodeAll writes FrameContentSize; pre-size dst so DecodeAll
 	// does a single allocation and does not grow mid-decode.
+	// Reject oversized FCS early; decoder also enforces WithDecoderMaxMemory.
 	var hdr zstd.Header
-	if err := hdr.Decode(src); err == nil && hdr.HasFCS && hdr.FrameContentSize > 0 &&
-		hdr.FrameContentSize <= zstdMaxDecoded {
-		dst := make([]byte, 0, int(hdr.FrameContentSize))
-		return zstdDecoder.DecodeAll(src, dst)
+	if err := hdr.Decode(src); err == nil && hdr.HasFCS {
+		if hdr.FrameContentSize > zstdMaxDecoded {
+			return nil, zstd.ErrDecoderSizeExceeded
+		}
+		if hdr.FrameContentSize > 0 {
+			dst := make([]byte, 0, int(hdr.FrameContentSize))
+			return zstdDecoder.DecodeAll(src, dst)
+		}
 	}
 
 	// Fallback when FCS is absent: decode into pooled scratch, return exact copy.
@@ -88,6 +97,10 @@ func DeCompressDataZstd(src []byte) ([]byte, error) {
 	if err != nil {
 		zstdDecBufPool.Put(bp)
 		return nil, err
+	}
+	if len(tmp) > zstdMaxDecoded {
+		zstdDecBufPool.Put(bp)
+		return nil, zstd.ErrDecoderSizeExceeded
 	}
 	out := make([]byte, len(tmp))
 	copy(out, tmp)
@@ -156,30 +169,30 @@ func Guid() string {
 	return uuid.New().String()
 }
 
-var gIsBigEndian int
+var gIsBigEndian atomic.Int32
 
 func IsBigEndian() bool {
-	if gIsBigEndian != 0 {
-		return gIsBigEndian == 1
+	if v := gIsBigEndian.Load(); v != 0 {
+		return v == 1
 	}
 	var i uint16 = 0x1
 	b := (*[2]byte)(unsafe.Pointer(&i))
-	if b[1] == 0 {
-		gIsBigEndian = -1 // 小端
-	} else {
-		gIsBigEndian = 1 // 大端
+	if b[0] == 0 {
+		gIsBigEndian.Store(1) // 大端
+		return true
 	}
-	return b[0] == 0
+	gIsBigEndian.Store(-1) // 小端
+	return false
 }
 
 func DebugSetBigEndian(isBigEndian bool) {
 	if isBigEndian {
-		gIsBigEndian = 1 // 大端
+		gIsBigEndian.Store(1) // 大端
 	} else {
-		gIsBigEndian = -1 // 小端
+		gIsBigEndian.Store(-1) // 小端
 	}
 }
 
 func DebugResetBigEndian() {
-	gIsBigEndian = 0 // 未设置
+	gIsBigEndian.Store(0) // 未设置
 }

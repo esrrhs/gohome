@@ -62,17 +62,17 @@ func HashGeneric[T any](key T) uint64 {
 	case int32:
 		return HashInt(int(v))
 	case int64:
-		return HashInt(int(v))
+		return HashString(strconv.FormatInt(v, 10))
 	case uint:
-		return HashInt(int(v))
+		return HashString(strconv.FormatUint(uint64(v), 10))
 	case uint8:
 		return HashInt(int(v))
 	case uint16:
 		return HashInt(int(v))
 	case uint32:
-		return HashInt(int(v))
+		return HashString(strconv.FormatUint(uint64(v), 10))
 	case uint64:
-		return HashInt(int(v))
+		return HashString(strconv.FormatUint(v, 10))
 	case float32:
 		return HashString(fmt.Sprintf("%f", v))
 	case float64:
@@ -90,6 +90,6 @@ func HashGeneric[T any](key T) uint64 {
 	case string:
 		return HashString(v)
 	default:
-		panic("unsupported type for hashing %v" + fmt.Sprintf("%T", v))
+		panic(fmt.Sprintf("unsupported type for hashing: %T", v))
 	}
 }

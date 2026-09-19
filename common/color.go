@@ -24,22 +24,22 @@ import (
   	Navy 	#000080 	(0,0,128)
 */
 
-var Black = color.RGBA{0, 0, 0, 0}
-var White = color.RGBA{255, 255, 255, 0}
-var Red = color.RGBA{255, 0, 0, 0}
-var Lime = color.RGBA{0, 255, 0, 0}
-var Blue = color.RGBA{0, 0, 255, 0}
-var Yellow = color.RGBA{255, 255, 0, 0}
-var Cyan = color.RGBA{0, 255, 255, 0}
-var Magenta = color.RGBA{255, 0, 255, 0}
-var Silver = color.RGBA{192, 192, 192, 0}
-var Gray = color.RGBA{128, 128, 128, 0}
-var Maroon = color.RGBA{128, 0, 0, 0}
-var Olive = color.RGBA{128, 128, 0, 0}
-var Green = color.RGBA{0, 128, 0, 0}
-var Purple = color.RGBA{128, 0, 128, 0}
-var Teal = color.RGBA{0, 128, 128, 0}
-var Navy = color.RGBA{0, 0, 128, 0}
+var Black = color.RGBA{0, 0, 0, 255}
+var White = color.RGBA{255, 255, 255, 255}
+var Red = color.RGBA{255, 0, 0, 255}
+var Lime = color.RGBA{0, 255, 0, 255}
+var Blue = color.RGBA{0, 0, 255, 255}
+var Yellow = color.RGBA{255, 255, 0, 255}
+var Cyan = color.RGBA{0, 255, 255, 255}
+var Magenta = color.RGBA{255, 0, 255, 255}
+var Silver = color.RGBA{192, 192, 192, 255}
+var Gray = color.RGBA{128, 128, 128, 255}
+var Maroon = color.RGBA{128, 0, 0, 255}
+var Olive = color.RGBA{128, 128, 0, 255}
+var Green = color.RGBA{0, 128, 0, 255}
+var Purple = color.RGBA{128, 0, 128, 255}
+var Teal = color.RGBA{0, 128, 128, 255}
+var Navy = color.RGBA{0, 0, 128, 255}
 
 func ColorDistance(c1 color.RGBA, c2 color.RGBA) float64 {
 	return math.Sqrt((float64(c1.R)-float64(c2.R))*(float64(c1.R)-float64(c2.R)) +

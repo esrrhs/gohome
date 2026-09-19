@@ -85,24 +85,33 @@ func MaxOfInt64(vars ...int64) int64 {
 }
 
 func AbsInt(v int) int {
-	if v > 0 {
-		return v
+	if v == math.MinInt {
+		return math.MaxInt
 	}
-	return -v
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func AbsInt32(v int32) int32 {
-	if v > 0 {
-		return v
+	if v == math.MinInt32 {
+		return math.MaxInt32
 	}
-	return -v
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func AbsInt64(v int64) int64 {
-	if v > 0 {
-		return v
+	if v == math.MinInt64 {
+		return math.MaxInt64
 	}
-	return -v
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func UniqueId() string {
@@ -134,23 +143,23 @@ func Shuffle(n int, swap func(i, j int)) {
 }
 
 func MAKEINT64(high int32, low int32) int64 {
-	return (int64)(((int64)(low)) | ((int64)((int32)(high)))<<32)
+	return (int64(uint32(high)) << 32) | int64(uint32(low))
 }
 func HIINT32(I int64) int32 {
-	return (int32)(((int64)(I) >> 32) & 0xFFFFFFFF)
+	return int32(uint64(I) >> 32)
 }
 func LOINT32(l int64) int32 {
-	return (int32)(l)
+	return int32(l)
 }
 
 func MAKEINT32(high int16, low int16) int32 {
-	return (int32)(((int32)(low)) | ((int32)((int16)(high)))<<16)
+	return (int32(uint16(high)) << 16) | int32(uint16(low))
 }
 func HIINT16(I int32) int16 {
-	return (int16)(((int32)(I) >> 16) & 0xFFFF)
+	return int16(uint32(I) >> 16)
 }
 func LOINT16(l int32) int16 {
-	return (int16)(l)
+	return int16(l)
 }
 
 func IsInt(r float64) bool {
@@ -187,13 +196,19 @@ func SafeDivide(a int64, b int64) int64 {
 }
 
 func NearlyEqual(a int, b int) bool {
-	max := a
-	if b > a {
-		max = b
+	if a == b {
+		return true
 	}
-	aa := float64(a) / float64(max)
-	bb := float64(b) / float64(max)
-	return math.Abs(aa-bb) < 0.1
+	aa := float64(a)
+	bb := float64(b)
+	max := math.Abs(aa)
+	if absB := math.Abs(bb); absB > max {
+		max = absB
+	}
+	if max == 0 {
+		return true
+	}
+	return math.Abs(aa-bb)/max < 0.1
 }
 
 // Setup a bare-bones TLS config for the server

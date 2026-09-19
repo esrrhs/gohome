@@ -58,10 +58,21 @@ func (c *Channel) WriteTimeout(v interface{}, timeoutms int) bool {
 		}
 	}()
 
+	if timeoutms <= 0 {
+		select {
+		case c.ch <- v:
+			return true
+		default:
+			return false
+		}
+	}
+
+	timer := time.NewTimer(time.Duration(timeoutms) * time.Millisecond)
+	defer timer.Stop()
 	select {
 	case c.ch <- v:
 		return true
-	case <-time.After(time.Duration(timeoutms) * time.Millisecond):
+	case <-timer.C:
 		return false
 	}
 }
