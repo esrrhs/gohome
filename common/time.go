@@ -1,25 +1,26 @@
 package common
 
 import (
+	"sync/atomic"
 	"time"
 )
 
-var gnowsecond time.Time
+var gnowsecond atomic.Value // time.Time
 
 func init() {
-	gnowsecond = time.Now()
+	gnowsecond.Store(time.Now())
 	go updateNowInSecond()
 }
 
 func GetNowUpdateInSecond() time.Time {
-	return gnowsecond
+	return gnowsecond.Load().(time.Time)
 }
 
 func updateNowInSecond() {
 	defer CrashLog()
 
 	for {
-		gnowsecond = time.Now()
+		gnowsecond.Store(time.Now())
 		Sleep(1)
 	}
 }

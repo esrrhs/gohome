@@ -57,8 +57,10 @@ func saveJson(filename string, conf interface{}) error {
 	if err != nil {
 		return err
 	}
-	jsonFile.Write(str)
-	jsonFile.Close()
+	defer jsonFile.Close()
+	if _, err := jsonFile.Write(str); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -84,7 +86,7 @@ func Copy(src, dst string) error {
 
 func FileExists(filename string) bool {
 	info, err := os.Stat(filename)
-	if os.IsNotExist(err) {
+	if err != nil {
 		return false
 	}
 	return !info.IsDir()
@@ -115,7 +117,9 @@ func FileReplace(filename string, from string, to string) error {
 	}
 	defer out.Close()
 
-	out.WriteString(str)
+	if _, err := out.WriteString(str); err != nil {
+		return err
+	}
 	return nil
 }
 
