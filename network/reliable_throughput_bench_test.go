@@ -60,6 +60,9 @@ func BenchmarkReliableThroughput(b *testing.B) {
 				for i := 0; i < b.N; i++ {
 					mbps, total, err := runFixedPayloadDownload(proto, cs.loss, benchDuration, int64(i+1))
 					if err != nil {
+						if isPermissionUnavailable(err) {
+							b.Skipf("%s unavailable in unprivileged environment: %v", proto, err)
+						}
 						if proto == "quic" && cs.loss >= 0.5 {
 							b.Skipf("quic under %.0f%% loss: %v", cs.loss*100, err)
 						}
@@ -483,6 +486,16 @@ func startLoTCNetem(delay time.Duration, loss float64, filters [][]string) (stop
 	return stop, nil
 }
 
+func isPermissionUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "operation not permitted") ||
+		strings.Contains(s, "permission denied") ||
+		strings.Contains(s, "could not insert 'sch_netem'")
+}
+
 func TestReliableThroughputSmoke(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short")
@@ -492,6 +505,9 @@ func TestReliableThroughputSmoke(t *testing.T) {
 		t.Run(proto+"/loss0%", func(t *testing.T) {
 			mbps, total, err := runFixedPayloadDownload(proto, 0, 10*time.Second, 1)
 			if err != nil {
+				if isPermissionUnavailable(err) {
+					t.Skipf("%s unavailable in unprivileged environment: %v", proto, err)
+				}
 				t.Fatal(err)
 			}
 			t.Logf("download %.2f MB/s (%d bytes in 10s)", mbps, total)
@@ -506,6 +522,9 @@ func TestReliableThroughputSmoke(t *testing.T) {
 	t.Run("rhttp/loss10%short", func(t *testing.T) {
 		mbps, total, err := runFixedPayloadDownload("rhttp", 0.10, 15*time.Second, 2)
 		if err != nil {
+			if isPermissionUnavailable(err) {
+				t.Skipf("rhttp tc netem unavailable in unprivileged environment: %v", err)
+			}
 			t.Fatal(err)
 		}
 		t.Logf("rhttp loss10%% %.2f MB/s (%d bytes in 15s)", mbps, total)
@@ -516,6 +535,9 @@ func TestReliableThroughputSmoke(t *testing.T) {
 	t.Run("ricmp/loss10%short", func(t *testing.T) {
 		mbps, total, err := runFixedPayloadDownload("ricmp", 0.10, 15*time.Second, 3)
 		if err != nil {
+			if isPermissionUnavailable(err) {
+				t.Skipf("ricmp tc netem unavailable in unprivileged environment: %v", err)
+			}
 			t.Fatal(err)
 		}
 		t.Logf("ricmp loss10%% %.2f MB/s (%d bytes in 15s)", mbps, total)
@@ -524,3 +546,4 @@ func TestReliableThroughputSmoke(t *testing.T) {
 		}
 	})
 }
+
