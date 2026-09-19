@@ -7,112 +7,30 @@
 
 [中文文档](README_ZH.md)
 
-GoHome is a production-ready, batteries-included general-purpose infrastructure and core algorithm library for Go. It provides a unified abstract networking layer across diverse reliable and unreliable protocols, bandwidth-based adaptive congestion control, structured concurrency and goroutine lifecycle management, low-contention multi-sharded LRU caches, cryptography suites, and a comprehensive collection of daily engineering utilities.
+GoHome is a production-ready, batteries-included general-purpose infrastructure and core algorithm library for Go. It provides unified multi-protocol networking, structured concurrency, low-contention caches, cryptographic suites, and engineering utilities.
 
 ---
 
-## Table of Contents
+## Modules Overview
 
-- [Features](#features)
-- [Module Overview](#module-overview)
-  - [network - Abstract Network Layer & Protocols](#network---abstract-network-layer--protocols)
-  - [lru - High-Concurrency LRU Cache System](#lru---high-concurrency-lru-cache-system)
-  - [thread - Concurrency & Goroutine Orchestration](#thread---concurrency--goroutine-orchestration)
-  - [pool - Object & Token Pools](#pool---object--token-pools)
-  - [list - Data Structures & Request Queues](#list---data-structures--request-queues)
-  - [crypto - Cryptographic Suite](#crypto---cryptographic-suite)
-  - [loggo - Colorized Logging Library](#loggo---colorized-logging-library)
-  - [common - Core Utilities & Helpers](#common---core-utilities--helpers)
-  - [platform - Cross-Platform Execution & Shell Commands](#platform---cross-platform-execution--shell-commands)
-  - [thirdparty - Third-Party Integrations](#thirdparty---third-party-integrations)
-- [Getting Started](#getting-started)
-  - [Installation](#installation)
-  - [Unified Network Connection Example](#unified-network-connection-example)
-  - [Multi-Sharded LRU Cache Example](#multi-sharded-lru-cache-example)
-  - [Hierarchical Goroutine Management Example](#hierarchical-goroutine-management-example)
-- [License](#license)
+Each module contains its own dedicated, detailed documentation. Click any module below to view its design, architecture, and complete usage guide:
+
+| Module | Description | Documentation |
+|---|---|---|
+| **[`network`](network/)** | Unified multi-protocol connection abstraction (`Conn` supporting TCP, UDP, KCP, QUIC, RUDP, RICMP, RHTTP), sliding window framing (`FrameMgr`), adaptive congestion control (`BBCongestion`), and standard SOCKS5 proxy. | [English](network/README.md) \| [中文](network/README_ZH.md) |
+| **[`lru`](lru/)** | Generic-based LRU caches, multi-sharded low-contention `LRUMultiCache`, and single-flight request-merging `LRUResourceCache`. | [English](lru/README.md) \| [中文](lru/README_ZH.md) |
+| **[`thread`](thread/)** | Hierarchical goroutine trees (`Group`) with cascading cancellation, CPU-bound batch worker pools (`TaskPool`), and channel-backed thread pools (`ThreadPool`). | [English](thread/README.md) \| [中文](thread/README_ZH.md) |
+| **[`pool`](pool/)** | Reusable object pool (`Pool`) for GC reduction and channel-based token resource pools (`TokenPool`) for rate limiting and concurrency slots. | [English](pool/README.md) \| [中文](pool/README_ZH.md) |
+| **[`list`](list/)** | Thread-safe circular byte ring buffer (`RBuffergo`), ID-indexed ring buffer (`ROBuffergo`), ring queue (`Rlistgo`), single-flight deduplication queue (`ReqQueue`), and concurrent list (`synclist`). | [English](list/README.md) \| [中文](list/README_ZH.md) |
+| **[`crypto`](crypto/)** | Full CryptoNight algorithm suite (all variants: cn/0, cn/1, cn/2, cn/r, cn-lite, cn-heavy, cn-pico) and underlying cryptographic primitives (AES, Blake256, Groestl, JH, RIPEMD160, Skein). | [English](crypto/README.md) \| [中文](crypto/README_ZH.md) |
+| **[`loggo`](loggo/)** | Leveled logger with ANSI true-color terminal output, automatic daily rotation, retention policy cleanup (`MaxDay`), and panic stack trace recovery. | [English](loggo/README.md) \| [中文](loggo/README_ZH.md) |
+| **[`common`](common/)** | Core utility toolkit: Zstd/Zlib/Gzip compression, RC4, generic hashing (`HashGeneric`), fault-tolerant JSON with `.back` mirrors, DoH resolution, root domain parser (eTLD+1), and dynamic Protobuf. | [English](common/README.md) \| [中文](common/README_ZH.md) |
+| **[`platform`](platform/)** | Cross-platform shell command execution (`ShellRunCommand`), script execution with timeout contexts (`ShellRunTimeout`), and binary process execution (`ShellRunExe`). | [English](platform/README.md) \| [中文](platform/README_ZH.md) |
+| **[`thirdparty`](thirdparty/)** | Third-party adapters: offline MaxMind GeoIP2 country resolution and MySQL key-value table with automated rolling retention. | [English](thirdparty/README.md) \| [中文](thirdparty/README_ZH.md) |
 
 ---
 
-## Features
-
-- **Unified Multi-Protocol Abstraction**: Seamlessly switch between TCP, UDP, KCP, QUIC, RUDP, RICMP, and RHTTP via the unified `Conn` interface.
-- **Reliable Transmission Control**: Built-in sliding window protocol, sequence-based frame orchestration (`FrameMgr`), and adaptive congestion control (`BBCongestion`).
-- **High-Performance Caching**: Generic-based LRU cache, multi-sharded `LRUMultiCache` for near-zero lock contention, and `LRUResourceCache` with automatic deduplication of in-flight misses.
-- **Structured Concurrency**: Hierarchical parent-child goroutine management (`Group`), worker-based CPU-intensive task pool (`TaskPool`), and channel-bound worker thread pool (`ThreadPool`).
-- **Cryptographic Suite**: Full implementation of CryptoNight algorithm variants alongside cryptographic primitives including AES, Blake256, Groestl, JH, RIPEMD160, SHA-3, Skein, and Threefish.
-- **Robust Utility Toolkit**: Fault-tolerant JSON serialization with `.back` backups, DoH (DNS-over-HTTPS) resolution, eTLD+1 root domain extraction, Zlib/Gzip streaming, RC4 encryption, and endianness detection.
-
----
-
-## Module Overview
-
-### network - Abstract Network Layer & Protocols
-- **Unified Connection (`Conn`)**: Uniform API implementing `Dial`, `Listen`, `Accept`, and standard `io.ReadWriteCloser`.
-- **Supported Protocols**:
-  - `tcp`: Standard TCP streams.
-  - `udp`: UDP transport with session simulation.
-  - `kcp`: ARQ-based low-latency reliable transport.
-  - `quic`: Modern QUIC multiplexed streams.
-  - `rudp`: Lightweight reliable UDP protocol.
-  - `ricmp`: Covert reliable channel over ICMP echo packets.
-  - `rhttp`: Reliable tunneling over standard HTTP.
-- **Frame Control (`FrameMgr`)**: Frame sequencing, dynamic ACK feedback, sliding window buffers, heartbeat timeouts, and connection liveness verification.
-- **Congestion Control (`BBCongestion`)**: Real-time bandwidth probing and inflight window scaling algorithm.
-- **SOCKS5 Proxy**: Built-in handshake and request forwarding implementation for SOCKS5 client and server.
-
-### lru - High-Concurrency LRU Cache System
-- **`LRUCache[K, V]`**: Classic doubly-linked list and hash map implementation using Go generics, supporting TTL expiration.
-- **`LRUMultiCache[K, V]`**: Partitioned multi-layer LRU hashing keys across isolated cache shards to minimize lock contention on multicore systems.
-- **`LRUResourceCache[K, V]`**: Combines sharded LRU with `ReqQueue` to merge and deduplicate concurrent external fetches upon cache misses.
-
-### thread - Concurrency & Goroutine Orchestration
-- **`Group`**: Hierarchical tree-structured goroutine manager with cooperative cancellation, parent-child error propagation, and panic recovery.
-- **`TaskPool`**: Thread pool designed for CPU-bound batch tasks, providing worker dispatch and channel synchronization.
-- **`ThreadPool`**: Channel-backed concurrent worker pool with metrics tracking task latency, throughput, and queue depth.
-
-### pool - Object & Token Pools
-- **`Pool`**: Reusable object pool with allocation tracking and metrics to reduce garbage collection pressure.
-- **`TokenPool`**: Channel-based token/slot pool for concurrency rate limiting and resource throttling.
-
-### list - Data Structures & Request Queues
-- **`RBuffergo`**: Thread-safe circular byte ring buffer with read/write bookmarking.
-- **`ROBuffergo`**: Ring buffer with indexed element IDs and slots.
-- **`Rlistgo`**: Fixed-capacity ring queue for arbitrary elements.
-- **`ReqQueue`**: Single-flight concurrent request deduplication queue.
-- **`synclist`**: Mutex-synchronized doubly linked list wrapping `container/list`.
-
-### crypto - Cryptographic Suite
-- **CryptoNight**: Full support for CryptoNight variants (cn/0, cn/1, cn/2, cn/r, cn/fast, cn/half, cn/xao, cn/rto, cn/rwz, cn/double, cn-lite series, cn-heavy series, cn-pico series, etc.).
-- **Hash & Cipher Primitives**: Core modules for AES, Blake256, Groestl, JH, RIPEMD160, SHA-3, Skein, and Threefish.
-
-### loggo - Colorized Logging Library
-- Level-based log routing (`DEBUG`, `INFO`, `WARN`, `ERROR`).
-- Full terminal ANSI true-color styling support.
-- Daily file rotation and automatic retention purging based on `MaxDay`.
-- Built-in panic interceptor dumping formatted goroutine stack traces.
-
-### common - Core Utilities & Helpers
-- **Compression**: High-performance Zlib and Gzip streaming compression.
-- **Security & Encodings**: RC4 stream cipher, UUID generation, native endianness detection.
-- **Math & Numeric**: Generic math helpers (`MinOfInt`, `MaxOfInt`, `AbsInt`, `SafeDivide`), pseudo-random generation, and slice shuffling.
-- **Hashing**: MD5, XXHash, CRC32, FNV-64a, and generic type hasher `HashGeneric[T]`.
-- **Filesystem**: Fault-tolerant JSON loader/saver with automatic `.back` mirroring, symlink-aware recursive traversal (`Walk`), MD5 hashing, and line replacement.
-- **Networking & DNS**: Outbound local IP detection, private IP range checks, DoH (DNS-over-HTTPS) resolution, and eTLD+1 root domain parser.
-- **Protobuf**: Dynamic file descriptor set loading, reflection introspection, and proto-to-JSON serialization.
-
-### platform - Cross-Platform Execution & Shell Commands
-- **`ShellRun` / `ShellRunTimeout`**: Execute shell scripts with structured logging and deadline contexts.
-- **`ShellRunCommand`**: Execute raw shell commands and capture interleaved stdout/stderr.
-- **`ShellRunExe` / `ShellRunExeTimeout`**: Spawn and monitor standalone executable processes.
-
-### thirdparty - Third-Party Integrations
-- **`GeoIP2`**: MaxMind GeoLite2 country and ISO code lookup adapter.
-- **`TMysql`**: MySQL client with automatic timestamp-based record retention.
-
----
-
-## Getting Started
+## Quick Start
 
 ### Installation
 
@@ -120,9 +38,7 @@ GoHome is a production-ready, batteries-included general-purpose infrastructure 
 go get -u github.com/esrrhs/gohome
 ```
 
-### Unified Network Connection Example
-
-Create clients and servers across protocols using the unified `NewConn` API:
+### Quick Example: Unified Network Connection
 
 ```go
 package main
@@ -133,35 +49,29 @@ import (
 )
 
 func main() {
-	// Supported: "tcp", "udp", "rudp", "ricmp", "kcp", "quic", "rhttp"
-	listener, err := network.NewConn("kcp")
-	if err != nil {
-		panic(err)
-	}
+	// Easily switch protocols: "tcp", "udp", "kcp", "quic", "rudp", "ricmp", "rhttp"
+	proto := "kcp"
 
-	l, err := listener.Listen("127.0.0.1:8888")
+	// 1. Server listens
+	driver, _ := network.NewConn(proto)
+	l, err := driver.Listen("127.0.0.1:8888")
 	if err != nil {
 		panic(err)
 	}
 	defer l.Close()
 
-	// Handle incoming connections
 	go func() {
-		conn, err := l.Accept()
-		if err != nil {
-			return
-		}
+		conn, _ := l.Accept()
 		defer conn.Close()
-
 		buf := make([]byte, 1024)
 		n, _ := conn.Read(buf)
-		fmt.Printf("Received: %s\n", string(buf[:n]))
+		fmt.Printf("Server received: %s\n", string(buf[:n]))
 		conn.Write([]byte("pong"))
 	}()
 
-	// Dial from client
-	client, _ := network.NewConn("kcp")
-	c, err := client.Dial("127.0.0.1:8888")
+	// 2. Client dials
+	clientDriver, _ := network.NewConn(proto)
+	c, err := clientDriver.Dial("127.0.0.1:8888")
 	if err != nil {
 		panic(err)
 	}
@@ -170,64 +80,11 @@ func main() {
 	c.Write([]byte("ping"))
 	buf := make([]byte, 1024)
 	n, _ := c.Read(buf)
-	fmt.Printf("Echo back: %s\n", string(buf[:n]))
+	fmt.Printf("Client response: %s\n", string(buf[:n]))
 }
 ```
 
-### Multi-Sharded LRU Cache Example
-
-Reduce lock contention under high-throughput workloads with `LRUMultiCache`:
-
-```go
-package main
-
-import (
-	"fmt"
-	"time"
-	"github.com/esrrhs/gohome/lru"
-)
-
-func main() {
-	// Create cache with 8 shards, capacity=1000, TTL=10 minutes
-	cache := lru.NewLRUMultiCache[string, int](8, 1000, 10*time.Minute)
-
-	cache.Set("user_1001", 99)
-
-	if val, ok := cache.Get("user_1001"); ok {
-		fmt.Printf("Cached value: %d\n", val)
-	}
-}
-```
-
-### Hierarchical Goroutine Management Example
-
-Coordinate structured goroutines cleanly with `thread.Group`:
-
-```go
-package main
-
-import (
-	"fmt"
-	"time"
-	"github.com/esrrhs/gohome/thread"
-)
-
-func main() {
-	rootGroup := thread.NewGroup("root", nil, func() {
-		fmt.Println("Root group exited")
-	})
-
-	// Spawn worker task
-	rootGroup.Go(func() {
-		fmt.Println("Processing worker job...")
-		time.Sleep(100 * time.Millisecond)
-	})
-
-	// Graceful shutdown
-	rootGroup.Exit()
-	rootGroup.Wait()
-}
-```
+For more detailed guides and examples, please navigate into the respective submodule directories above.
 
 ---
 
