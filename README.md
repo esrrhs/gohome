@@ -26,6 +26,7 @@ Each module contains its own dedicated, detailed documentation. Click any module
 | **[`loggo`](loggo/)** | Leveled logger with ANSI true-color terminal output, automatic daily rotation, retention policy cleanup (`MaxDay`), and panic stack trace recovery. | [English](loggo/README.md) \| [中文](loggo/README_ZH.md) |
 | **[`common`](common/)** | Core utility toolkit: Zstd/Zlib/Gzip compression, RC4, generic hashing (`HashGeneric`), fault-tolerant JSON with `.back` mirrors, DoH resolution, root domain parser (eTLD+1), and dynamic Protobuf. | [English](common/README.md) \| [中文](common/README_ZH.md) |
 | **[`platform`](platform/)** | Cross-platform shell command execution (`ShellRunCommand`), script execution with timeout contexts (`ShellRunTimeout`), and binary process execution (`ShellRunExe`). | [English](platform/README.md) \| [中文](platform/README_ZH.md) |
+| **[`dns`](dns/)** | Modern smart DNS resolution and routing: zero-config defaults, parallel dual-stack queries, optional Fake-IP mode (RFC 198.18.0.0/15) with reverse lookup, DoH/DoT over proxy, TTL cache with singleflight, and atomic hot-reloadable rules. | [English](dns/README.md) \| [中文](dns/README_ZH.md) |
 | **[`thirdparty`](thirdparty/)** | Third-party adapters: offline MaxMind GeoIP2 country resolution and MySQL key-value table with automated rolling retention. | [English](thirdparty/README.md) \| [中文](thirdparty/README_ZH.md) |
 
 ---
