@@ -213,9 +213,13 @@ func TestSock5SetRequestRoundTrip(t *testing.T) {
 			errCh <- err
 			return
 		}
-		_, host, err := Sock5GetRequest(c)
+		cmd, _, host, err := Sock5GetRequest(c)
 		if err != nil {
 			errCh <- err
+			return
+		}
+		if cmd != Socks5CmdConnect {
+			errCh <- errors.New("unexpected cmd")
 			return
 		}
 		if host != "example.com:80" {
@@ -248,14 +252,15 @@ func TestSock5GetRequestIPv4(t *testing.T) {
 	defer client.Close()
 
 	type result struct {
+		cmd     byte
 		rawaddr []byte
 		host    string
 		err     error
 	}
 	resCh := make(chan result, 1)
 	go func() {
-		rawaddr, host, err := Sock5GetRequest(server)
-		resCh <- result{rawaddr, host, err}
+		cmd, rawaddr, host, err := Sock5GetRequest(server)
+		resCh <- result{cmd, rawaddr, host, err}
 	}()
 
 	req := []byte{
@@ -272,6 +277,9 @@ func TestSock5GetRequestIPv4(t *testing.T) {
 	if res.err != nil {
 		t.Fatalf("Sock5GetRequest returned error: %v", res.err)
 	}
+	if res.cmd != Socks5CmdConnect {
+		t.Errorf("cmd = %d, want CONNECT", res.cmd)
+	}
 	if res.host != "192.168.1.1:8080" {
 		t.Errorf("host = %q, want %q", res.host, "192.168.1.1:8080")
 	}
@@ -286,14 +294,15 @@ func TestSock5GetRequestDomain(t *testing.T) {
 	defer client.Close()
 
 	type result struct {
+		cmd     byte
 		rawaddr []byte
 		host    string
 		err     error
 	}
 	resCh := make(chan result, 1)
 	go func() {
-		rawaddr, host, err := Sock5GetRequest(server)
-		resCh <- result{rawaddr, host, err}
+		cmd, rawaddr, host, err := Sock5GetRequest(server)
+		resCh <- result{cmd, rawaddr, host, err}
 	}()
 
 	domain := "example.com"
@@ -309,6 +318,9 @@ func TestSock5GetRequestDomain(t *testing.T) {
 	if res.err != nil {
 		t.Fatalf("Sock5GetRequest returned error: %v", res.err)
 	}
+	if res.cmd != Socks5CmdConnect {
+		t.Errorf("cmd = %d, want CONNECT", res.cmd)
+	}
 	if res.host != "example.com:80" {
 		t.Errorf("host = %q, want %q", res.host, "example.com:80")
 	}
@@ -320,14 +332,15 @@ func TestSock5GetRequestIPv6(t *testing.T) {
 	defer client.Close()
 
 	type result struct {
+		cmd     byte
 		rawaddr []byte
 		host    string
 		err     error
 	}
 	resCh := make(chan result, 1)
 	go func() {
-		rawaddr, host, err := Sock5GetRequest(server)
-		resCh <- result{rawaddr, host, err}
+		cmd, rawaddr, host, err := Sock5GetRequest(server)
+		resCh <- result{cmd, rawaddr, host, err}
 	}()
 
 	ipv6 := net.ParseIP("::1").To16()
@@ -343,6 +356,9 @@ func TestSock5GetRequestIPv6(t *testing.T) {
 	if res.err != nil {
 		t.Fatalf("Sock5GetRequest returned error: %v", res.err)
 	}
+	if res.cmd != Socks5CmdConnect {
+		t.Errorf("cmd = %d, want CONNECT", res.cmd)
+	}
 	if !strings.Contains(res.host, "443") || !strings.Contains(res.host, "::1") {
 		t.Errorf("host = %q, expected [::1]:443 form", res.host)
 	}
@@ -354,14 +370,15 @@ func TestSock5GetRequestBadVersion(t *testing.T) {
 	defer client.Close()
 
 	type result struct {
+		cmd     byte
 		rawaddr []byte
 		host    string
 		err     error
 	}
 	resCh := make(chan result, 1)
 	go func() {
-		rawaddr, host, err := Sock5GetRequest(server)
-		resCh <- result{rawaddr, host, err}
+		cmd, rawaddr, host, err := Sock5GetRequest(server)
+		resCh <- result{cmd, rawaddr, host, err}
 	}()
 
 	// VER CMD RSV ATYP only — enough for version rejection with net.Pipe.
@@ -382,14 +399,15 @@ func TestSock5GetRequestBadCmd(t *testing.T) {
 	defer client.Close()
 
 	type result struct {
+		cmd     byte
 		rawaddr []byte
 		host    string
 		err     error
 	}
 	resCh := make(chan result, 1)
 	go func() {
-		rawaddr, host, err := Sock5GetRequest(server)
-		resCh <- result{rawaddr, host, err}
+		cmd, rawaddr, host, err := Sock5GetRequest(server)
+		resCh <- result{cmd, rawaddr, host, err}
 	}()
 
 	// Unsupported command (BIND=2); header only for net.Pipe.
@@ -401,6 +419,44 @@ func TestSock5GetRequestBadCmd(t *testing.T) {
 	res := <-resCh
 	if res.err == nil {
 		t.Fatal("expected error for unsupported command")
+	}
+}
+
+func TestSock5GetRequestUDPAssociate(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	type result struct {
+		cmd  byte
+		host string
+		err  error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		cmd, _, host, err := Sock5GetRequest(server)
+		resCh <- result{cmd, host, err}
+	}()
+
+	req := []byte{
+		socksVer5, socks5UDPAssociate, 0x00,
+		Socks5AtypIP4,
+		0, 0, 0, 0,
+		0x00, 0x00,
+	}
+	if _, err := client.Write(req); err != nil {
+		t.Fatalf("client write failed: %v", err)
+	}
+
+	res := <-resCh
+	if res.err != nil {
+		t.Fatalf("Sock5GetRequest returned error: %v", res.err)
+	}
+	if res.cmd != Socks5CmdUDPAssociate {
+		t.Errorf("cmd = %d, want UDP ASSOCIATE", res.cmd)
+	}
+	if res.host != "0.0.0.0:0" {
+		t.Errorf("host = %q, want %q", res.host, "0.0.0.0:0")
 	}
 }
 
@@ -416,7 +472,7 @@ func TestSock5GetRequestStickyFollowOn(t *testing.T) {
 	}
 	resCh := make(chan result, 1)
 	go func() {
-		_, host, err := Sock5GetRequest(server)
+		_, _, host, err := Sock5GetRequest(server)
 		resCh <- result{host, err}
 	}()
 
@@ -444,5 +500,112 @@ func TestSock5GetRequestStickyFollowOn(t *testing.T) {
 	}
 	if string(buf) != "HI" {
 		t.Fatalf("payload=%q", buf)
+	}
+}
+
+func TestSock5PackUnpackUDP(t *testing.T) {
+	payload := []byte("hello-udp")
+	pkt, err := Sock5PackUDP("192.168.1.10", 53, payload)
+	if err != nil {
+		t.Fatalf("PackUDP: %v", err)
+	}
+	if len(pkt) < 10 {
+		t.Fatalf("packet too short: %d", len(pkt))
+	}
+	if pkt[0] != 0 || pkt[1] != 0 || pkt[2] != 0 {
+		t.Fatalf("bad RSV/FRAG: %v", pkt[:3])
+	}
+
+	host, port, data, err := Sock5UnpackUDP(pkt)
+	if err != nil {
+		t.Fatalf("UnpackUDP: %v", err)
+	}
+	if host != "192.168.1.10" || port != 53 {
+		t.Fatalf("addr=%s:%d", host, port)
+	}
+	if string(data) != string(payload) {
+		t.Fatalf("data=%q", data)
+	}
+}
+
+func TestSock5PackUnpackUDPDomain(t *testing.T) {
+	pkt, err := Sock5PackUDP("dns.google", 853, []byte{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, port, data, err := Sock5UnpackUDP(pkt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host != "dns.google" || port != 853 {
+		t.Fatalf("addr=%s:%d", host, port)
+	}
+	if len(data) != 3 || data[0] != 1 {
+		t.Fatalf("data=%v", data)
+	}
+}
+
+func TestSock5UnpackUDPFragRejected(t *testing.T) {
+	pkt := []byte{0, 0, 1, Socks5AtypIP4, 1, 2, 3, 4, 0, 53, 'x'}
+	_, _, _, err := Sock5UnpackUDP(pkt)
+	if err == nil {
+		t.Fatal("expected fragmentation error")
+	}
+}
+
+func TestSock5SetUDPRequestRoundTrip(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	relay := "127.0.0.1:19090"
+	errCh := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer c.Close()
+		if err := Sock5HandshakeBy(c, "", ""); err != nil {
+			errCh <- err
+			return
+		}
+		cmd, _, host, err := Sock5GetRequest(c)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		if cmd != Socks5CmdUDPAssociate {
+			errCh <- errors.New("want UDP ASSOCIATE")
+			return
+		}
+		if host != "0.0.0.0:0" {
+			errCh <- errors.New("unexpected client addr: " + host)
+			return
+		}
+		errCh <- Sock5SendConnectReply(c, 0, relay)
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	tcp := conn.(*net.TCPConn)
+	if err := Sock5Handshake(tcp, 3000, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	bnd, err := Sock5SetUDPRequest(tcp, "0.0.0.0", 0, 3000)
+	if err != nil {
+		t.Fatalf("SetUDPRequest: %v", err)
+	}
+	if bnd != relay {
+		t.Fatalf("bnd=%q, want %q", bnd, relay)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("server: %v", err)
 	}
 }

@@ -10,7 +10,7 @@ import (
 )
 
 /*
-socks5_server 封装了 SOCKS5 协议的握手和请求处理（RFC 1928 CONNECT + RFC 1929）。
+socks5_server 封装了 SOCKS5 协议的握手和请求处理（RFC 1928 CONNECT / UDP ASSOCIATE + RFC 1929）。
 */
 
 var (
@@ -19,15 +19,17 @@ var (
 	errMethod   = errors.New("socks no acceptable authentication method")
 	errAuth     = errors.New("socks authentication failed")
 	errCmd      = errors.New("socks command not supported")
+	errUDPFrag  = errors.New("socks udp fragmentation not supported")
 )
 
 const (
-	socksCmdConnect = 1
-	NoAuth          = uint8(0)
-	userAuthVersion = uint8(1)
-	UserPassAuth    = uint8(2)
-	authSuccess     = uint8(0)
-	authFailure     = uint8(1)
+	Socks5CmdConnect      = 1
+	Socks5CmdUDPAssociate = 3
+	NoAuth                = uint8(0)
+	userAuthVersion       = uint8(1)
+	UserPassAuth          = uint8(2)
+	authSuccess           = uint8(0)
+	authFailure           = uint8(1)
 )
 
 func methodOffered(methods []byte, want byte) bool {
@@ -120,11 +122,12 @@ func Sock5HandshakeBy(conn io.ReadWriter, username string, password string) (err
 	return errAuth
 }
 
-// Sock5GetRequest parses an RFC 1928 CONNECT request.
-// Only CMD=CONNECT is accepted; BIND/UDP ASSOCIATE return errCmd.
-func Sock5GetRequest(conn io.ReadWriter) (rawaddr []byte, host string, err error) {
+// Sock5GetRequest parses an RFC 1928 request.
+// Accepts CMD=CONNECT (1) and CMD=UDP ASSOCIATE (3); BIND returns errCmd.
+// cmd is Socks5CmdConnect or Socks5CmdUDPAssociate.
+func Sock5GetRequest(conn io.ReadWriter) (cmd byte, rawaddr []byte, host string, err error) {
 	if conn == nil {
-		return nil, "", errors.New("socks: nil conn")
+		return 0, nil, "", errors.New("socks: nil conn")
 	}
 
 	// VER CMD RSV ATYP
@@ -136,7 +139,8 @@ func Sock5GetRequest(conn io.ReadWriter) (rawaddr []byte, host string, err error
 		err = errVer
 		return
 	}
-	if hdr[1] != socksCmdConnect {
+	cmd = hdr[1]
+	if cmd != Socks5CmdConnect && cmd != Socks5CmdUDPAssociate {
 		err = errCmd
 		return
 	}
@@ -196,9 +200,10 @@ func Sock5GetRequest(conn io.ReadWriter) (rawaddr []byte, host string, err error
 	return
 }
 
-// Sock5SendConnectReply writes an RFC 1928 CONNECT reply.
+// Sock5SendConnectReply writes an RFC 1928 reply (CONNECT or UDP ASSOCIATE).
 // rep is the REP field (0 = succeeded). bnd should be "host:port"; on parse
 // failure a zero IPv4 bind address is sent.
+// For UDP ASSOCIATE success, bnd is the UDP relay address the client must use.
 func Sock5SendConnectReply(conn io.Writer, rep byte, bnd string) error {
 	if conn == nil {
 		return errors.New("socks: nil conn")
@@ -239,4 +244,109 @@ func Sock5SendConnectReply(conn io.Writer, rep byte, bnd string) error {
 	reply = append(reply, byte(port>>8), byte(port))
 	_, err = conn.Write(reply)
 	return err
+}
+
+// Sock5PackUDP builds an RFC 1928 UDP request datagram:
+// RSV(2) | FRAG(1) | ATYP | DST.ADDR | DST.PORT | DATA.
+// Fragmentation is not supported (FRAG is always 0).
+func Sock5PackUDP(host string, port int, data []byte) ([]byte, error) {
+	if port < 0 || port > 65535 {
+		return nil, fmt.Errorf("socks: invalid udp destination port %d", port)
+	}
+	addr, err := encodeSocksAddr(host, port)
+	if err != nil {
+		return nil, err
+	}
+	pkt := make([]byte, 0, 3+len(addr)+len(data))
+	pkt = append(pkt, 0, 0, 0) // RSV + FRAG
+	pkt = append(pkt, addr...)
+	pkt = append(pkt, data...)
+	return pkt, nil
+}
+
+// Sock5UnpackUDP parses an RFC 1928 UDP request datagram.
+// Fragmented packets (FRAG != 0) are rejected.
+func Sock5UnpackUDP(pkt []byte) (host string, port int, data []byte, err error) {
+	if len(pkt) < 4 {
+		return "", 0, nil, errors.New("socks: udp packet too short")
+	}
+	if pkt[2] != 0 {
+		return "", 0, nil, errUDPFrag
+	}
+	host, port, rest, err := decodeSocksAddr(pkt[3:])
+	if err != nil {
+		return "", 0, nil, err
+	}
+	return host, port, rest, nil
+}
+
+// encodeSocksAddr encodes ATYP + ADDR + PORT for host:port.
+func encodeSocksAddr(host string, port int) ([]byte, error) {
+	buf := make([]byte, 0, 1+255+2)
+	if ip := net.ParseIP(host); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			buf = append(buf, Socks5AtypIP4)
+			buf = append(buf, ip4...)
+		} else {
+			ip6 := ip.To16()
+			if ip6 == nil {
+				return nil, errors.New("socks: invalid IP address: " + host)
+			}
+			buf = append(buf, Socks5AtypIP6)
+			buf = append(buf, ip6...)
+		}
+	} else {
+		if len(host) == 0 {
+			return nil, errors.New("socks: empty destination hostname")
+		}
+		if len(host) > 255 {
+			return nil, errors.New("socks: destination hostname too long: " + host)
+		}
+		buf = append(buf, Socks5AtypDomain, byte(len(host)))
+		buf = append(buf, host...)
+	}
+	buf = append(buf, byte(port>>8), byte(port))
+	return buf, nil
+}
+
+// decodeSocksAddr parses ATYP + ADDR + PORT from b, returning host, port and leftover bytes.
+func decodeSocksAddr(b []byte) (host string, port int, rest []byte, err error) {
+	if len(b) < 1 {
+		return "", 0, nil, errors.New("socks: truncated address")
+	}
+	atyp := b[0]
+	off := 1
+	switch atyp {
+	case Socks5AtypIP4:
+		if len(b) < off+net.IPv4len+2 {
+			return "", 0, nil, errors.New("socks: truncated ipv4 address")
+		}
+		host = net.IP(b[off : off+net.IPv4len]).String()
+		off += net.IPv4len
+	case Socks5AtypIP6:
+		if len(b) < off+net.IPv6len+2 {
+			return "", 0, nil, errors.New("socks: truncated ipv6 address")
+		}
+		host = net.IP(b[off : off+net.IPv6len]).String()
+		off += net.IPv6len
+	case Socks5AtypDomain:
+		if len(b) < off+1 {
+			return "", 0, nil, errors.New("socks: truncated domain length")
+		}
+		n := int(b[off])
+		off++
+		if n == 0 {
+			return "", 0, nil, errors.New("socks: empty domain name")
+		}
+		if len(b) < off+n+2 {
+			return "", 0, nil, errors.New("socks: truncated domain address")
+		}
+		host = string(b[off : off+n])
+		off += n
+	default:
+		return "", 0, nil, errAddrType
+	}
+	port = int(binary.BigEndian.Uint16(b[off : off+2]))
+	off += 2
+	return host, port, b[off:], nil
 }

@@ -10,7 +10,7 @@ import (
 )
 
 /*
-socks5_client 封装了 SOCKS5 协议的客户端功能（RFC 1928 CONNECT + RFC 1929）。
+socks5_client 封装了 SOCKS5 协议的客户端功能（RFC 1928 CONNECT / UDP ASSOCIATE + RFC 1929）。
 */
 
 const (
@@ -18,7 +18,8 @@ const (
 	socks5AuthNone     = 0
 	socks5UserPassAuth = 2
 	socks5NoAcceptable = 0xff
-	socks5Connect      = 1
+	socks5Connect      = Socks5CmdConnect
+	socks5UDPAssociate = Socks5CmdUDPAssociate
 	Socks5AtypIP4      = 1
 	Socks5AtypDomain   = 3
 	Socks5AtypIP6      = 4
@@ -124,63 +125,66 @@ func Sock5Handshake(conn *net.TCPConn, timeoutms int, username string, password 
 // Sock5SetRequest sends an RFC 1928 CONNECT request and consumes the full reply
 // (including BND.ADDR/BND.PORT) so the stream is ready for application data.
 func Sock5SetRequest(conn *net.TCPConn, host string, port int, timeoutms int) (err error) {
+	_, err = sock5SetRequestCmd(conn, socks5Connect, host, port, timeoutms)
+	return err
+}
+
+// Sock5SetUDPRequest sends an RFC 1928 UDP ASSOCIATE request.
+// host/port are the expected client UDP address (use "0.0.0.0"/0 if unknown).
+// On success, bnd is the proxy UDP relay address ("host:port") to send datagrams to.
+// The TCP control connection must be kept open for the association lifetime.
+func Sock5SetUDPRequest(conn *net.TCPConn, host string, port int, timeoutms int) (bnd string, err error) {
+	return sock5SetRequestCmd(conn, socks5UDPAssociate, host, port, timeoutms)
+}
+
+func sock5SetRequestCmd(conn *net.TCPConn, cmd byte, host string, port int, timeoutms int) (bnd string, err error) {
 	if conn == nil {
-		return errors.New("proxy: nil conn")
+		return "", errors.New("proxy: nil conn")
 	}
 	defer clearTCPDeadline(conn)
 
 	if port < 0 || port > 65535 {
-		return fmt.Errorf("proxy: invalid destination port %d", port)
+		return "", fmt.Errorf("proxy: invalid destination port %d", port)
 	}
 
-	buf := make([]byte, 0, 4+1+255+2)
-	buf = append(buf, socksVer5, socks5Connect, 0 /* RSV */)
-	if ip := net.ParseIP(host); ip != nil {
-		if ip4 := ip.To4(); ip4 != nil {
-			buf = append(buf, Socks5AtypIP4)
-			buf = append(buf, ip4...)
-		} else {
-			ip6 := ip.To16()
-			if ip6 == nil {
-				return errors.New("proxy: invalid IP address: " + host)
-			}
-			buf = append(buf, Socks5AtypIP6)
-			buf = append(buf, ip6...)
-		}
-	} else {
-		if len(host) == 0 {
-			return errors.New("proxy: empty destination hostname")
-		}
-		if len(host) > 255 {
-			return errors.New("proxy: destination hostname too long: " + host)
-		}
-		buf = append(buf, Socks5AtypDomain, byte(len(host)))
-		buf = append(buf, host...)
+	addr, err := encodeSocksAddr(host, port)
+	if err != nil {
+		return "", errors.New("proxy: " + err.Error())
 	}
-	buf = append(buf, byte(port>>8), byte(port))
+
+	buf := make([]byte, 0, 3+len(addr))
+	buf = append(buf, socksVer5, cmd, 0 /* RSV */)
+	buf = append(buf, addr...)
+
+	cmdName := "connect"
+	if cmd == socks5UDPAssociate {
+		cmdName = "udp associate"
+	}
 
 	setTCPDeadline(conn, timeoutms)
 	if _, err = conn.Write(buf); err != nil {
-		return errors.New("proxy: failed to write connect request to SOCKS5 proxy: " + err.Error())
+		return "", errors.New("proxy: failed to write " + cmdName + " request to SOCKS5 proxy: " + err.Error())
 	}
 
 	// RFC 1928 §6 reply: VER REP RSV ATYP BND.ADDR BND.PORT
 	var hdr [4]byte
 	setTCPDeadline(conn, timeoutms)
 	if _, err = io.ReadFull(conn, hdr[:]); err != nil {
-		return errors.New("proxy: failed to read connect reply from SOCKS5 proxy: " + err.Error())
+		return "", errors.New("proxy: failed to read " + cmdName + " reply from SOCKS5 proxy: " + err.Error())
 	}
 	if hdr[0] != socksVer5 {
-		return fmt.Errorf("proxy: SOCKS5 connect reply has unexpected version %d", hdr[0])
+		return "", fmt.Errorf("proxy: SOCKS5 %s reply has unexpected version %d", cmdName, hdr[0])
 	}
 
 	setTCPDeadline(conn, timeoutms)
-	if _, err = readSocksHost(conn, hdr[3]); err != nil {
-		return fmt.Errorf("proxy: invalid reply: fail to read bnd host: %s", err)
+	bndHost, err := readSocksHost(conn, hdr[3])
+	if err != nil {
+		return "", fmt.Errorf("proxy: invalid reply: fail to read bnd host: %s", err)
 	}
 	setTCPDeadline(conn, timeoutms)
-	if _, err = readSocksPort(conn); err != nil {
-		return fmt.Errorf("proxy: invalid reply: fail to read bnd port: %s", err)
+	bndPort, err := readSocksPort(conn)
+	if err != nil {
+		return "", fmt.Errorf("proxy: invalid reply: fail to read bnd port: %s", err)
 	}
 
 	rep := hdr[1]
@@ -191,9 +195,9 @@ func Sock5SetRequest(conn *net.TCPConn, host string, port int, timeoutms int) (e
 		} else {
 			failure = fmt.Sprintf("reply code %d", rep)
 		}
-		return errors.New("proxy: SOCKS5 proxy failed to connect: " + failure)
+		return "", errors.New("proxy: SOCKS5 proxy failed to " + cmdName + ": " + failure)
 	}
-	return nil
+	return net.JoinHostPort(bndHost, strconv.Itoa(int(bndPort))), nil
 }
 
 func ntohs(data [2]byte) uint16 {

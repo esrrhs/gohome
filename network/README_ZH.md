@@ -65,8 +65,9 @@ type Conn interface {
 
 完全符合 **RFC 1928** 与 **RFC 1929** 规范：
 - 支持 `0x00`（无认证）与 `0x02`（用户名/密码子协商认证），无协商匹配时返回 `0xFF`。
-- 支持 IPv4、IPv6 与域名（`0x03`）寻址方式的 CONNECT 请求解析与构造。
-- 规范生成连接响应报文（`Sock5SendConnectReply`）。
+- 支持 IPv4、IPv6 与域名（`0x03`）寻址方式的 CONNECT（`0x01`）与 UDP ASSOCIATE（`0x03`）请求解析与构造。
+- 规范生成连接/关联响应报文（`Sock5SendConnectReply`）；UDP 数据报头编解码（`Sock5PackUDP` / `Sock5UnpackUDP`）。
+- 客户端：`Sock5SetRequest`（TCP CONNECT）、`Sock5SetUDPRequest`（UDP ASSOCIATE，返回中继地址）。
 
 ---
 
@@ -153,9 +154,14 @@ func handleClient(conn net.Conn) {
 		return
 	}
 
-	// 解析目标地址
-	_, targetHost, err := network.Sock5GetRequest(conn)
+	// 解析目标地址（CONNECT 或 UDP ASSOCIATE）
+	cmd, _, targetHost, err := network.Sock5GetRequest(conn)
 	if err != nil {
+		return
+	}
+	if cmd == network.Socks5CmdUDPAssociate {
+		// 监听 UDP 中继，回复 BND 地址，保持 TCP 控制连接直至关闭
+		// ...
 		return
 	}
 

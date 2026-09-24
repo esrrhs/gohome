@@ -65,8 +65,9 @@ A rate-based congestion control module implementing the `Congestion` interface:
 
 Standard-compliant implementation of **RFC 1928** and **RFC 1929**:
 - Supports `0x00` (No Authentication) and `0x02` (Username/Password authentication), with `0xFF` returned when no acceptable methods match.
-- Parses and generates IPv4, IPv6, and Domain Name (`0x03`) addressing for SOCKS5 CONNECT requests.
-- Handles connect response generation (`Sock5SendConnectReply`).
+- Parses and generates IPv4, IPv6, and Domain Name (`0x03`) addressing for SOCKS5 CONNECT (`0x01`) and UDP ASSOCIATE (`0x03`) requests.
+- Handles reply generation (`Sock5SendConnectReply`); UDP datagram header encode/decode (`Sock5PackUDP` / `Sock5UnpackUDP`).
+- Client APIs: `Sock5SetRequest` (TCP CONNECT), `Sock5SetUDPRequest` (UDP ASSOCIATE, returns relay address).
 
 ---
 
@@ -153,9 +154,14 @@ func handleClient(conn net.Conn) {
 		return
 	}
 
-	// Parse CONNECT target
-	_, targetHost, err := network.Sock5GetRequest(conn)
+	// Parse destination (CONNECT or UDP ASSOCIATE)
+	cmd, _, targetHost, err := network.Sock5GetRequest(conn)
 	if err != nil {
+		return
+	}
+	if cmd == network.Socks5CmdUDPAssociate {
+		// Listen on UDP relay, reply with BND address, keep TCP control conn open
+		// ...
 		return
 	}
 
