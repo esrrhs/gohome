@@ -26,6 +26,7 @@ GoHome 是一个功能完备、开箱即用的 Go 语言通用基础设施与核
 | **[`loggo`](loggo/)** | 支持 ANSI 真彩色终端输出的多级别日志库，具备按天自动轮转写盘、基于保留期（`MaxDay`）自动清理，以及 Panic 崩溃堆栈自动转储。 | [中文](loggo/README_ZH.md) \| [English](loggo/README.md) |
 | **[`common`](common/)** | 常用基础设施工具集：Zstd/Zlib/Gzip 压缩、RC4 加密、通用类型哈希（`HashGeneric`）、带 `.back` 容灾的 JSON 读写、DoH 解析、根域名提取（eTLD+1）以及动态 Protobuf。 | [中文](common/README_ZH.md) \| [English](common/README.md) |
 | **[`platform`](platform/)** | 跨平台命令执行与进程管理：Shell 命令执行（`ShellRunCommand`）、带硬超时控制的脚本执行（`ShellRunTimeout`）与独立二进制程序调度（`ShellRunExe`）。 | [中文](platform/README_ZH.md) \| [English](platform/README.md) |
+| **[`dns`](dns/)** | 现代化智能 DNS 解析与分流组件：开箱即用默认配置、国内外并发竞速解析、可选 Fake-IP 模式（RFC 198.18.0.0/15）与双向反查、支持代理隧道 DoH/DoT、TTL 与 Singleflight 防击穿缓存，以及全动态无锁热更新接口。 | [中文](dns/README_ZH.md) \| [English](dns/README.md) |
 | **[`thirdparty`](thirdparty/)** | 第三方库适配器：基于 MaxMind GeoLite2 的离线 IP 所属国家查询，以及带自动过期淘汰策略的 MySQL 数据表封装。 | [中文](thirdparty/README_ZH.md) \| [English](thirdparty/README.md) |
 
 ---
