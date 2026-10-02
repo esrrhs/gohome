@@ -1005,3 +1005,20 @@ func TestRicmpDgramClientIPv4(t *testing.T) {
 func TestRicmpDgramClientIPv6(t *testing.T) {
 	runRicmpDgramClientLoopback(t, "::1", "ipv6")
 }
+
+func TestDgramBindAddress(t *testing.T) {
+	// IPv4 keeps the wildcard bind: the IPv4 ping lookup branch treats an
+	// unspecified bound address as match-any.
+	if got := dgramBindAddress(icmpFamilyV4, &net.IPAddr{IP: net.ParseIP("127.0.0.1")}); got != "" {
+		t.Fatalf("v4 dgram bind = %q, want empty wildcard", got)
+	}
+	// IPv6 must bind the concrete source selected toward the target; on
+	// loopback that is ::1. Skip only if the host has no IPv6 loopback.
+	got := dgramBindAddress(icmpFamilyV6, &net.IPAddr{IP: net.ParseIP("::1")})
+	if got == "" {
+		t.Skip("no IPv6 route toward ::1")
+	}
+	if got != "::1" {
+		t.Fatalf("v6 dgram bind for ::1 = %q, want ::1", got)
+	}
+}
