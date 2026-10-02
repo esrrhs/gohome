@@ -55,8 +55,11 @@ func icmpDgramNetwork(family int) string {
 // dialRicmpSocket opens an ICMP socket for the Dial side, preferring the
 // privileged raw socket and transparently falling back to the unprivileged
 // datagram socket when raw access is denied (EPERM/EACCES). forceDgram
-// (used by tests) skips the raw attempt.
-func dialRicmpSocket(family int, forceDgram bool) (*icmp.PacketConn, string, error) {
+// (used by tests) skips the raw attempt. For IPv6 datagram sockets the
+// bind address is the kernel-selected source toward dst (see
+// dgramBindAddress); raw sockets bind the wildcard.
+func dialRicmpSocket(family int, forceDgram bool, dst *net.IPAddr) (*icmp.PacketConn, string, error) {
+	dgramAddr := dgramBindAddress(family, dst)
 	if !forceDgram {
 		pc, err := icmp.ListenPacket(icmpNetwork(family), "")
 		if err == nil {
@@ -65,13 +68,13 @@ func dialRicmpSocket(family int, forceDgram bool) (*icmp.PacketConn, string, err
 		// Fall through to the datagram attempt; keep the raw error so a
 		// total failure explains both the permission and the (possible)
 		// missing kernel support (e.g. Linux ping_group_range).
-		pc2, err2 := icmp.ListenPacket(icmpDgramNetwork(family), "")
+		pc2, err2 := icmp.ListenPacket(icmpDgramNetwork(family), dgramAddr)
 		if err2 != nil {
 			return nil, "", fmt.Errorf("ricmp raw socket: %w; unprivileged dgram socket: %v", err, err2)
 		}
 		return pc2, icmpModeDgram, nil
 	}
-	pc, err := icmp.ListenPacket(icmpDgramNetwork(family), "")
+	pc, err := icmp.ListenPacket(icmpDgramNetwork(family), dgramAddr)
 	if err != nil {
 		return nil, "", err
 	}
@@ -89,6 +92,29 @@ func datagramEchoID(conn *icmp.PacketConn) int {
 		return 0
 	}
 	return ua.Port
+}
+
+// dgramBindAddress returns the local address an unprivileged datagram ICMP
+// socket should bind to. The Linux ping-socket lookup table delivers an
+// inbound ICMPv6 echo reply only when its destination address equals the
+// socket's bound local address; a wildcard ("::") bind never matches a
+// reply addressed to a concrete source such as ::1 (the IPv4 branch treats
+// wildcard as match-any). Select the source the kernel routes toward the
+// target with a short UDP probe (no packets are sent) and bind that
+// address for IPv6. IPv4 keeps the wildcard bind.
+func dgramBindAddress(family int, dst *net.IPAddr) string {
+	if family != icmpFamilyV6 {
+		return ""
+	}
+	probe, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: dst.IP, Zone: dst.Zone, Port: 9})
+	if err != nil {
+		return ""
+	}
+	defer probe.Close()
+	if la, ok := probe.LocalAddr().(*net.UDPAddr); ok && la.IP != nil {
+		return la.IP.String()
+	}
+	return ""
 }
 
 // familyFromIP classifies an IP as ICMPv4 or ICMPv6. IPv4-mapped IPv6
@@ -421,7 +447,7 @@ func (c *RicmpConn) dial(dst string, forceDgram bool) (Conn, error) {
 	}
 
 	family := familyFromIP(addr.IP)
-	conn, mode, err := dialRicmpSocket(family, forceDgram)
+	conn, mode, err := dialRicmpSocket(family, forceDgram, addr)
 	if err != nil {
 		return nil, err
 	}
