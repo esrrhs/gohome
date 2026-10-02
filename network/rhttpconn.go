@@ -3,6 +3,7 @@ package network
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"io/ioutil"
@@ -18,6 +19,8 @@ import (
 	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/list"
 	"github.com/esrrhs/gohome/thread"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 /*
@@ -74,6 +77,11 @@ type RhttpConn struct {
 	recvb         *list.RBuffergo
 	closelock     sync.Mutex
 	cfgMu         sync.RWMutex
+
+	// testOnDial, when non-nil, is invoked once per freshly established
+	// client transport connection (not on pool reuse). Production code
+	// leaves it nil; tests use it to assert keep-alive reuse.
+	testOnDial func(network, addr string)
 }
 
 type httpConnDialer struct {
@@ -83,8 +91,13 @@ type httpConnDialer struct {
 	index int
 	retry int
 	ctx   context.Context
-	tp    *http.Transport // reused for all posts; closed on Dialer Close
+	rt    http.RoundTripper // reused for all posts; closed on Dialer Close
 }
+
+// httpSchemeH2C selects cleartext HTTP/2 (h2c prior knowledge). The server
+// accepts both h1.1 and h2c on the same listener; plain http:// keeps using
+// pooled HTTP/1.1 connections and https:// negotiates HTTP/2 over TLS.
+const httpSchemeH2C = "h2c://"
 
 type httpConnListenerSonny struct {
 	fwg          *thread.Group
@@ -246,9 +259,9 @@ func (c *RhttpConn) Close() error {
 		if c.dialer.url != "" {
 			_, _, _ = c.postData(context.Background(), c.dialer.url+"?type="+ProtoClose, []byte{})
 		}
-		if c.dialer.tp != nil {
-			c.dialer.tp.CloseIdleConnections()
-			c.dialer.tp = nil
+		if c.dialer.rt != nil {
+			closeIdleConnections(c.dialer.rt)
+			c.dialer.rt = nil
 		}
 	} else if c.listener != nil {
 		if c.cancel != nil {
@@ -303,20 +316,74 @@ func (c *RhttpConn) Info() string {
 	return "empty http conn"
 }
 
-func (c *RhttpConn) newHTTPTransport() *http.Transport {
+// closeIdleConnections releases pooled connections of either transport kind.
+func closeIdleConnections(rt http.RoundTripper) {
+	type idleCloser interface {
+		CloseIdleConnections()
+	}
+	if ic, ok := rt.(idleCloser); ok {
+		ic.CloseIdleConnections()
+	}
+}
+
+// newH1Transport builds a keep-alive enabled HTTP/1.1 transport with a tuned
+// connection pool. One instance is owned per dialed connection and closed on
+// Close, so pooling idle conns is safe (the previous per-request transport
+// without pooling caused both handshake overhead and FD leaks).
+func (c *RhttpConn) newH1Transport() *http.Transport {
 	tp := &http.Transport{
-		// Critical: never pool idle conns. Creating a Transport per request
-		// without CloseIdleConnections was a long-lived FD leak under load.
-		DisableKeepAlives: true,
+		Proxy: http.ProxyFromEnvironment,
+		// HTTP/2 over TLS is negotiated automatically when the server
+		// advertises h2 via ALPN.
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   16,
+		MaxConnsPerHost:       0,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
 	}
 	tp.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		var d net.Dialer
 		if gControlOnConnSetup != nil {
 			d = net.Dialer{Control: gControlOnConnSetup}
 		}
-		return d.DialContext(ctx, network, addr)
+		conn, err := d.DialContext(ctx, network, addr)
+		if err == nil && c.testOnDial != nil {
+			c.testOnDial(network, addr)
+		}
+		return conn, err
 	}
 	return tp
+}
+
+// newH2CTransport builds a cleartext HTTP/2 transport (h2c, prior knowledge).
+// DialTLSContext is misnamed by http2: with AllowHTTP it dials plain TCP and
+// speaks HTTP/2 directly without TLS or an Upgrade round trip.
+func (c *RhttpConn) newH2CTransport() http.RoundTripper {
+	return &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			var d net.Dialer
+			if gControlOnConnSetup != nil {
+				d = net.Dialer{Control: gControlOnConnSetup}
+			}
+			conn, err := d.DialContext(ctx, network, addr)
+			if err == nil && c.testOnDial != nil {
+				c.testOnDial(network, addr)
+			}
+			return conn, err
+		},
+	}
+}
+
+// newHTTPTransport returns the round tripper for the dial URL scheme.
+func (c *RhttpConn) newHTTPTransport(h2cMode bool) http.RoundTripper {
+	if h2cMode {
+		return c.newH2CTransport()
+	}
+	return c.newH1Transport()
 }
 
 func (c *RhttpConn) postData(ctx context.Context, url string, d []byte) (int, []byte, error) {
@@ -331,18 +398,19 @@ func (c *RhttpConn) postData(ctx context.Context, url string, d []byte) (int, []
 		return 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	req.Close = true
 
-	var tp *http.Transport
-	ownTP := false
-	if c.dialer != nil && c.dialer.tp != nil {
-		tp = c.dialer.tp
+	var rt http.RoundTripper
+	ownRT := false
+	if c.dialer != nil && c.dialer.rt != nil {
+		rt = c.dialer.rt
 	} else {
-		tp = c.newHTTPTransport()
-		ownTP = true
+		// Best-effort one-off call (e.g. ProtoClose after teardown): use a
+		// pooled h1 transport and release it when the call returns.
+		rt = c.newH1Transport()
+		ownRT = true
 	}
-	if ownTP {
-		defer tp.CloseIdleConnections()
+	if ownRT {
+		defer closeIdleConnections(rt)
 	}
 
 	timeout := time.Duration(c.config.RequestTimeoutMs) * time.Millisecond
@@ -350,7 +418,7 @@ func (c *RhttpConn) postData(ctx context.Context, url string, d []byte) (int, []
 		timeout = 15 * time.Second
 	}
 	client := &http.Client{
-		Transport: tp,
+		Transport: rt,
 		Timeout:   timeout,
 	}
 	resp, err := client.Do(req)
@@ -367,6 +435,18 @@ func (c *RhttpConn) postData(ctx context.Context, url string, d []byte) (int, []
 	return resp.StatusCode, body, nil
 }
 
+// takeCancel atomically detaches and returns the factory dial cancel func.
+// Callers must invoke the returned func (if non-nil) without holding the
+// lock; this avoids racing Dial failure paths against Close, which both
+// touch c.cancel.
+func (c *RhttpConn) takeCancel() context.CancelFunc {
+	c.closelock.Lock()
+	cancel := c.cancel
+	c.cancel = nil
+	c.closelock.Unlock()
+	return cancel
+}
+
 func (c *RhttpConn) Dial(dst string) (Conn, error) {
 	c.checkConfig()
 
@@ -377,30 +457,32 @@ func (c *RhttpConn) Dial(dst string) (Conn, error) {
 
 	id := common.UniqueId()
 
-	url := dst + "/" + id
-
-	if !strings.HasPrefix(url, "http://") {
-		url = "http://" + url
+	// Resolve the URL scheme:
+	//   host:port / http://  -> pooled HTTP/1.1 (h2 over TLS for https://)
+	//   h2c://               -> cleartext HTTP/2 prior knowledge
+	h2cMode := strings.HasPrefix(dst, httpSchemeH2C)
+	base := strings.TrimPrefix(dst, httpSchemeH2C)
+	if !strings.Contains(base, "://") {
+		base = "http://" + base
 	}
+	url := strings.TrimSuffix(base, "/") + "/" + id
 
-	tp := c.newHTTPTransport()
-	tmp := &RhttpConn{config: c.config, dialer: &httpConnDialer{tp: tp, ctx: ctx}}
+	rt := c.newHTTPTransport(h2cMode)
+	tmp := &RhttpConn{config: c.config, dialer: &httpConnDialer{rt: rt, ctx: ctx}}
 	code, ret, err := tmp.postData(ctx, url+"?type="+ProtoConnnect, []byte{})
 	if err != nil {
-		tp.CloseIdleConnections()
-		cancel()
-		c.closelock.Lock()
-		c.cancel = nil
-		c.closelock.Unlock()
+		closeIdleConnections(rt)
+		if fn := c.takeCancel(); fn != nil {
+			fn()
+		}
 		return nil, err
 	}
 
 	if code != ProtoCodeOK {
-		tp.CloseIdleConnections()
-		cancel()
-		c.closelock.Lock()
-		c.cancel = nil
-		c.closelock.Unlock()
+		closeIdleConnections(rt)
+		if fn := c.takeCancel(); fn != nil {
+			fn()
+		}
 		return nil, errors.New("dial fail " + string(ret))
 	}
 
@@ -409,7 +491,7 @@ func (c *RhttpConn) Dial(dst string) (Conn, error) {
 	sendb := list.NewRBuffergo(c.config.BufferSize, true)
 	recvb := list.NewRBuffergo(c.config.BufferSize, true)
 
-	dialer := &httpConnDialer{wg: wg, url: url, index: 0, retry: 0, addr: dst, ctx: ctx, tp: tp}
+	dialer := &httpConnDialer{wg: wg, url: url, index: 0, retry: 0, addr: dst, ctx: ctx, rt: rt}
 
 	u := &RhttpConn{id: id, config: c.config, dialer: dialer, sendb: sendb, recvb: recvb, cancel: cancel}
 
@@ -573,7 +655,9 @@ func (c *RhttpConn) Listen(dst string) (Conn, error) {
 
 	u := &RhttpConn{id: common.UniqueId(), config: c.config, listener: listener}
 	srv := &http.Server{
-		Handler:           u,
+		// h2c.NewHandler upgrades cleartext HTTP/2 requests while plain
+		// HTTP/1.1 requests are served unchanged on the same listener.
+		Handler:           h2c.NewHandler(u, &http2.Server{}),
 		ReadHeaderTimeout: 30 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      60 * time.Second,
