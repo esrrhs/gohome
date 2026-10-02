@@ -214,6 +214,31 @@ type RicmpConn struct {
 	isclose       atomic.Bool
 	closelock     sync.Mutex
 	cfgMu         sync.RWMutex
+
+	// srcIP caches the local source address selected toward the peer, used
+	// to build the ICMPv6 pseudo-header checksum (raw v6 only).
+	srcMu sync.Mutex
+	srcIP net.IP
+}
+
+// sourceIPTowards returns the source address the kernel routes toward dst,
+// discovered with an unconnected UDP probe (no packets are sent). The result
+// is cached per conn because the peer address never changes.
+func (c *RicmpConn) sourceIPTowards(dst net.IP, zone string) net.IP {
+	c.srcMu.Lock()
+	defer c.srcMu.Unlock()
+	if c.srcIP != nil {
+		return c.srcIP
+	}
+	probe, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: dst, Zone: zone, Port: 9})
+	if err != nil {
+		return nil
+	}
+	defer probe.Close()
+	if la, ok := probe.LocalAddr().(*net.UDPAddr); ok {
+		c.srcIP = la.IP
+	}
+	return c.srcIP
 }
 
 type ricmpConnDialer struct {
@@ -1003,11 +1028,23 @@ func (c *RicmpConn) send_icmp(conn *icmp.PacketConn, family int, mode string, da
 		Body: body,
 	}
 
-	// psh is nil for both families and modes: ICMPv4 checksum is calculated
-	// by Marshal, and for ICMPv6 the kernel fills the checksum using the
-	// route source. Datagram sockets additionally compute/verify it entirely
-	// in the kernel.
-	bytes, err := msg.Marshal(nil)
+	// Checksum handling differs by family/mode:
+	//   - ICMPv4 raw sockets: the kernel fills the checksum on output.
+	//   - datagram sockets (both families): the kernel computes it.
+	//   - ICMPv6 RAW sockets: the kernel does NOT compute the checksum, so a
+	//     zero checksum packet is dropped by the peer's icmpv6 input before
+	//     it reaches unprivileged ping sockets (raw receivers don't verify,
+	//     which is why raw-to-raw worked). Compute it here over the IPv6
+	//     pseudo-header using the source routed toward the destination.
+	var psh []byte
+	if family == icmpFamilyV6 && mode == icmpModeRaw {
+		if ipa, ok := dst.(*net.IPAddr); ok && ipa != nil {
+			if src := c.sourceIPTowards(ipa.IP, ipa.Zone); src != nil {
+				psh = icmp.IPv6PseudoHeader(src, ipa.IP)
+			}
+		}
+	}
+	bytes, err := msg.Marshal(psh)
 	if err != nil {
 		//loggo.Error("sendICMP Marshal error %s %s", c.Info(), err)
 		return
