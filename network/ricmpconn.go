@@ -694,6 +694,10 @@ func (c *RicmpConn) loopListenerRecv(listenerconn *icmp.PacketConn) error {
 	for !c.listener.wg.IsExit() {
 		listenerconn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
 		n, srcaddr, err, cid, echoId, echoSeq, echoFlag := c.recv_icmp(listenerconn, buf)
+		if os.Getenv("RICMP_DEBUG") != "" && n > 0 {
+			loggo.Info("RICMP_DEBUG listener recv family=%d n=%d src=%v echoId=%d flag=%d",
+				family, n, srcaddr, echoId, echoFlag)
+		}
 		if err != nil || echoFlag != int(IcmpMsg_CLIENT_SEND_FLAG) {
 			continue
 		}

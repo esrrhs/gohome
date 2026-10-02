@@ -44,9 +44,17 @@ jobs:
         go test -c -o "${RUNNER_TEMP}/network.test" ./network
         PAT='^(TestRicmpAcceptImmediateReadWrite|TestRicmpAcceptImmediateReadWriteIPv6|TestRicmpDgramClientIPv4|TestRicmpDgramClientIPv6)$'
         export RICMP_DEBUG=1
+        sudo tcpdump -i lo -n -vvv icmp6 -w /tmp/icmp6.pcap >/tmp/tcpdump.log 2>&1 &
+        TPID=$!
+        sleep 1
         if sudo setcap cap_net_raw+ep "${RUNNER_TEMP}/network.test" 2>/dev/null; then
           "${RUNNER_TEMP}/network.test" -test.v -test.count=1 -test.timeout=5m -test.run "$PAT"
         else
           sudo --preserve-env=PATH,GOROOT,GOPATH,HOME,GOCACHE,GOMODCACHE,GOPROXY \
             "${RUNNER_TEMP}/network.test" -test.v -test.count=1 -test.timeout=5m -test.run "$PAT"
         fi
+        RC=$?
+        sleep 1
+        sudo kill "$TPID" 2>/dev/null || true
+        sudo tcpdump -n -vvv -r /tmp/icmp6.pcap 2>/dev/null | grep -E 'echo (request|reply)' | tail -40
+        exit "$RC"
