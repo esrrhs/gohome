@@ -28,3 +28,19 @@ jobs:
 
     - name: Test
       run: go test -v ./...
+
+    # Raw ICMP tests (IPv4 and IPv6 loopback) need CAP_NET_RAW; without it
+    # they self-skip. Build a dedicated test binary and grant the capability
+    # via setcap, falling back to sudo where setcap is unavailable.
+    - name: Test privileged raw ICMP (IPv4/IPv6)
+      run: |
+        set -euo pipefail
+        go test -c -o "${RUNNER_TEMP}/network.test" ./network
+        if sudo setcap cap_net_raw+ep "${RUNNER_TEMP}/network.test" 2>/dev/null; then
+          "${RUNNER_TEMP}/network.test" -test.v -test.count=1 -test.timeout=5m \
+            -test.run '^TestRicmpAcceptImmediateReadWrite$|^TestRicmpAcceptImmediateReadWriteIPv6$'
+        else
+          sudo --preserve-env=PATH,GOROOT,GOPATH,HOME,GOCACHE,GOMODCACHE,GOPROXY \
+            "${RUNNER_TEMP}/network.test" -test.v -test.count=1 -test.timeout=5m \
+            -test.run '^TestRicmpAcceptImmediateReadWrite$|^TestRicmpAcceptImmediateReadWriteIPv6$'
+        fi
