@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -472,6 +473,11 @@ func (c *RicmpConn) dial(dst string, forceDgram bool) (Conn, error) {
 	dialer := &ricmpConnDialer{serveraddr: addr, conn: conn, fm: fm, family: family, mode: mode,
 		icmpId: icmpId, icmpSeq: 0, icmpProto: int(IcmpMsg_PING_PROTO), icmpFlag: IcmpMsg_CLIENT_SEND_FLAG}
 
+	if os.Getenv("RICMP_DEBUG") != "" {
+		loggo.Info("RICMP_DEBUG dial start dst=%s family=%d mode=%s icmpId=%d localAddr=%s",
+			dst, family, mode, icmpId, conn.LocalAddr())
+	}
+
 	u := &RicmpConn{id: id, config: c.config, dialer: dialer}
 
 	//loggo.Debug("start connect remote ricmp %s %s", u.Info(), id)
@@ -501,6 +507,10 @@ func (c *RicmpConn) dial(dst string, forceDgram bool) (Conn, error) {
 		// recv icmp
 		u.dialer.conn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
 		n, _, _, id, echoId, _, echoFlag := u.recv_icmp(u.dialer.conn, buf)
+		if os.Getenv("RICMP_DEBUG") != "" && n > 0 {
+			loggo.Info("RICMP_DEBUG dial recv n=%d id=%q want=%q echoId=%d wantId=%d flag=%d wantFlag=%d",
+				n, id, u.id, echoId, u.dialer.icmpId, echoFlag, int(IcmpMsg_SERVER_SEND_FLAG))
+		}
 		if n > 0 && id == u.id && echoId == u.dialer.icmpId && echoFlag == int(IcmpMsg_SERVER_SEND_FLAG) {
 			f := &Frame{}
 			err := proto.Unmarshal(buf[0:n], f)
