@@ -702,3 +702,89 @@ func TestRhttpNoTransportFDLeakSmoke(t *testing.T) {
 		}
 	}
 }
+
+// runRhttpReusesConnection dials one logical rhttp conn and lets the polling
+// loop run many Data POSTs, asserting the client opened exactly one
+// underlying transport connection (keep-alive / h2 multiplexing) instead of
+// a fresh TCP connection per request.
+func runRhttpReusesConnection(t *testing.T, scheme string) {
+	t.Helper()
+	l, err := NewConn("rhttp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := l.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	addr := ln.(*RhttpConn).listener.listenerconn.Addr().String()
+
+	go func() {
+		s, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer s.Close()
+		buf := make([]byte, 256)
+		for {
+			n, err := s.Read(buf)
+			if err != nil {
+				return
+			}
+			if _, err := s.Write(buf[:n]); err != nil {
+				return
+			}
+		}
+	}()
+
+	d, err := NewConn("rhttp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dials int64
+	d.(*RhttpConn).testOnDial = func(network, addr string) {
+		atomic.AddInt64(&dials, 1)
+	}
+
+	conn, err := d.Dial(scheme + addr)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte("rhttp-reuse")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	// Wait for the echo so the session is known to work, then keep the
+	// polling loop running long enough for dozens of Data POSTs.
+	got := make([]byte, 0, 32)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		buf := make([]byte, 256)
+		n, rerr := conn.Read(buf)
+		if rerr != nil {
+			t.Fatalf("Read: %v", rerr)
+		}
+		got = append(got, buf[:n]...)
+		if string(got) == "rhttp-reuse" {
+			break
+		}
+	}
+	if string(got) != "rhttp-reuse" {
+		t.Fatalf("echo mismatch: %q", got)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	if n := atomic.LoadInt64(&dials); n != 1 {
+		t.Fatalf("scheme %q opened %d transport connections for one logical conn, want exactly 1 (pool reuse)", scheme, n)
+	}
+}
+
+func TestRhttpH1ReusesConnection(t *testing.T) {
+	runRhttpReusesConnection(t, "")
+}
+
+func TestRhttpH2CReusesConnection(t *testing.T) {
+	runRhttpReusesConnection(t, httpSchemeH2C)
+}

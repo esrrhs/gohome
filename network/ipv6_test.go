@@ -33,6 +33,8 @@ func ipv6ListenAddr(t *testing.T, ln Conn) string {
 		addr = c.listener.Addr().String()
 	case *QuicConn:
 		addr = c.listener.Addr().String()
+	case *RhttpConn:
+		addr = c.listener.listenerconn.Addr().String()
 	default:
 		t.Fatalf("unsupported listener type %T", ln)
 	}
@@ -45,9 +47,14 @@ func ipv6ListenAddr(t *testing.T, ln Conn) string {
 // runIPv6Loopback boots a listener on [::1]:0, accepts one connection and
 // echoes client bytes back, then dials as a client and verifies the round
 // trip. It works for both datagram (udp) and stream/reliable underlays.
-func runIPv6Loopback(t *testing.T, proto string) {
+// dialScheme prefixes the dial address (used by rhttp to select h2c://).
+func runIPv6Loopback(t *testing.T, proto string, dialScheme ...string) {
 	t.Helper()
 	skipIfNoIPv6Loopback(t)
+	scheme := ""
+	if len(dialScheme) > 0 {
+		scheme = dialScheme[0]
+	}
 
 	c, err := NewConn(proto)
 	if err != nil {
@@ -88,9 +95,9 @@ func runIPv6Loopback(t *testing.T, proto string) {
 	// Give the listener a moment to start accepting before dialing.
 	time.Sleep(100 * time.Millisecond)
 
-	cli, err := c.Dial(addr)
+	cli, err := c.Dial(scheme + addr)
 	if err != nil {
-		t.Fatalf("Dial(%s %s): %v", proto, addr, err)
+		t.Fatalf("Dial(%s %s%s): %v", proto, scheme, addr, err)
 	}
 	defer cli.Close()
 
@@ -160,4 +167,14 @@ func TestIPv6_KCP_Loopback(t *testing.T) {
 
 func TestIPv6_QUIC_Loopback(t *testing.T) {
 	runIPv6Loopback(t, "quic")
+}
+
+func TestIPv6_RHTTP_H1_Loopback(t *testing.T) {
+	// Default scheme: pooled HTTP/1.1 with keep-alives.
+	runIPv6Loopback(t, "rhttp")
+}
+
+func TestIPv6_RHTTP_H2C_Loopback(t *testing.T) {
+	// Cleartext HTTP/2 prior knowledge against the same h2c-wrapped server.
+	runIPv6Loopback(t, "rhttp", httpSchemeH2C)
 }
