@@ -52,14 +52,26 @@ func icmpDgramNetwork(family int) string {
 	return "udp4"
 }
 
-// dialRicmpSocket opens an ICMP socket for the Dial side, preferring the
-// privileged raw socket and transparently falling back to the unprivileged
-// datagram socket when raw access is denied (EPERM/EACCES). forceDgram
-// (used by tests) skips the raw attempt. For IPv6 datagram sockets the
-// bind address is the kernel-selected source toward dst (see
-// dgramBindAddress); raw sockets bind the wildcard.
-func dialRicmpSocket(family int, forceDgram bool, dst *net.IPAddr) (*icmp.PacketConn, string, error) {
-	dgramAddr := dgramBindAddress(family, dst)
+// dialRicmpSocket opens an ICMP socket for the Dial side.
+//
+// IPv4: prefer the privileged raw socket and transparently fall back to the
+// unprivileged SOCK_DGRAM ping socket when raw access is denied (subject to
+// net.ipv4.ping_group_range); a dgram v4 echo request still reaches a raw
+// v4 listener, so raw-server/dgram-client interoperation works.
+//
+// IPv6: raw only. ICMPv6 echo requests sent from dgram ping sockets are not
+// delivered to raw ICMPv6 sockets on Linux (the kernel echo responder
+// consumes them on input), and Darwin does not deliver ICMPv6 replies to
+// dgram sockets at all, so there is no usable unprivileged v6 client path.
+// forceDgram (used by tests) skips the raw attempt.
+func dialRicmpSocket(family int, forceDgram bool) (*icmp.PacketConn, string, error) {
+	if family == icmpFamilyV6 && !forceDgram {
+		pc, err := icmp.ListenPacket(icmpNetwork(family), "")
+		if err != nil {
+			return nil, "", fmt.Errorf("ricmp raw socket: %w (ICMPv6 requires root/CAP_NET_RAW)", err)
+		}
+		return pc, icmpModeRaw, nil
+	}
 	if !forceDgram {
 		pc, err := icmp.ListenPacket(icmpNetwork(family), "")
 		if err == nil {
@@ -68,13 +80,13 @@ func dialRicmpSocket(family int, forceDgram bool, dst *net.IPAddr) (*icmp.Packet
 		// Fall through to the datagram attempt; keep the raw error so a
 		// total failure explains both the permission and the (possible)
 		// missing kernel support (e.g. Linux ping_group_range).
-		pc2, err2 := icmp.ListenPacket(icmpDgramNetwork(family), dgramAddr)
+		pc2, err2 := icmp.ListenPacket(icmpDgramNetwork(family), "")
 		if err2 != nil {
 			return nil, "", fmt.Errorf("ricmp raw socket: %w; unprivileged dgram socket: %v", err, err2)
 		}
 		return pc2, icmpModeDgram, nil
 	}
-	pc, err := icmp.ListenPacket(icmpDgramNetwork(family), dgramAddr)
+	pc, err := icmp.ListenPacket(icmpDgramNetwork(family), "")
 	if err != nil {
 		return nil, "", err
 	}
@@ -92,29 +104,6 @@ func datagramEchoID(conn *icmp.PacketConn) int {
 		return 0
 	}
 	return ua.Port
-}
-
-// dgramBindAddress returns the local address an unprivileged datagram ICMP
-// socket should bind to. The Linux ping-socket lookup table delivers an
-// inbound ICMPv6 echo reply only when its destination address equals the
-// socket's bound local address; a wildcard ("::") bind never matches a
-// reply addressed to a concrete source such as ::1 (the IPv4 branch treats
-// wildcard as match-any). Select the source the kernel routes toward the
-// target with a short UDP probe (no packets are sent) and bind that
-// address for IPv6. IPv4 keeps the wildcard bind.
-func dgramBindAddress(family int, dst *net.IPAddr) string {
-	if family != icmpFamilyV6 {
-		return ""
-	}
-	probe, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: dst.IP, Zone: dst.Zone, Port: 9})
-	if err != nil {
-		return ""
-	}
-	defer probe.Close()
-	if la, ok := probe.LocalAddr().(*net.UDPAddr); ok && la.IP != nil {
-		return la.IP.String()
-	}
-	return ""
 }
 
 // familyFromIP classifies an IP as ICMPv4 or ICMPv6. IPv4-mapped IPv6
@@ -213,6 +202,31 @@ type RicmpConn struct {
 	isclose       atomic.Bool
 	closelock     sync.Mutex
 	cfgMu         sync.RWMutex
+
+	// srcIP caches the local source address selected toward the peer, used
+	// to build the ICMPv6 pseudo-header checksum when sending from raw v6.
+	srcMu sync.Mutex
+	srcIP net.IP
+}
+
+// sourceIPTowards returns the source address the kernel routes toward dst,
+// discovered with an unconnected UDP probe (no packets are sent). The
+// result is cached per conn because the peer address never changes.
+func (c *RicmpConn) sourceIPTowards(dst net.IP, zone string) net.IP {
+	c.srcMu.Lock()
+	defer c.srcMu.Unlock()
+	if c.srcIP != nil {
+		return c.srcIP
+	}
+	probe, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: dst, Zone: zone, Port: 9})
+	if err != nil {
+		return nil
+	}
+	defer probe.Close()
+	if la, ok := probe.LocalAddr().(*net.UDPAddr); ok {
+		c.srcIP = la.IP
+	}
+	return c.srcIP
 }
 
 type ricmpConnDialer struct {
@@ -447,7 +461,7 @@ func (c *RicmpConn) dial(dst string, forceDgram bool) (Conn, error) {
 	}
 
 	family := familyFromIP(addr.IP)
-	conn, mode, err := dialRicmpSocket(family, forceDgram, addr)
+	conn, mode, err := dialRicmpSocket(family, forceDgram)
 	if err != nil {
 		return nil, err
 	}
@@ -993,11 +1007,23 @@ func (c *RicmpConn) send_icmp(conn *icmp.PacketConn, family int, mode string, da
 		Body: body,
 	}
 
-	// psh is nil for both families and modes: ICMPv4 checksum is calculated
-	// by Marshal, and for ICMPv6 the kernel fills the checksum using the
-	// route source. Datagram sockets additionally compute/verify it entirely
-	// in the kernel.
-	bytes, err := msg.Marshal(nil)
+	// Checksum handling:
+	//   - ICMPv4 raw sockets: the kernel fills the checksum on output.
+	//   - datagram sockets (both families): the kernel computes it.
+	//   - ICMPv6 RAW sockets: unlike raw v4, the kernel does not compute the
+	//     checksum; a zero-checksum ICMPv6 packet is malformed (intermediate
+	//     nodes may drop it, and strict receivers reject it), so compute it
+	//     here over the IPv6 pseudo-header using the source routed toward
+	//     the destination.
+	var psh []byte
+	if family == icmpFamilyV6 && mode == icmpModeRaw {
+		if ipa, ok := dst.(*net.IPAddr); ok && ipa != nil {
+			if src := c.sourceIPTowards(ipa.IP, ipa.Zone); src != nil {
+				psh = icmp.IPv6PseudoHeader(src, ipa.IP)
+			}
+		}
+	}
+	bytes, err := msg.Marshal(psh)
 	if err != nil {
 		//loggo.Error("sendICMP Marshal error %s %s", c.Info(), err)
 		return
