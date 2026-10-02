@@ -27,12 +27,68 @@ const (
 	icmpFamilyV6 = 6
 )
 
+// Socket modes: privileged raw ICMP vs unprivileged datagram (ping) sockets.
+const (
+	icmpModeRaw   = "raw"
+	icmpModeDgram = "dgram"
+)
+
 // icmpNetwork returns the x/net/icmp raw socket network for the given family.
 func icmpNetwork(family int) string {
 	if family == icmpFamilyV6 {
 		return "ip6:icmp"
 	}
 	return "ip4:icmp"
+}
+
+// icmpDgramNetwork returns the unprivileged datagram network ("ping sockets"):
+// no CAP_NET_RAW on Linux (subject to net.ipv4.ping_group_range) and no root
+// on Darwin. Only echo requests can originate from these sockets, so they
+// are usable on the Dial side; the listener side still needs raw sockets.
+func icmpDgramNetwork(family int) string {
+	if family == icmpFamilyV6 {
+		return "udp6"
+	}
+	return "udp4"
+}
+
+// dialRicmpSocket opens an ICMP socket for the Dial side, preferring the
+// privileged raw socket and transparently falling back to the unprivileged
+// datagram socket when raw access is denied (EPERM/EACCES). forceDgram
+// (used by tests) skips the raw attempt.
+func dialRicmpSocket(family int, forceDgram bool) (*icmp.PacketConn, string, error) {
+	if !forceDgram {
+		pc, err := icmp.ListenPacket(icmpNetwork(family), "")
+		if err == nil {
+			return pc, icmpModeRaw, nil
+		}
+		// Fall through to the datagram attempt; keep the raw error so a
+		// total failure explains both the permission and the (possible)
+		// missing kernel support (e.g. Linux ping_group_range).
+		pc2, err2 := icmp.ListenPacket(icmpDgramNetwork(family), "")
+		if err2 != nil {
+			return nil, "", fmt.Errorf("ricmp raw socket: %w; unprivileged dgram socket: %v", err, err2)
+		}
+		return pc2, icmpModeDgram, nil
+	}
+	pc, err := icmp.ListenPacket(icmpDgramNetwork(family), "")
+	if err != nil {
+		return nil, "", err
+	}
+	return pc, icmpModeDgram, nil
+}
+
+// datagramEchoID returns the echo identifier a datagram socket must use.
+// On Linux the kernel rewrites the outbound identifier to the socket's bound
+// local port and filters inbound replies by it, so the id must equal that
+// port. On Darwin the user-chosen id is preserved and LocalAddr reports port
+// 0, in which case 0 tells the caller to keep a random id.
+func datagramEchoID(conn *icmp.PacketConn) int {
+	ua, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || ua == nil || ua.Port <= 0 {
+		return 0
+	}
+	return ua.Port
 }
 
 // familyFromIP classifies an IP as ICMPv4 or ICMPv6. IPv4-mapped IPv6
@@ -138,7 +194,8 @@ type ricmpConnDialer struct {
 	conn       *icmp.PacketConn
 	fm         *FrameMgr
 	wg         *thread.Group
-	family     int // icmpFamilyV4 or icmpFamilyV6
+	family     int    // icmpFamilyV4 or icmpFamilyV6
+	mode       string // icmpModeRaw or icmpModeDgram
 	icmpId     int
 	icmpSeq    int32
 	icmpProto  int
@@ -350,6 +407,12 @@ func (c *RicmpConn) Info() string {
 }
 
 func (c *RicmpConn) Dial(dst string) (Conn, error) {
+	return c.dial(dst, false)
+}
+
+// dial is Dial with a test-only switch to force the unprivileged datagram
+// socket instead of first attempting the privileged raw socket.
+func (c *RicmpConn) dial(dst string, forceDgram bool) (Conn, error) {
 	c.checkConfig()
 
 	addr, err := net.ResolveIPAddr("ip", dst)
@@ -358,9 +421,19 @@ func (c *RicmpConn) Dial(dst string) (Conn, error) {
 	}
 
 	family := familyFromIP(addr.IP)
-	conn, err := icmp.ListenPacket(icmpNetwork(family), "")
+	conn, mode, err := dialRicmpSocket(family, forceDgram)
 	if err != nil {
 		return nil, err
+	}
+
+	// Raw mode keeps a random id. Datagram mode must use the kernel-assigned
+	// local port as the echo id where the platform rewrites/filters on it
+	// (Linux); a 0 result (Darwin) keeps the random id which is preserved.
+	icmpId := rand.Intn(math.MaxInt16)
+	if mode == icmpModeDgram {
+		if id := datagramEchoID(conn); id > 0 {
+			icmpId = id
+		}
 	}
 
 	id := common.Guid()
@@ -370,8 +443,8 @@ func (c *RicmpConn) Dial(dst string) (Conn, error) {
 		fm.SetCongestion(&BBCongestion{})
 	}
 
-	dialer := &ricmpConnDialer{serveraddr: addr, conn: conn, fm: fm, family: family,
-		icmpId: rand.Intn(math.MaxInt16), icmpSeq: 0, icmpProto: int(IcmpMsg_PING_PROTO), icmpFlag: IcmpMsg_CLIENT_SEND_FLAG}
+	dialer := &ricmpConnDialer{serveraddr: addr, conn: conn, fm: fm, family: family, mode: mode,
+		icmpId: icmpId, icmpSeq: 0, icmpProto: int(IcmpMsg_PING_PROTO), icmpFlag: IcmpMsg_CLIENT_SEND_FLAG}
 
 	u := &RicmpConn{id: id, config: c.config, dialer: dialer}
 
@@ -394,7 +467,7 @@ func (c *RicmpConn) Dial(dst string) (Conn, error) {
 			f := e.Value.(*Frame)
 			mb, _ := u.dialer.fm.MarshalFrame(f)
 			u.dialer.conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
-			u.send_icmp(u.dialer.conn, u.dialer.family, mb, u.dialer.serveraddr,
+			u.send_icmp(u.dialer.conn, u.dialer.family, u.dialer.mode, mb, u.dialer.serveraddr,
 				u.id, u.dialer.icmpId, int(u.dialer.icmpSeq), u.dialer.icmpProto, u.dialer.icmpFlag)
 			u.dialer.icmpSeq++
 		}
@@ -645,7 +718,7 @@ func (c *RicmpConn) accept(u *RicmpConn) error {
 				break
 			}
 			u.listenersonny.fatherconn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
-			u.send_icmp(u.listenersonny.fatherconn, u.listenersonny.family, mb, u.listenersonny.dstaddr,
+			u.send_icmp(u.listenersonny.fatherconn, u.listenersonny.family, icmpModeRaw, mb, u.listenersonny.dstaddr,
 				u.id, u.listenersonny.icmpId, int(atomic.LoadInt32(&u.listenersonny.icmpSeq)), u.listenersonny.icmpProto, u.listenersonny.icmpFlag)
 		}
 
@@ -696,7 +769,7 @@ func (c *RicmpConn) updateListenerSonny() error {
 			c.listenersonny.listener.sonny.Delete(c.id)
 		}
 	}()
-	return c.update_ricmp(c.listenersonny.wg, c.listenersonny.fm, c.listenersonny.fatherconn, c.listenersonny.family, c.listenersonny.dstaddr, false,
+	return c.update_ricmp(c.listenersonny.wg, c.listenersonny.fm, c.listenersonny.fatherconn, c.listenersonny.family, icmpModeRaw, c.listenersonny.dstaddr, false,
 		0, 0,
 		c.id, c.listenersonny.icmpId, &c.listenersonny.icmpSeq, c.listenersonny.icmpProto, c.listenersonny.icmpFlag,
 		false)
@@ -709,13 +782,13 @@ func (c *RicmpConn) updateDialerSonny() error {
 			c.dialer.conn.Close()
 		}
 	}()
-	return c.update_ricmp(c.dialer.wg, c.dialer.fm, c.dialer.conn, c.dialer.family, c.dialer.serveraddr, true,
+	return c.update_ricmp(c.dialer.wg, c.dialer.fm, c.dialer.conn, c.dialer.family, c.dialer.mode, c.dialer.serveraddr, true,
 		c.dialer.icmpId, int(IcmpMsg_SERVER_SEND_FLAG),
 		c.id, c.dialer.icmpId, &c.dialer.icmpSeq, c.dialer.icmpProto, c.dialer.icmpFlag,
 		true)
 }
 
-func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.PacketConn, family int, dstaddr net.Addr, readconn bool,
+func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.PacketConn, family int, mode string, dstaddr net.Addr, readconn bool,
 	recvCheckEchoId int, recvCheckEchoFlag int, id string, icmpId int, icmpSeq *int32, icmpProto int, icmpFlag IcmpMsg_TYPE, addIcmpSeq bool) error {
 
 	//loggo.Debug("start ricmp conn %s", c.Info())
@@ -769,7 +842,7 @@ func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.Pack
 			}
 			conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
 			seq := int(atomic.LoadInt32(icmpSeq))
-			c.send_icmp(conn, family, mb, dstaddr, id, icmpId, seq, icmpProto, icmpFlag)
+			c.send_icmp(conn, family, mode, mb, dstaddr, id, icmpId, seq, icmpProto, icmpFlag)
 			if addIcmpSeq {
 				atomic.AddInt32(icmpSeq, 1)
 			}
@@ -819,7 +892,7 @@ func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.Pack
 			}
 			conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
 			seq := int(atomic.LoadInt32(icmpSeq))
-			c.send_icmp(conn, family, mb, dstaddr, id, icmpId, seq, icmpProto, icmpFlag)
+			c.send_icmp(conn, family, mode, mb, dstaddr, id, icmpId, seq, icmpProto, icmpFlag)
 			if addIcmpSeq {
 				atomic.AddInt32(icmpSeq, 1)
 			}
@@ -867,7 +940,7 @@ func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.Pack
 	return errors.New("closed " + reason)
 }
 
-func (c *RicmpConn) send_icmp(conn *icmp.PacketConn, family int, data []byte, dst net.Addr, id string, icmpId int, icmpSeq int, icmpProto int, icmpFlag IcmpMsg_TYPE) {
+func (c *RicmpConn) send_icmp(conn *icmp.PacketConn, family int, mode string, data []byte, dst net.Addr, id string, icmpId int, icmpSeq int, icmpProto int, icmpFlag IcmpMsg_TYPE) {
 
 	m := &IcmpMsg{
 		Id:    id,
@@ -894,15 +967,21 @@ func (c *RicmpConn) send_icmp(conn *icmp.PacketConn, family int, data []byte, ds
 		Body: body,
 	}
 
-	// psh is nil for both families: ICMPv4 checksum is always calculated by
-	// Marshal, and for ICMPv6 the raw socket (Linux rawv6 / Darwin rip6)
-	// fills the checksum with the correct route source during transmission.
+	// psh is nil for both families and modes: ICMPv4 checksum is calculated
+	// by Marshal, and for ICMPv6 the kernel fills the checksum using the
+	// route source. Datagram sockets additionally compute/verify it entirely
+	// in the kernel.
 	bytes, err := msg.Marshal(nil)
 	if err != nil {
 		//loggo.Error("sendICMP Marshal error %s %s", c.Info(), err)
 		return
 	}
 
+	// Datagram endpoints require *net.UDPAddr destinations; raw endpoints
+	// use *net.IPAddr.
+	if ipa, ok := dst.(*net.IPAddr); ok && mode == icmpModeDgram {
+		dst = &net.UDPAddr{IP: ipa.IP, Zone: ipa.Zone}
+	}
 	conn.WriteTo(bytes, dst)
 }
 

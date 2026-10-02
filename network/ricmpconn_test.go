@@ -887,3 +887,121 @@ func TestRicmpAcceptImmediateReadWriteIPv6(t *testing.T) {
 		t.Fatal("server side timed out")
 	}
 }
+
+// runRicmpDgramClientLoopback starts a privileged raw listener (which skips
+// the test without CAP_NET_RAW) and forces the client onto the unprivileged
+// datagram socket, covering the mixed raw-server / ping-socket-client path
+// including echo-id translation.
+func runRicmpDgramClientLoopback(t *testing.T, host, label string) {
+	t.Helper()
+	if _, err := net.ResolveIPAddr("ip", host); err != nil {
+		t.Skipf("%s unavailable: %v", label, err)
+	}
+	c, err := NewConn("ricmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc0, ok := c.(*RicmpConn)
+	if !ok {
+		t.Fatalf("expected *RicmpConn, got %T", c)
+	}
+	ln, err := rc0.Listen(host)
+	if err != nil {
+		t.Skipf("ricmp %s raw listen unavailable: %v", label, err)
+	}
+	defer ln.Close()
+
+	srvReady := make(chan Conn, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		srv, err := ln.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		srvReady <- srv
+		buf := make([]byte, 64)
+		n, err := srv.Read(buf)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		_, err = srv.Write(buf[:n])
+		errCh <- err
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	// Force the unprivileged datagram socket on the Dial side. On kernels
+	// that disallow ping sockets (Linux net.ipv4.ping_group_range excludes
+	// the runner group, or a platform without SOCK_DGRAM ICMP support),
+	// skip instead of failing: the privileged raw listener is up, so this
+	// reports an environment limitation, not a code regression.
+	cli, err := rc0.dial(host, true)
+	if err != nil {
+		t.Skipf("dgram ping socket unavailable on %s (check ping_group_range / platform support): %v", label, err)
+	}
+	defer cli.Close()
+	rc := cli.(*RicmpConn)
+	if rc.dialer == nil || rc.dialer.mode != icmpModeDgram {
+		t.Fatalf("expected datagram dialer, got %+v", cli)
+	}
+
+	var srv Conn
+	select {
+	case srv = <-srvReady:
+	case err := <-errCh:
+		t.Fatalf("Accept: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Accept timed out")
+	}
+	defer srv.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	msg := []byte("ricmp dgram client " + label)
+	if _, err := cli.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	readDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 64)
+		var got []byte
+		for {
+			n, err := cli.Read(buf)
+			if err != nil {
+				readDone <- err
+				return
+			}
+			got = append(got, buf[:n]...)
+			if string(got) == string(msg) {
+				readDone <- nil
+				return
+			}
+		}
+	}()
+
+	select {
+	case err := <-readDone:
+		if err != nil {
+			t.Fatalf("client Read: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client Read timed out")
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("server: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server side timed out")
+	}
+}
+
+func TestRicmpDgramClientIPv4(t *testing.T) {
+	runRicmpDgramClientLoopback(t, "127.0.0.1", "ipv4")
+}
+
+func TestRicmpDgramClientIPv6(t *testing.T) {
+	runRicmpDgramClientLoopback(t, "::1", "ipv6")
+}
