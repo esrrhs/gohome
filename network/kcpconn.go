@@ -15,13 +15,83 @@ KcpConn 实现了基于 KCP 协议的Conn。
 UDPSession 已是 stream 模式 net.Conn，直接读写（不再叠 smux）。
 */
 
+// KcpConfig tunes the KCP forward error correction. DataShards data packets
+// are protected by ParityShards parity packets; the receiver can recover as
+// many lost packets as there are parity shards without retransmission.
+// FEC changes the on-the-wire packet framing, so both peers must configure
+// identical shard counts: a FEC-enabled endpoint cannot talk to a FEC-less
+// one. Both shard counts default to 0 (FEC disabled, legacy wire format).
+// Reed-Solomon allows at most 256 shards in total (data + parity).
+type KcpConfig struct {
+	DataShards   int
+	ParityShards int
+}
+
+// DefaultKcpConfig keeps FEC disabled (0,0) so upgraded peers stay
+// interoperable with older binaries. Opt in explicitly via SetConfig on
+// both ends, e.g. 10 data + 3 parity shards (~30% redundancy) for weak
+// networks.
+func DefaultKcpConfig() *KcpConfig {
+	return &KcpConfig{
+		DataShards:   0,
+		ParityShards: 0,
+	}
+}
+
 type KcpConn struct {
 	sess     *kcp.UDPSession
 	listener *kcp.Listener
 
+	config *KcpConfig
+	cfgMu  sync.RWMutex
+
 	dialMu    sync.Mutex
 	cancel    context.CancelFunc
 	dialOwned io.Closer // in-flight resource; Close() takes and closes it to abort Dial
+}
+
+func (c *KcpConn) checkConfig() {
+	c.cfgMu.Lock()
+	if c.config == nil {
+		c.config = DefaultKcpConfig()
+	}
+	cfg := c.config
+	// Reject parity without data and Reed-Solomon shard overflow; fall
+	// back to the safe default (FEC off) instead of risking a kcp-go error
+	// or silently malformed framing.
+	if cfg.DataShards <= 0 && cfg.ParityShards > 0 {
+		c.config = DefaultKcpConfig()
+	} else if cfg.DataShards+cfg.ParityShards > 256 {
+		c.config = DefaultKcpConfig()
+	}
+	c.cfgMu.Unlock()
+}
+
+func (c *KcpConn) SetConfig(config *KcpConfig) {
+	c.cfgMu.Lock()
+	c.config = config
+	c.cfgMu.Unlock()
+}
+
+func (c *KcpConn) GetConfig() *KcpConfig {
+	c.checkConfig()
+	c.cfgMu.RLock()
+	cfg := c.config
+	c.cfgMu.RUnlock()
+	return cfg
+}
+
+// fecParams returns validated FEC shard counts (0,0 disables FEC and keeps
+// the legacy wire format). Both counts must be positive and their sum must
+// not exceed Reed-Solomon's 256-shard limit.
+func (cfg *KcpConfig) fecParams() (data, parity int) {
+	if cfg == nil || cfg.DataShards <= 0 || cfg.ParityShards <= 0 {
+		return 0, 0
+	}
+	if cfg.DataShards+cfg.ParityShards > 256 {
+		return 0, 0
+	}
+	return cfg.DataShards, cfg.ParityShards
 }
 
 func (c *KcpConn) Name() string {
@@ -149,7 +219,8 @@ func (c *KcpConn) Dial(dst string) (Conn, error) {
 		return nil, errors.New("kcp dial: ListenPacket did not return *net.UDPConn")
 	}
 
-	conn, err := kcp.NewConn(dst, nil, 0, 0, udpConn)
+	dataShards, parityShards := c.GetConfig().fecParams()
+	conn, err := kcp.NewConn(dst, nil, dataShards, parityShards, udpConn)
 	if err != nil {
 		return nil, err
 	}
@@ -173,21 +244,17 @@ func (c *KcpConn) Dial(dst string) (Conn, error) {
 }
 
 func (c *KcpConn) Listen(dst string) (Conn, error) {
-	listener, err := kcp.Listen(dst)
+	dataShards, parityShards := c.GetConfig().fecParams()
+	kl, err := kcp.ListenWithOptions(dst, nil, dataShards, parityShards)
 	if err != nil {
 		return nil, err
 	}
 
-	kl, ok := listener.(*kcp.Listener)
-	if !ok {
-		_ = listener.Close()
-		return nil, errors.New("kcp listen: unexpected listener type")
-	}
 	_ = kl.SetReadBuffer(4 * 1024 * 1024)
 	_ = kl.SetWriteBuffer(4 * 1024 * 1024)
 	_ = kl.SetDSCP(46)
 
-	return &KcpConn{listener: kl}, nil
+	return &KcpConn{listener: kl, config: c.GetConfig()}, nil
 }
 
 func (c *KcpConn) Accept() (Conn, error) {

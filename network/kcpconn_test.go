@@ -609,3 +609,127 @@ func TestKcpAcceptNotListen(t *testing.T) {
 		t.Fatal("Accept on non-listener should fail")
 	}
 }
+
+func TestKcpDefaultConfigFecOff(t *testing.T) {
+	cfg := DefaultKcpConfig()
+	if d, p := cfg.fecParams(); d != 0 || p != 0 {
+		t.Fatalf("default FEC = (%d,%d), want (0,0) for legacy wire compat", d, p)
+	}
+}
+
+func TestKcpFecConfigValidation(t *testing.T) {
+	cases := []struct {
+		name        string
+		cfg         *KcpConfig
+		wantData    int
+		wantParity  int
+		fallbackOff bool
+	}{
+		{"enabled", &KcpConfig{DataShards: 10, ParityShards: 3}, 10, 3, false},
+		{"disabled", &KcpConfig{DataShards: 0, ParityShards: 0}, 0, 0, false},
+		{"parity without data", &KcpConfig{DataShards: 0, ParityShards: 3}, 0, 0, true},
+		{"shards overflow", &KcpConfig{DataShards: 200, ParityShards: 200}, 0, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := NewConn("kcp")
+			if err != nil {
+				t.Fatal(err)
+			}
+			kc := c.(*KcpConn)
+			kc.SetConfig(tc.cfg)
+			d, p := kc.GetConfig().fecParams()
+			if d != tc.wantData || p != tc.wantParity {
+				t.Fatalf("fecParams = (%d,%d), want (%d,%d)", d, p, tc.wantData, tc.wantParity)
+			}
+			if tc.fallbackOff {
+				got := kc.GetConfig()
+				if got.DataShards != 0 || got.ParityShards != 0 {
+					t.Fatalf("invalid config not reset to FEC-off default: %+v", got)
+				}
+			}
+		})
+	}
+}
+
+// kcpFecEcho boots a listener/dialer pair with the given configs and runs
+// one echo round trip. KCP has no handshake, so a wire mismatch surfaces as
+// a read timeout rather than a Dial error.
+func kcpFecEcho(t *testing.T, srvCfg, cliCfg *KcpConfig, expectEcho bool) {
+	t.Helper()
+	l, err := NewConn("kcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srvCfg != nil {
+		l.(*KcpConn).SetConfig(srvCfg)
+	}
+	ln, err := l.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	addr := ln.(*KcpConn).listener.Addr().String()
+
+	go func() {
+		srv, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer srv.Close()
+		buf := make([]byte, 128)
+		n, err := srv.Read(buf)
+		if err != nil {
+			return
+		}
+		_, _ = srv.Write(buf[:n])
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	d, err := NewConn("kcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cliCfg != nil {
+		d.(*KcpConn).SetConfig(cliCfg)
+	}
+	cli, err := d.Dial(addr)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cli.Close()
+
+	msg := []byte("kcp-fec-echo")
+	if _, err := cli.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	_ = cli.(*KcpConn).sess.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 128)
+	n, err := cli.Read(buf)
+	if expectEcho {
+		if err != nil {
+			t.Fatalf("expected echo with matching FEC config, got: %v", err)
+		}
+		if string(buf[:n]) != string(msg) {
+			t.Fatalf("echo mismatch: %q", buf[:n])
+		}
+	} else {
+		if err == nil && string(buf[:n]) == string(msg) {
+			t.Fatal("echo unexpectedly succeeded across mismatched FEC framing")
+		}
+	}
+}
+
+func TestKcpFecLoopback(t *testing.T) {
+	cfg := &KcpConfig{DataShards: 10, ParityShards: 3}
+	kcpFecEcho(t, cfg, cfg, true)
+}
+
+// FEC framing is not wire-compatible with a FEC-less peer: a 10+3 client
+// against a legacy listener must not exchange data. This locks the default
+// to (0,0): enabling FEC by default would silently break mixed-version
+// deployments.
+func TestKcpFecMismatchNoTraffic(t *testing.T) {
+	kcpFecEcho(t, nil, &KcpConfig{DataShards: 10, ParityShards: 3}, false)
+}
