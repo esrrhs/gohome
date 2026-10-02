@@ -40,7 +40,7 @@ func TestRicmpDgramV6DebugDump(t *testing.T) {
 		t.Skipf("udp6 listen: %v", err)
 	}
 	defer cli.Close()
-	t.Logf("client LocalAddr=%#v RemoteAddr=%#v", cli.LocalAddr(), cli.RemoteAddr)
+	t.Logf("client LocalAddr=%#v", cli.LocalAddr())
 
 	ua := cli.LocalAddr().(*net.UDPAddr)
 	id := 12345
