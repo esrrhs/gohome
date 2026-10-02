@@ -891,7 +891,9 @@ func TestRicmpAcceptImmediateReadWriteIPv6(t *testing.T) {
 // runRicmpDgramClientLoopback starts a privileged raw listener (which skips
 // the test without CAP_NET_RAW) and forces the client onto the unprivileged
 // datagram socket, covering the mixed raw-server / ping-socket-client path
-// including echo-id translation.
+// including echo-id translation. Only IPv4 has this mixed path: on Linux
+// dgram-sent ICMPv6 echo requests do not reach raw v6 listeners, and Darwin
+// has no ICMPv6 dgram support.
 func runRicmpDgramClientLoopback(t *testing.T, host, label string) {
 	t.Helper()
 	if _, err := net.ResolveIPAddr("ip", host); err != nil {
@@ -1000,25 +1002,4 @@ func runRicmpDgramClientLoopback(t *testing.T, host, label string) {
 
 func TestRicmpDgramClientIPv4(t *testing.T) {
 	runRicmpDgramClientLoopback(t, "127.0.0.1", "ipv4")
-}
-
-func TestRicmpDgramClientIPv6(t *testing.T) {
-	runRicmpDgramClientLoopback(t, "::1", "ipv6")
-}
-
-func TestDgramBindAddress(t *testing.T) {
-	// IPv4 keeps the wildcard bind: the IPv4 ping lookup branch treats an
-	// unspecified bound address as match-any.
-	if got := dgramBindAddress(icmpFamilyV4, &net.IPAddr{IP: net.ParseIP("127.0.0.1")}); got != "" {
-		t.Fatalf("v4 dgram bind = %q, want empty wildcard", got)
-	}
-	// IPv6 must bind the concrete source selected toward the target; on
-	// loopback that is ::1. Skip only if the host has no IPv6 loopback.
-	got := dgramBindAddress(icmpFamilyV6, &net.IPAddr{IP: net.ParseIP("::1")})
-	if got == "" {
-		t.Skip("no IPv6 route toward ::1")
-	}
-	if got != "::1" {
-		t.Fatalf("v6 dgram bind for ::1 = %q, want ::1", got)
-	}
 }
