@@ -2,12 +2,17 @@ package network
 
 import (
 	"fmt"
+	"net"
+	"reflect"
 	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/esrrhs/gohome/loggo"
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -688,5 +693,197 @@ func TestRicmpAcceptNotListen(t *testing.T) {
 	}
 	if _, err := c.Accept(); err == nil {
 		t.Fatal("Accept on non-listener should fail")
+	}
+}
+
+func TestRicmpFamilyHelpers(t *testing.T) {
+	if got := familyFromIP(net.ParseIP("127.0.0.1")); got != icmpFamilyV4 {
+		t.Fatalf("127.0.0.1 family=%d want v4", got)
+	}
+	if got := familyFromIP(net.ParseIP("::1")); got != icmpFamilyV6 {
+		t.Fatalf("::1 family=%d want v6", got)
+	}
+	// IPv4-mapped IPv6 must be carried over an ICMPv4 raw socket.
+	if got := familyFromIP(net.ParseIP("::ffff:1.2.3.4")); got != icmpFamilyV4 {
+		t.Fatalf("::ffff:1.2.3.4 family=%d want v4", got)
+	}
+
+	if got := icmpNetwork(icmpFamilyV4); got != "ip4:icmp" {
+		t.Fatalf("v4 network=%q", got)
+	}
+	if got := icmpNetwork(icmpFamilyV6); got != "ip6:icmp" {
+		t.Fatalf("v6 network=%q", got)
+	}
+
+	cases := []struct {
+		icmpProto int
+		family    int
+		want      icmpTypeLike
+	}{
+		{int(IcmpMsg_PING_PROTO), icmpFamilyV4, icmpTypeLike{"ipv4", int(ipv4.ICMPTypeEcho)}},
+		{int(IcmpMsg_PONG_PROTO), icmpFamilyV4, icmpTypeLike{"ipv4", int(ipv4.ICMPTypeEchoReply)}},
+		{int(IcmpMsg_PING_PROTO), icmpFamilyV6, icmpTypeLike{"ipv6", int(ipv6.ICMPTypeEchoRequest)}},
+		{int(IcmpMsg_PONG_PROTO), icmpFamilyV6, icmpTypeLike{"ipv6", int(ipv6.ICMPTypeEchoReply)}},
+	}
+	for _, tc := range cases {
+		got := icmpEchoType(tc.icmpProto, tc.family)
+		var gotKind string
+		switch got.(type) {
+		case ipv4.ICMPType:
+			gotKind = "ipv4"
+		case ipv6.ICMPType:
+			gotKind = "ipv6"
+		}
+		if gotKind != tc.want.kind {
+			t.Fatalf("proto=%d family=%d kind=%s want %s", tc.icmpProto, tc.family, gotKind, tc.want.kind)
+		}
+		if typeCode(got) != tc.want.code {
+			t.Fatalf("proto=%d family=%d type=%d want %d", tc.icmpProto, tc.family, typeCode(got), tc.want.code)
+		}
+	}
+}
+
+type icmpTypeLike struct {
+	kind string
+	code int
+}
+
+func typeCode(t icmp.Type) int {
+	switch v := t.(type) {
+	case ipv4.ICMPType:
+		return int(v)
+	case ipv6.ICMPType:
+		return int(v)
+	}
+	return -1
+}
+
+func TestParseRicmpListenAddr(t *testing.T) {
+	cases := []struct {
+		dst       string
+		wantFam   []int
+		wantBind  string
+		wantError bool
+	}{
+		{"", []int{icmpFamilyV4, icmpFamilyV6}, "", false},
+		{"  ", []int{icmpFamilyV4, icmpFamilyV6}, "", false},
+		{"0.0.0.0", []int{icmpFamilyV4, icmpFamilyV6}, "", false},
+		{"::", []int{icmpFamilyV4, icmpFamilyV6}, "", false},
+		{"127.0.0.1", []int{icmpFamilyV4}, "127.0.0.1", false},
+		{"::1", []int{icmpFamilyV6}, "::1", false},
+		{":8888", nil, "", true},          // ricmp has no port
+		{"127.0.0.1:8888", nil, "", true}, // host:port is invalid
+		{"example.com", nil, "", true},    // hostnames are not allowed at listen
+	}
+	for _, tc := range cases {
+		fams, bind, err := parseRicmpListenAddr(tc.dst)
+		if tc.wantError {
+			if err == nil {
+				t.Fatalf("dst=%q expected error, got families=%v bind=%q", tc.dst, fams, bind)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("dst=%q unexpected error: %v", tc.dst, err)
+		}
+		if !reflect.DeepEqual(fams, tc.wantFam) {
+			t.Fatalf("dst=%q families=%v want %v", tc.dst, fams, tc.wantFam)
+		}
+		if bind != tc.wantBind {
+			t.Fatalf("dst=%q bind=%q want %q", tc.dst, bind, tc.wantBind)
+		}
+	}
+}
+
+func TestRicmpAcceptImmediateReadWriteIPv6(t *testing.T) {
+	if _, err := net.ResolveIPAddr("ip6", "::1"); err != nil {
+		t.Skipf("IPv6 unavailable: %v", err)
+	}
+	c, err := NewConn("ricmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := c.Listen("::1")
+	if err != nil {
+		// Raw ip6:icmp requires root/CAP_NET_RAW (or a permissive stack).
+		t.Skipf("ricmp ipv6 listen unavailable: %v", err)
+	}
+	defer ln.Close()
+
+	srvReady := make(chan Conn, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		srv, err := ln.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		srvReady <- srv
+		buf := make([]byte, 64)
+		n, err := srv.Read(buf)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		_, err = srv.Write(buf[:n])
+		errCh <- err
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cli, err := c.Dial("::1")
+	if err != nil {
+		t.Fatalf("Dial ::1: %v", err)
+	}
+	defer cli.Close()
+
+	var srv Conn
+	select {
+	case srv = <-srvReady:
+	case err := <-errCh:
+		t.Fatalf("Accept: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Accept timed out")
+	}
+	defer srv.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	msg := []byte("ricmp6-accept-ready")
+	if _, err := cli.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	readDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 64)
+		var got []byte
+		for {
+			n, err := cli.Read(buf)
+			if err != nil {
+				readDone <- err
+				return
+			}
+			got = append(got, buf[:n]...)
+			if string(got) == string(msg) {
+				readDone <- nil
+				return
+			}
+		}
+	}()
+
+	select {
+	case err := <-readDone:
+		if err != nil {
+			t.Fatalf("client Read: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client Read timed out")
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("server: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server side timed out")
 	}
 }

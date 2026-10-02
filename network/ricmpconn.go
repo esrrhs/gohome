@@ -3,19 +3,86 @@ package network
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
 	"math/rand"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/esrrhs/gohome/common"
+	"github.com/esrrhs/gohome/loggo"
 	"github.com/esrrhs/gohome/thread"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 	"google.golang.org/protobuf/proto"
 )
+
+// ICMP address families supported by RicmpConn.
+const (
+	icmpFamilyV4 = 4
+	icmpFamilyV6 = 6
+)
+
+// icmpNetwork returns the x/net/icmp raw socket network for the given family.
+func icmpNetwork(family int) string {
+	if family == icmpFamilyV6 {
+		return "ip6:icmp"
+	}
+	return "ip4:icmp"
+}
+
+// familyFromIP classifies an IP as ICMPv4 or ICMPv6. IPv4-mapped IPv6
+// addresses (e.g. ::ffff:1.2.3.4) are treated as IPv4 because ICMP raw
+// sockets are not dual-stack.
+func familyFromIP(ip net.IP) int {
+	if ip.To4() != nil {
+		return icmpFamilyV4
+	}
+	return icmpFamilyV6
+}
+
+// familyFromPacketConn reports whether an icmp.PacketConn carries ICMPv6.
+func familyFromPacketConn(conn *icmp.PacketConn) int {
+	if conn.IPv6PacketConn() != nil {
+		return icmpFamilyV6
+	}
+	return icmpFamilyV4
+}
+
+// icmpEchoType maps the logical IcmpMsg ping/pong proto onto the concrete
+// ICMP echo type of the address family: ICMPv4 uses 8/0, ICMPv6 uses 128/129.
+func icmpEchoType(icmpProto int, family int) icmp.Type {
+	if family == icmpFamilyV6 {
+		if icmpProto == int(IcmpMsg_PING_PROTO) {
+			return ipv6.ICMPTypeEchoRequest
+		}
+		return ipv6.ICMPTypeEchoReply
+	}
+	return ipv4.ICMPType(icmpProto)
+}
+
+// parseRicmpListenAddr resolves the Listen bind address into the set of ICMP
+// families to open. Wildcard/unspecified addresses ("" / "0.0.0.0" / "::")
+// bind both IPv4 and IPv6; an explicit IP literal binds only its own family.
+// The returned bind address is always a literal (or "" for wildcard).
+func parseRicmpListenAddr(dst string) (families []int, bind string, err error) {
+	dst = strings.TrimSpace(dst)
+	if dst == "" {
+		return []int{icmpFamilyV4, icmpFamilyV6}, "", nil
+	}
+	ip := net.ParseIP(dst)
+	if ip == nil {
+		return nil, "", fmt.Errorf("ricmp listen: invalid bind address %q (host only, port is not allowed)", dst)
+	}
+	if ip.IsUnspecified() {
+		return []int{icmpFamilyV4, icmpFamilyV6}, "", nil
+	}
+	return []int{familyFromIP(ip)}, dst, nil
+}
 
 /*
 RicmpConn 实现了基于 可靠icmp 协议的Conn。
@@ -71,6 +138,7 @@ type ricmpConnDialer struct {
 	conn       *icmp.PacketConn
 	fm         *FrameMgr
 	wg         *thread.Group
+	family     int // icmpFamilyV4 or icmpFamilyV6
 	icmpId     int
 	icmpSeq    int32
 	icmpProto  int
@@ -83,6 +151,7 @@ type ricmpConnListenerSonny struct {
 	listener   *ricmpConnListener
 	fm         *FrameMgr
 	wg         *thread.Group
+	family     int // icmpFamilyV4 or icmpFamilyV6
 	icmpId     int
 	icmpSeq    int32 // written by recv loop, read by send loop
 	icmpProto  int
@@ -90,10 +159,12 @@ type ricmpConnListenerSonny struct {
 }
 
 type ricmpConnListener struct {
-	listenerconn *icmp.PacketConn
-	wg           *thread.Group
-	sonny        sync.Map
-	accept       *common.Channel
+	// One socket per address family: wildcard listen opens both IPv4 and
+	// IPv6 because ICMP raw sockets are not dual-stack.
+	listenerconns []*icmp.PacketConn
+	wg            *thread.Group
+	sonny         sync.Map
+	accept        *common.Channel
 }
 
 func (c *RicmpConn) Name() string {
@@ -234,8 +305,8 @@ func (c *RicmpConn) Close() error {
 		if c.listener.accept != nil {
 			c.listener.accept.Close()
 		}
-		if c.listener.listenerconn != nil {
-			c.listener.listenerconn.Close()
+		for _, lc := range c.listener.listenerconns {
+			lc.Close()
 		}
 		c.listener.sonny.Range(func(key, value interface{}) bool {
 			u := value.(*RicmpConn)
@@ -266,7 +337,11 @@ func (c *RicmpConn) Info() string {
 		return c.dialer.conn.LocalAddr().String() + "<--ricmp dialer " + c.id + "-->" + c.dialer.serveraddr.String()
 	}
 	if c.listener != nil {
-		return "ricmp listener " + c.id + "--" + c.listener.listenerconn.LocalAddr().String()
+		addrs := make([]string, 0, len(c.listener.listenerconns))
+		for _, lc := range c.listener.listenerconns {
+			addrs = append(addrs, lc.LocalAddr().String())
+		}
+		return "ricmp listener " + c.id + "--" + strings.Join(addrs, ",")
 	}
 	if c.listenersonny != nil {
 		return c.listenersonny.fatherconn.LocalAddr().String() + "<--ricmp listenersonny " + c.id + "-->" + c.listenersonny.dstaddr.String()
@@ -282,7 +357,8 @@ func (c *RicmpConn) Dial(dst string) (Conn, error) {
 		return nil, err
 	}
 
-	conn, err := icmp.ListenPacket("ip4:icmp", "")
+	family := familyFromIP(addr.IP)
+	conn, err := icmp.ListenPacket(icmpNetwork(family), "")
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +370,7 @@ func (c *RicmpConn) Dial(dst string) (Conn, error) {
 		fm.SetCongestion(&BBCongestion{})
 	}
 
-	dialer := &ricmpConnDialer{serveraddr: addr, conn: conn, fm: fm,
+	dialer := &ricmpConnDialer{serveraddr: addr, conn: conn, fm: fm, family: family,
 		icmpId: rand.Intn(math.MaxInt16), icmpSeq: 0, icmpProto: int(IcmpMsg_PING_PROTO), icmpFlag: IcmpMsg_CLIENT_SEND_FLAG}
 
 	u := &RicmpConn{id: id, config: c.config, dialer: dialer}
@@ -318,7 +394,7 @@ func (c *RicmpConn) Dial(dst string) (Conn, error) {
 			f := e.Value.(*Frame)
 			mb, _ := u.dialer.fm.MarshalFrame(f)
 			u.dialer.conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
-			u.send_icmp(u.dialer.conn, mb, u.dialer.serveraddr,
+			u.send_icmp(u.dialer.conn, u.dialer.family, mb, u.dialer.serveraddr,
 				u.id, u.dialer.icmpId, int(u.dialer.icmpSeq), u.dialer.icmpProto, u.dialer.icmpFlag)
 			u.dialer.icmpSeq++
 		}
@@ -383,9 +459,27 @@ func (c *RicmpConn) Dial(dst string) (Conn, error) {
 func (c *RicmpConn) Listen(dst string) (Conn, error) {
 	c.checkConfig()
 
-	conn, err := icmp.ListenPacket("ip4:icmp", dst)
+	families, bind, err := parseRicmpListenAddr(dst)
 	if err != nil {
 		return nil, err
+	}
+
+	// Wildcard binds open both families; a failure on one family (e.g. the
+	// host has no IPv6 stack) degrades to the other instead of failing.
+	var conns []*icmp.PacketConn
+	for _, family := range families {
+		pc, perr := icmp.ListenPacket(icmpNetwork(family), bind)
+		if perr != nil {
+			if len(families) > 1 {
+				loggo.Warn("ricmp listen: skip %s on %s: %s", icmpNetwork(family), bind, perr.Error())
+				continue
+			}
+			return nil, perr
+		}
+		conns = append(conns, pc)
+	}
+	if len(conns) == 0 {
+		return nil, errors.New("ricmp listen: no icmp socket available")
 	}
 
 	ch := common.NewChannel(c.config.AcceptChanLen)
@@ -393,15 +487,18 @@ func (c *RicmpConn) Listen(dst string) (Conn, error) {
 	wg := thread.NewGroup("RicmpConn Listen"+" "+dst, nil, nil)
 
 	listener := &ricmpConnListener{
-		listenerconn: conn,
-		wg:           wg,
-		accept:       ch,
+		listenerconns: conns,
+		wg:            wg,
+		accept:        ch,
 	}
 
 	u := &RicmpConn{id: common.UniqueId(), config: c.config, listener: listener}
-	wg.Go("RicmpConn loopListenerRecv"+" "+dst, func() error {
-		return u.loopListenerRecv()
-	})
+	for _, pc := range conns {
+		pc := pc
+		wg.Go("RicmpConn loopListenerRecv"+" "+dst, func() error {
+			return u.loopListenerRecv(pc)
+		})
+	}
 
 	return u, nil
 }
@@ -454,13 +551,15 @@ func (c *RicmpConn) GetConfig() *RicmpConfig {
 	return cfg
 }
 
-func (c *RicmpConn) loopListenerRecv() error {
+func (c *RicmpConn) loopListenerRecv(listenerconn *icmp.PacketConn) error {
 	c.checkConfig()
+
+	family := familyFromPacketConn(listenerconn)
 
 	buf := make([]byte, c.config.MaxPacketSize)
 	for !c.listener.wg.IsExit() {
-		c.listener.listenerconn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
-		n, srcaddr, err, cid, echoId, echoSeq, echoFlag := c.recv_icmp(c.listener.listenerconn, buf)
+		listenerconn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
+		n, srcaddr, err, cid, echoId, echoSeq, echoFlag := c.recv_icmp(listenerconn, buf)
 		if err != nil || echoFlag != int(IcmpMsg_CLIENT_SEND_FLAG) {
 			continue
 		}
@@ -473,7 +572,7 @@ func (c *RicmpConn) loopListenerRecv() error {
 				fm.SetCongestion(&BBCongestion{})
 			}
 
-			sonny := &ricmpConnListenerSonny{dstaddr: srcaddr, fatherconn: c.listener.listenerconn, listener: c.listener, fm: fm,
+			sonny := &ricmpConnListenerSonny{dstaddr: srcaddr, fatherconn: listenerconn, listener: c.listener, fm: fm, family: family,
 				icmpId: echoId, icmpSeq: int32(echoSeq), icmpProto: int(IcmpMsg_PONG_PROTO), icmpFlag: IcmpMsg_SERVER_SEND_FLAG}
 
 			u := &RicmpConn{id: cid, config: c.config, listenersonny: sonny}
@@ -546,7 +645,7 @@ func (c *RicmpConn) accept(u *RicmpConn) error {
 				break
 			}
 			u.listenersonny.fatherconn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
-			u.send_icmp(u.listenersonny.fatherconn, mb, u.listenersonny.dstaddr,
+			u.send_icmp(u.listenersonny.fatherconn, u.listenersonny.family, mb, u.listenersonny.dstaddr,
 				u.id, u.listenersonny.icmpId, int(atomic.LoadInt32(&u.listenersonny.icmpSeq)), u.listenersonny.icmpProto, u.listenersonny.icmpFlag)
 		}
 
@@ -597,7 +696,7 @@ func (c *RicmpConn) updateListenerSonny() error {
 			c.listenersonny.listener.sonny.Delete(c.id)
 		}
 	}()
-	return c.update_ricmp(c.listenersonny.wg, c.listenersonny.fm, c.listenersonny.fatherconn, c.listenersonny.dstaddr, false,
+	return c.update_ricmp(c.listenersonny.wg, c.listenersonny.fm, c.listenersonny.fatherconn, c.listenersonny.family, c.listenersonny.dstaddr, false,
 		0, 0,
 		c.id, c.listenersonny.icmpId, &c.listenersonny.icmpSeq, c.listenersonny.icmpProto, c.listenersonny.icmpFlag,
 		false)
@@ -610,13 +709,13 @@ func (c *RicmpConn) updateDialerSonny() error {
 			c.dialer.conn.Close()
 		}
 	}()
-	return c.update_ricmp(c.dialer.wg, c.dialer.fm, c.dialer.conn, c.dialer.serveraddr, true,
+	return c.update_ricmp(c.dialer.wg, c.dialer.fm, c.dialer.conn, c.dialer.family, c.dialer.serveraddr, true,
 		c.dialer.icmpId, int(IcmpMsg_SERVER_SEND_FLAG),
 		c.id, c.dialer.icmpId, &c.dialer.icmpSeq, c.dialer.icmpProto, c.dialer.icmpFlag,
 		true)
 }
 
-func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.PacketConn, dstaddr net.Addr, readconn bool,
+func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.PacketConn, family int, dstaddr net.Addr, readconn bool,
 	recvCheckEchoId int, recvCheckEchoFlag int, id string, icmpId int, icmpSeq *int32, icmpProto int, icmpFlag IcmpMsg_TYPE, addIcmpSeq bool) error {
 
 	//loggo.Debug("start ricmp conn %s", c.Info())
@@ -670,7 +769,7 @@ func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.Pack
 			}
 			conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
 			seq := int(atomic.LoadInt32(icmpSeq))
-			c.send_icmp(conn, mb, dstaddr, id, icmpId, seq, icmpProto, icmpFlag)
+			c.send_icmp(conn, family, mb, dstaddr, id, icmpId, seq, icmpProto, icmpFlag)
 			if addIcmpSeq {
 				atomic.AddInt32(icmpSeq, 1)
 			}
@@ -720,7 +819,7 @@ func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.Pack
 			}
 			conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
 			seq := int(atomic.LoadInt32(icmpSeq))
-			c.send_icmp(conn, mb, dstaddr, id, icmpId, seq, icmpProto, icmpFlag)
+			c.send_icmp(conn, family, mb, dstaddr, id, icmpId, seq, icmpProto, icmpFlag)
 			if addIcmpSeq {
 				atomic.AddInt32(icmpSeq, 1)
 			}
@@ -768,7 +867,7 @@ func (c *RicmpConn) update_ricmp(wg *thread.Group, fm *FrameMgr, conn *icmp.Pack
 	return errors.New("closed " + reason)
 }
 
-func (c *RicmpConn) send_icmp(conn *icmp.PacketConn, data []byte, dst net.Addr, id string, icmpId int, icmpSeq int, icmpProto int, icmpFlag IcmpMsg_TYPE) {
+func (c *RicmpConn) send_icmp(conn *icmp.PacketConn, family int, data []byte, dst net.Addr, id string, icmpId int, icmpSeq int, icmpProto int, icmpFlag IcmpMsg_TYPE) {
 
 	m := &IcmpMsg{
 		Id:    id,
@@ -790,11 +889,14 @@ func (c *RicmpConn) send_icmp(conn *icmp.PacketConn, data []byte, dst net.Addr, 
 	}
 
 	msg := &icmp.Message{
-		Type: (ipv4.ICMPType)(icmpProto),
+		Type: icmpEchoType(icmpProto, family),
 		Code: 0,
 		Body: body,
 	}
 
+	// psh is nil for both families: ICMPv4 checksum is always calculated by
+	// Marshal, and for ICMPv6 the raw socket (Linux rawv6 / Darwin rip6)
+	// fills the checksum with the correct route source during transmission.
 	bytes, err := msg.Marshal(nil)
 	if err != nil {
 		//loggo.Error("sendICMP Marshal error %s %s", c.Info(), err)
