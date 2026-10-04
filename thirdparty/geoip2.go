@@ -2,8 +2,10 @@ package thirdparty
 
 import (
 	"errors"
-	"github.com/oschwald/geoip2-golang"
 	"net"
+	"sync"
+
+	"github.com/oschwald/geoip2-golang"
 )
 
 /*
@@ -19,8 +21,20 @@ geoip2 提供了一组用于获取地理位置信息的功能，基于 MaxMind �
 - 处理在解析过程中可能出现的错误
 */
 
-var gdb *geoip2.Reader
+// ErrGeoipNotLoaded is returned when a lookup runs before LoadGeoip2 succeeded.
+var ErrGeoipNotLoaded = errors.New("geoip2: LoadGeoip2 must be called first")
 
+// mu guards gdb so a concurrent reload cannot swap the reader out from under
+// an in-flight lookup, and so -race stays clean when reloading at runtime.
+var (
+	mu  sync.RWMutex
+	gdb *geoip2.Reader
+)
+
+// LoadGeoip2 opens the MaxMind database at file (default
+// ./GeoLite2-Country.mmdb). It replaces any previously loaded reader, closing
+// the old one so repeated reloads do not leak the mmap. On failure the
+// previously loaded reader stays in place.
 func LoadGeoip2(file string) error {
 
 	if len(file) <= 0 {
@@ -31,34 +45,86 @@ func LoadGeoip2(file string) error {
 	if err != nil {
 		return err
 	}
+
+	mu.Lock()
+	old := gdb
 	gdb = db
+	mu.Unlock()
+
+	if old != nil {
+		_ = old.Close()
+	}
 	return nil
+}
+
+// CloseGeoip2 releases the loaded database.
+func CloseGeoip2() error {
+	mu.Lock()
+	old := gdb
+	gdb = nil
+	mu.Unlock()
+
+	if old == nil {
+		return nil
+	}
+	return old.Close()
+}
+
+// reader returns the loaded reader, or ErrGeoipNotLoaded.
+func reader() (*geoip2.Reader, error) {
+	mu.RLock()
+	defer mu.RUnlock()
+	if gdb == nil {
+		return nil, ErrGeoipNotLoaded
+	}
+	return gdb, nil
+}
+
+// geoCountry is the subset of the MaxMind country record the package exposes.
+// geoip2.City.Country is an anonymous struct, so this keeps the accessors
+// typed without depending on the library's internal layout.
+type geoCountry struct {
+	IsoCode string
+	Name    string
+}
+
+// country looks up the country record for ipaddr. City() is used rather than
+// Country() because geoip2-golang maps GeoLite2-Country onto isCity|isCountry,
+// so both work; City() additionally covers City databases.
+func country(ipaddr string) (geoCountry, error) {
+	r, err := reader()
+	if err != nil {
+		return geoCountry{}, err
+	}
+
+	ip := net.ParseIP(ipaddr)
+	if ip == nil {
+		return geoCountry{}, errors.New("ip " + ipaddr + " ParseIP nil")
+	}
+
+	record, err := r.City(ip)
+	if err != nil {
+		return geoCountry{}, err
+	}
+	return geoCountry{IsoCode: record.Country.IsoCode, Name: record.Country.Names["en"]}, nil
 }
 
 func GetGeoipCountryIsoCode(ipaddr string) (string, error) {
 
-	ip := net.ParseIP(ipaddr)
-	if ip == nil {
-		return "", errors.New("ip " + ipaddr + " ParseIP nil")
-	}
-	record, err := gdb.City(ip)
+	c, err := country(ipaddr)
 	if err != nil {
 		return "", err
 	}
 
-	return record.Country.IsoCode, nil
+	return c.IsoCode, nil
 }
 
 func GetGeoipCountryName(ipaddr string) (string, error) {
 
-	ip := net.ParseIP(ipaddr)
-	if ip == nil {
-		return "", errors.New("ip " + ipaddr + "ParseIP nil")
-	}
-	record, err := gdb.City(ip)
+	c, err := country(ipaddr)
 	if err != nil {
 		return "", err
 	}
 
-	return record.Country.Names["en"], nil
+	return c.Name, nil
 }
