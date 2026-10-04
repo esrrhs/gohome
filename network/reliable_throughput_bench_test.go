@@ -60,7 +60,7 @@ func BenchmarkReliableThroughput(b *testing.B) {
 				for i := 0; i < b.N; i++ {
 					mbps, total, err := runFixedPayloadDownload(proto, cs.loss, benchDuration, int64(i+1))
 					if err != nil {
-						if isPermissionUnavailable(err) {
+						if isEnvironmentUnavailable(err) {
 							b.Skipf("%s unavailable in unprivileged environment: %v", proto, err)
 						}
 						if proto == "quic" && cs.loss >= 0.5 {
@@ -496,6 +496,21 @@ func isPermissionUnavailable(err error) bool {
 		strings.Contains(s, "could not insert 'sch_netem'")
 }
 
+// isEnvironmentUnavailable reports whether an error means "this machine cannot
+// run the netem benchmark" rather than "the library misbehaved". Besides the
+// privilege failures, a missing `tc` binary (iproute-tc is not installed on
+// macOS / stock Windows) leaves the link shaping unavailable, so the affected
+// subtests must skip instead of failing the package.
+func isEnvironmentUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return isPermissionUnavailable(err) ||
+		strings.Contains(s, "tc not found") ||
+		strings.Contains(s, "no such file or directory")
+}
+
 func TestReliableThroughputSmoke(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short")
@@ -505,7 +520,7 @@ func TestReliableThroughputSmoke(t *testing.T) {
 		t.Run(proto+"/loss0%", func(t *testing.T) {
 			mbps, total, err := runFixedPayloadDownload(proto, 0, 10*time.Second, 1)
 			if err != nil {
-				if isPermissionUnavailable(err) {
+				if isEnvironmentUnavailable(err) {
 					t.Skipf("%s unavailable in unprivileged environment: %v", proto, err)
 				}
 				t.Fatal(err)
@@ -522,7 +537,7 @@ func TestReliableThroughputSmoke(t *testing.T) {
 	t.Run("rhttp/loss10%short", func(t *testing.T) {
 		mbps, total, err := runFixedPayloadDownload("rhttp", 0.10, 15*time.Second, 2)
 		if err != nil {
-			if isPermissionUnavailable(err) {
+			if isEnvironmentUnavailable(err) {
 				t.Skipf("rhttp tc netem unavailable in unprivileged environment: %v", err)
 			}
 			t.Fatal(err)
@@ -535,7 +550,7 @@ func TestReliableThroughputSmoke(t *testing.T) {
 	t.Run("ricmp/loss10%short", func(t *testing.T) {
 		mbps, total, err := runFixedPayloadDownload("ricmp", 0.10, 15*time.Second, 3)
 		if err != nil {
-			if isPermissionUnavailable(err) {
+			if isEnvironmentUnavailable(err) {
 				t.Skipf("ricmp tc netem unavailable in unprivileged environment: %v", err)
 			}
 			t.Fatal(err)
