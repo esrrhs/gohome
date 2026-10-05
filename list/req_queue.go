@@ -2,6 +2,7 @@ package list
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/esrrhs/gohome/loggo"
 )
@@ -16,8 +17,10 @@ type Req[V any] struct {
 type ReqQueue[K comparable, V any] struct {
 	tasks       sync.Map
 	requestFunc func(K) (V, error)
-	newNum      int
-	reuseNum    int
+	// newNum / reuseNum 会被多个 Submit 并发更新、也可能被调用方读取统计，
+	// 必须走原子操作：曾经用普通 int，-race 下稳定报 DATA RACE 且计数会丢。
+	newNum   atomic.Int64
+	reuseNum atomic.Int64
 }
 
 // NewTaskQueue 创建一个新的任务队列
@@ -37,14 +40,14 @@ func (q *ReqQueue[K, V]) Submit(key K) (V, error) {
 	req := actual.(*Req[V])
 	if loaded {
 		// 如果已有任务在进行，等待它完成
-		q.reuseNum++
+		q.reuseNum.Add(1)
 		loggo.Debug("Task %v is already in progress, waiting...", key)
 		<-req.c
 		loggo.Debug("Task %v completed, returning result", key)
 		return req.value, req.err
 	} else {
 		// 如果没有任务在进行，开始新的任务
-		q.newNum++
+		q.newNum.Add(1)
 		loggo.Debug("Starting new task for %v", key)
 		result, err := q.requestFunc(key)
 		req.value = result
@@ -58,20 +61,20 @@ func (q *ReqQueue[K, V]) Submit(key K) (V, error) {
 
 // GetNewNum 获取新任务数量
 func (q *ReqQueue[K, V]) GetNewNum() int {
-	return q.newNum
+	return int(q.newNum.Load())
 }
 
 // GetReuseNum 获取重用任务数量
 func (q *ReqQueue[K, V]) GetReuseNum() int {
-	return q.reuseNum
+	return int(q.reuseNum.Load())
 }
 
 // ResetNewNum 重置新任务数量
 func (q *ReqQueue[K, V]) ResetNewNum() {
-	q.newNum = 0
+	q.newNum.Store(0)
 }
 
 // ResetReuseNum 重置重用任务数量
 func (q *ReqQueue[K, V]) ResetReuseNum() {
-	q.reuseNum = 0
+	q.reuseNum.Store(0)
 }

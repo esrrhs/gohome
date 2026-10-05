@@ -138,9 +138,9 @@ func NewFrameMgr(frame_max_size int, frame_max_id int, buffersize int, windowsiz
 		close: false, remoteclosed: false, closesend: false,
 		lastPingTime: time.Now().UnixNano(), lastPongTime: time.Now().UnixNano(),
 		lastSendHBTime: time.Now().UnixNano(), lastRecvHBTime: time.Now().UnixNano(), lastRecvDataTime: time.Now().UnixNano(),
-		rttns:        int64(resend_timems) * int64(time.Millisecond),
-		reqmap:       make(map[int32]int64),
-		connected:    false, openstat: openstat, lastPrintStat: time.Now().UnixNano(),
+		rttns:     int64(resend_timems) * int64(time.Millisecond),
+		reqmap:    make(map[int32]int64),
+		connected: false, openstat: openstat, lastPrintStat: time.Now().UnixNano(),
 		ctLastSendId: -1,
 	}
 

@@ -26,6 +26,18 @@
    - `UpdateProxyAddress(proxyURL string)` (updates upstream SOCKS5/HTTP proxy for DoH on the fly)
 5. **DNS Server**:
    - Standalone UDP/TCP DNS Server ([`Server`](server.go)) ready to listen on `:53` or custom ports.
+   - `Start()` returns only after both the UDP and TCP listeners are actually serving; a bind failure (e.g. listening on `:53` as non-root) returns an error instead of hanging. `Stop()` is idempotent and never blocks on lingering connections.
+
+---
+
+## Behavior Notes (easy to get wrong)
+
+- **`Timeout` applies to every query path**, including domains that hit the direct/proxy whitelist — those no longer fall back to each upstream's own default timeout.
+- **`FakeIPRange` is honored**: `IsFakeIP()` / `ShouldProxy()` follow the CIDR actually configured on the pool. With a custom `FakeIPRange` (e.g. `10.66.0.0/16`) do not use the package-level `fakeip.IsFakeIP()`, which only knows the default `198.18.0.0/15`.
+- **Hot reload only replaces your custom part**: `UpdateDirectIPs()` and `UpdateDirectDomains()` always keep the built-in defaults (reserved CIDRs, `.cn` TLDs, popular China domains) instead of wiping them.
+- **Cached TTL decays**: a cache hit returns the remaining lifetime, not the upstream's original TTL, so downstream clients never see a stale timestamp.
+- **`Resolve()` queries A records only** (IPv4). Use `ResolveAll()` when you also need AAAA; IPv4 results come first.
+- **Resource cleanup**: `Resolver.Close()` releases the GeoIP handle; `FakeIPPool.PurgeExpired()` reclaims expired mappings (also triggered automatically when the pool approaches capacity).
 
 ---
 

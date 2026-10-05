@@ -262,7 +262,6 @@ func Test0005UDP1(t *testing.T) {
 			fmt.Println(string(buf[0:n]))
 			time.Sleep(time.Millisecond * 100)
 		}
-		fmt.Println("write done")
 	}()
 
 	time.Sleep(time.Second)
