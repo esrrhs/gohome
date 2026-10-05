@@ -46,11 +46,15 @@ jobs:
     - name: Test
       run: go test -v ./...
 
-    # 竞态检测跑在快包上：network 全量带 -race 需要数分钟，交给上面的 Test 之外的
-    # 独立步骤不划算，这里覆盖并发原语密集的包即可。
+    # 竞态检测分两步：先跑并发原语密集的快包，快速拿到反馈；
+    # network / crypto 全量带 -race 需要十几分钟，单独一步便于定位。
     - name: Test with race detector
       run: |
-        go test -race -count=1 ./common/... ./list/... ./lru/... ./pool/... ./thread/... ./dns/... ./loggo/...
+        go test -race -count=1 ./common/... ./list/... ./lru/... ./pool/... ./thread/... ./dns/... ./loggo/... ./platform/... ./thirdparty/...
+
+    - name: Test with race detector (network & crypto)
+      run: |
+        go test -race -count=1 ./network/... ./crypto/...
 
     # Raw ICMP tests (IPv4 and IPv6 loopback) need CAP_NET_RAW; without it
     # they self-skip. Build a dedicated test binary and grant the capability
