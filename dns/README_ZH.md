@@ -26,6 +26,18 @@
    - `UpdateProxyAddress(proxyURL string)`：动态切换 DoH 上游所走代理。
 5. **独立服务端**：
    - 内置标准 UDP/TCP DNS 服务端（[`Server`](server.go)），支持直接在 `:53` 或自定义端口监听。
+   - `Start()` 会等待 UDP/TCP 两个监听器真正起来后才返回，绑定失败（如非 root 监听 `:53`）直接返回错误，**不会挂住**；`Stop()` 幂等且不会卡在存量连接上。
+
+---
+
+## 行为约定（容易踩坑的点）
+
+- **`Timeout` 对全部查询路径生效**：命中直连/代理白名单的域名同样受 `Config.Timeout` 约束，不会退化成上游自身的默认超时。
+- **`FakeIPRange` 会真正生效**：`IsFakeIP()` / `ShouldProxy()` 按地址池实际配置的网段判定。若自定义了 `FakeIPRange`（例如 `10.66.0.0/16`），不要用包级函数 `fakeip.IsFakeIP()`——它只认默认的 `198.18.0.0/15`。
+- **热更新只覆盖用户自定义部分**：`UpdateDirectIPs()` 与 `UpdateDirectDomains()` 始终保留内置默认值（保留网段 / `.cn` 等顶级域与国内骨干域名），不会把内置规则整段冲掉。
+- **缓存 TTL 会递减**：命中缓存时返回的记录 TTL 是剩余存活时间，而非上游原始 TTL，避免下游拿到过期时间戳。
+- **`Resolve()` 只查 A 记录**（IPv4）；需要同时拿到 A/AAAA 时用 `ResolveAll()`，结果里 IPv4 排在前面。
+- **资源释放**：`Resolver.Close()` 释放 GeoIP 等句柄；`FakeIPPool.PurgeExpired()` 用于清理过期映射（分配时也会在接近容量时自动清理）。
 
 ---
 

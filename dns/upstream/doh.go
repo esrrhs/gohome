@@ -16,6 +16,9 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+// maxDoHResponseSize 是接受的 DoH 响应体上限（DNS 报文最大 65535 字节）
+const maxDoHResponseSize = 65535
+
 // DoHUpstream 实现了基于 DNS-over-HTTPS (RFC 8484) 的加密 DNS 上游，支持 Socks5/HTTP 代理
 type DoHUpstream struct {
 	mu         sync.RWMutex
@@ -52,22 +55,38 @@ func (u *DoHUpstream) rebuildClient() error {
 			return fmt.Errorf("invalid proxy address: %w", err)
 		}
 
-		if proxyURL.Scheme == "socks5" || proxyURL.Scheme == "socks5h" {
+		switch proxyURL.Scheme {
+		case "socks5", "socks5h":
 			dialer, err := proxy.SOCKS5("tcp", proxyURL.Host, nil, proxy.Direct)
 			if err != nil {
 				return fmt.Errorf("create socks5 dialer failed: %w", err)
 			}
-			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialer.Dial(network, addr)
+			// 优先使用带 ctx 的拨号，让上游超时/取消能真正中断建连
+			if cd, ok := dialer.(proxy.ContextDialer); ok {
+				transport.DialContext = cd.DialContext
+			} else {
+				transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return dialer.Dial(network, addr)
+				}
 			}
-		} else if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
+		case "http", "https":
 			transport.Proxy = http.ProxyURL(proxyURL)
+		default:
+			return fmt.Errorf("unsupported proxy scheme: %s", proxyURL.Scheme)
 		}
 	}
 
+	old := u.httpClient
 	u.httpClient = &http.Client{
 		Transport: transport,
 		Timeout:   DefaultTimeout,
+	}
+
+	// 释放旧 transport 上的空闲连接，否则每次热更新都会留下一批僵尸连接
+	if old != nil && old.Transport != nil {
+		if t, ok := old.Transport.(*http.Transport); ok {
+			t.CloseIdleConnections()
+		}
 	}
 	return nil
 }
@@ -78,6 +97,19 @@ func (u *DoHUpstream) SetProxy(proxyAddr string) error {
 	defer u.mu.Unlock()
 	u.proxyAddr = proxyAddr
 	return u.rebuildClient()
+}
+
+// Close 释放 DoH 上游占用的空闲连接
+func (u *DoHUpstream) Close() {
+	u.mu.RLock()
+	client := u.httpClient
+	u.mu.RUnlock()
+
+	if client != nil && client.Transport != nil {
+		if t, ok := client.Transport.(*http.Transport); ok {
+			t.CloseIdleConnections()
+		}
+	}
 }
 
 func (u *DoHUpstream) Address() string {
@@ -112,14 +144,23 @@ func (u *DoHUpstream) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, err
 		return nil, fmt.Errorf("doh status not ok: %s", httpResp.Status)
 	}
 
-	body, err := io.ReadAll(httpResp.Body)
+	// DoH 响应大小有界，超长直接判定为异常，避免被恶意/异常上游拖进大内存分配
+	body, err := io.ReadAll(io.LimitReader(httpResp.Body, maxDoHResponseSize+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > maxDoHResponseSize {
+		return nil, fmt.Errorf("doh response too large: %d bytes", len(body))
 	}
 
 	resp := new(dns.Msg)
 	if err := resp.Unpack(body); err != nil {
 		return nil, err
+	}
+
+	// RFC 8484 要求服务端回显查询 ID；不一致说明响应与本次查询不对应，不能采信
+	if resp.Id != req.Id {
+		return nil, fmt.Errorf("doh response id mismatch: got %d, want %d", resp.Id, req.Id)
 	}
 	return resp, nil
 }

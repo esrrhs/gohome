@@ -392,8 +392,8 @@ func startUDPNetemProxy(backend string, loss float64, oneWayDelay time.Duration,
 }
 
 var (
-	loTCMu   sync.Mutex
-	tcBin    = "/usr/sbin/tc"
+	loTCMu sync.Mutex
+	tcBin  = "/usr/sbin/tc"
 )
 
 func tcpPortOf(addr string) (int, error) {
@@ -561,4 +561,3 @@ func TestReliableThroughputSmoke(t *testing.T) {
 		}
 	})
 }
-

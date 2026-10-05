@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -202,40 +205,54 @@ func (r *StandardResolver) initUpstreams() error {
 
 	var directs []upstream.Upstream
 	for _, addr := range r.cfg.DirectUpstreams {
-		if strings.HasPrefix(addr, "https://") || strings.HasPrefix(addr, "http://") {
-			u, err := upstream.NewDoHUpstream(addr, "")
-			if err == nil {
-				directs = append(directs, u)
-			}
-		} else {
-			u, err := upstream.NewSocketUpstream(addr)
-			if err == nil {
-				directs = append(directs, u)
-			}
+		u, err := newUpstream(addr, "")
+		if err != nil {
+			// 原先这里直接丢弃错误，配置写错时毫无提示
+			loggo.Warn("[DNS] skip invalid direct upstream %q: %v", addr, err)
+			continue
 		}
+		directs = append(directs, u)
 	}
 
 	var remotes []upstream.Upstream
 	for _, addr := range r.cfg.RemoteUpstreams {
-		if strings.HasPrefix(addr, "https://") || strings.HasPrefix(addr, "http://") {
-			u, err := upstream.NewDoHUpstream(addr, r.cfg.ProxyAddr)
-			if err == nil {
-				remotes = append(remotes, u)
-			}
-		} else {
-			u, err := upstream.NewSocketUpstream(addr)
-			if err == nil {
-				remotes = append(remotes, u)
-			}
+		u, err := newUpstream(addr, r.cfg.ProxyAddr)
+		if err != nil {
+			loggo.Warn("[DNS] skip invalid remote upstream %q: %v", addr, err)
+			continue
 		}
+		remotes = append(remotes, u)
 	}
 
 	if len(directs) == 0 {
 		return errors.New("no valid direct upstreams available")
 	}
+
+	// 释放被替换掉的旧上游持有的连接（例如 DoH 的空闲 HTTP 连接），
+	// 否则每次热更新代理地址都会留下一批僵尸连接。
+	closeUpstreams(r.directUpstreams)
+	closeUpstreams(r.remoteUpstreams)
+
 	r.directUpstreams = directs
 	r.remoteUpstreams = remotes
 	return nil
+}
+
+// newUpstream 按地址形式构造上游：http(s) 走 DoH，其余走 UDP/TCP
+func newUpstream(addr, proxyAddr string) (upstream.Upstream, error) {
+	if strings.HasPrefix(addr, "https://") || strings.HasPrefix(addr, "http://") {
+		return upstream.NewDoHUpstream(addr, proxyAddr)
+	}
+	return upstream.NewSocketUpstream(addr)
+}
+
+// closeUpstreams 关闭实现了 io.Closer 的上游，忽略不支持关闭的实现
+func closeUpstreams(list []upstream.Upstream) {
+	for _, u := range list {
+		if c, ok := u.(io.Closer); ok {
+			_ = c.Close()
+		}
+	}
 }
 
 // Resolve 解析域名返回 IP 列表
@@ -253,7 +270,7 @@ func (r *StandardResolver) Resolve(ctx context.Context, domain string) ([]net.IP
 		}
 	}
 
-	// 发起 A 与 AAAA 记录查询
+	// 发起 A 记录查询（仅 IPv4）
 	msg := upstream.BuildQuery(d, dns.TypeA)
 	resp, err := r.Exchange(ctx, msg)
 	if err != nil {
@@ -265,6 +282,52 @@ func (r *StandardResolver) Resolve(ctx context.Context, domain string) ([]net.IP
 		return nil, fmt.Errorf("no IP answer for %s", domain)
 	}
 	return ips, nil
+}
+
+// ResolveAll 同时查询 A 与 AAAA 记录并合并返回（IPv4 结果排在前面）。
+// Resolve 只查 A 记录以节省一次往返，需要 IPv6 时使用本方法。
+func (r *StandardResolver) ResolveAll(ctx context.Context, domain string) ([]net.IP, error) {
+	d := fakeip.NormalizeDomain(domain)
+	if ip := net.ParseIP(d); ip != nil {
+		return []net.IP{ip}, nil
+	}
+
+	aMsg := upstream.BuildQuery(d, dns.TypeA)
+	aResp, err := r.Exchange(ctx, aMsg)
+	if err != nil {
+		return nil, err
+	}
+
+	aaaaMsg := upstream.BuildQuery(d, dns.TypeAAAA)
+	aaaaResp, errAaaa := r.Exchange(ctx, aaaaMsg)
+
+	var ips []net.IP
+	ips = append(ips, upstream.ExtractIPs(aResp)...)
+	if errAaaa == nil && aaaaResp != nil {
+		ips = append(ips, upstream.ExtractIPs(aaaaResp)...)
+	}
+
+	// IPv4 优先，便于未做双栈适配的调用方直接取首个结果
+	sort.SliceStable(ips, func(i, j int) bool {
+		return ips[i].To4() != nil && ips[j].To4() == nil
+	})
+
+	if len(ips) == 0 {
+		if errAaaa != nil {
+			return nil, fmt.Errorf("no IP answer for %s (aaaa: %v)", domain, errAaaa)
+		}
+		return nil, fmt.Errorf("no IP answer for %s", domain)
+	}
+	return ips, nil
+}
+
+// isFakeIP 判断 IP 是否属于本 resolver 的 Fake-IP 网段。
+// 优先使用地址池实际配置的 CIDR，未启用 Fake-IP 时回退到默认网段判定。
+func (r *StandardResolver) isFakeIP(ip net.IP) bool {
+	if r.fakeIPPool != nil {
+		return r.fakeIPPool.IsFakeIP(ip)
+	}
+	return fakeip.IsFakeIP(ip)
 }
 
 // ResolveOne 解析返回单个最优 IP
@@ -289,6 +352,16 @@ func (r *StandardResolver) ResolveOne(ctx context.Context, domain string) (net.I
 func (r *StandardResolver) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 	if req == nil || len(req.Question) == 0 {
 		return nil, errors.New("empty dns question")
+	}
+
+	// 统一套用配置的超时。此前只有"并发竞速"分支会用到 cfg.Timeout，
+	// 命中直连/代理白名单时走的是上游自带的默认超时，cfg.Timeout 被静默忽略。
+	if r.cfg.Timeout > 0 {
+		if _, ok := ctx.Deadline(); !ok {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, r.cfg.Timeout)
+			defer cancel()
+		}
 	}
 
 	q := req.Question[0]
@@ -341,6 +414,7 @@ func (r *StandardResolver) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg
 	if cached, ok := r.cache.Get(cacheKey); ok {
 		resp := cached.Copy()
 		resp.Id = req.Id
+		resp.Question = req.Question
 		return resp, nil
 	}
 
@@ -355,9 +429,13 @@ func (r *StandardResolver) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg
 	if err != nil {
 		return nil, err
 	}
+	if result == nil {
+		return nil, fmt.Errorf("no dns response for %s (type %d)", qName, q.Qtype)
+	}
 
 	resp := result.Copy()
 	resp.Id = req.Id
+	resp.Question = req.Question
 	return resp, nil
 }
 
@@ -516,7 +594,7 @@ func (r *StandardResolver) ShouldProxy(target string) (bool, error) {
 	// 1. 若是 IP
 	if ip := net.ParseIP(target); ip != nil {
 		// 是 Fake-IP 必然走代理
-		if fakeip.IsFakeIP(ip) {
+		if r.isFakeIP(ip) {
 			return true, nil
 		}
 		// 是私有网段或直连 CIDR，直接直连
@@ -540,8 +618,15 @@ func (r *StandardResolver) ShouldProxy(target string) (bool, error) {
 		return true, nil
 	}
 
-	// 未直接命中规则，通过解析出的 IP 进行判断
-	ips, err := r.Resolve(context.Background(), d)
+	// 未直接命中规则，通过解析出的 IP 进行判断。
+	// 这里不能直接用 Background()，否则上游异常时调用方会无限期阻塞。
+	resolveCtx := context.Background()
+	if r.cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		resolveCtx, cancel = context.WithTimeout(resolveCtx, r.cfg.Timeout)
+		defer cancel()
+	}
+	ips, err := r.Resolve(resolveCtx, d)
 	if err != nil {
 		return true, err // 解析失败默认走代理尝试
 	}
@@ -567,19 +652,30 @@ func (r *StandardResolver) LookupDomainByFakeIPStr(ipStr string) (string, bool) 
 }
 
 func (r *StandardResolver) IsFakeIP(ip net.IP) bool {
-	return fakeip.IsFakeIP(ip)
+	return r.isFakeIP(ip)
 }
 
 // ---- 动态热更新接口实现 ----
 
+// UpdateDirectIPs 全量替换直连网段。与构造函数保持一致：
+// 内置的保留网段（DefaultReservedCIDRs）始终保留，传入的 cidrs 只覆盖用户自定义部分。
 func (r *StandardResolver) UpdateDirectIPs(cidrs []string) int {
-	return r.directIPs.Reset(cidrs)
+	all := make([]string, 0, len(DefaultReservedCIDRs)+len(cidrs))
+	all = append(all, DefaultReservedCIDRs...)
+	all = append(all, cidrs...)
+	return r.directIPs.Reset(all)
 }
 
+// UpdateDirectDomains 全量替换直连域名。与构造函数保持一致：
+// 内置默认直连域名（DefaultDirectTLDs 与 DefaultChinaMainDomains）始终保留，
+// 传入的 domains 只覆盖用户自定义部分。
 func (r *StandardResolver) UpdateDirectDomains(domains []string) {
 	r.directDomains.Reset(domains)
 	for _, tld := range DefaultDirectTLDs {
 		r.directDomains.Add(tld)
+	}
+	for _, d := range DefaultChinaMainDomains {
+		r.directDomains.Add(d)
 	}
 }
 
@@ -610,10 +706,28 @@ func (r *StandardResolver) ClearCache() {
 	r.cache.Clear()
 }
 
+// Close 释放 resolver 持有的资源（如 GeoIP 数据库句柄），关闭后不应继续使用。
+func (r *StandardResolver) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.geodb.Close()
+}
+
+// arpaToIPv4 把 in-addr.arpa 反向查询名还原成点分十进制 IPv4。
+// 容忍末尾多余的点；任一段不是合法的 0-255 十进制数时返回空串。
 func arpaToIPv4(arpa string) string {
-	parts := strings.Split(strings.TrimSuffix(arpa, ".in-addr.arpa"), ".")
+	name := strings.TrimSuffix(strings.TrimSuffix(arpa, "."), ".in-addr.arpa")
+	parts := strings.Split(name, ".")
 	if len(parts) != 4 {
 		return ""
 	}
-	return fmt.Sprintf("%s.%s.%s.%s", parts[3], parts[2], parts[1], parts[0])
+	octets := make([]byte, 4)
+	for i, p := range parts {
+		n, err := strconv.ParseUint(p, 10, 8)
+		if err != nil {
+			return ""
+		}
+		octets[3-i] = byte(n)
+	}
+	return net.IPv4(octets[0], octets[1], octets[2], octets[3]).String()
 }

@@ -22,10 +22,10 @@ type UdpConn struct {
 	listenersonny *udpConnListenerSonny
 	listener      *udpConnListener
 
-	dialMu sync.Mutex
-	cancel context.CancelFunc
+	dialMu  sync.Mutex
+	cancel  context.CancelFunc
 	dialGen uint64
-	cfgMu sync.RWMutex
+	cfgMu   sync.RWMutex
 }
 
 type udpConnDialer struct {

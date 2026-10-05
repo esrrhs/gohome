@@ -90,7 +90,6 @@ func v4_exec(code []V4_Instruction, r []uint32, i int) bool {
 		return false
 	default:
 		panic("UNREACHABLE_CODE")
-		break
 	}
 
 	return true

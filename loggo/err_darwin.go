@@ -1,4 +1,5 @@
 package loggo
+
 import (
 	"os"
 	"runtime"
@@ -6,6 +7,7 @@ import (
 )
 
 var stdErrFileHandler *os.File
+
 func rewriteStderrFile() {
 	stdErrFile := gConfig.Prefix + ".stderr"
 	file, err := os.OpenFile(stdErrFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)

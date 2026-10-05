@@ -2,9 +2,9 @@ package network
 
 import (
 	"fmt"
-	"sync/atomic"
 	"github.com/esrrhs/gohome/loggo"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )

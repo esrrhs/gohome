@@ -26,8 +26,31 @@ jobs:
         go mod tidy
         go build -v ./...
 
+    # crypto/cryptonight/inter 与 arith_ref.go 是从上游移植的算法实现，
+    # 保留其原始排版以便跟随上游同步，因此不纳入本仓库的 gofmt 约束。
+    - name: Gofmt
+      run: |
+        set -euo pipefail
+        files=$(git ls-files '*.go' | grep -v -e '^crypto/cryptonight/inter/' -e '^crypto/cryptonight/arith_ref.go' || true)
+        bad=$(gofmt -l ${files})
+        if [ -n "${bad}" ]; then
+          echo "The following files are not gofmt'ed:"
+          echo "${bad}"
+          gofmt -d ${bad}
+          exit 1
+        fi
+
+    - name: Vet
+      run: go vet ./...
+
     - name: Test
       run: go test -v ./...
+
+    # 竞态检测跑在快包上：network 全量带 -race 需要数分钟，交给上面的 Test 之外的
+    # 独立步骤不划算，这里覆盖并发原语密集的包即可。
+    - name: Test with race detector
+      run: |
+        go test -race -count=1 ./common/... ./list/... ./lru/... ./pool/... ./thread/... ./dns/... ./loggo/...
 
     # Raw ICMP tests (IPv4 and IPv6 loopback) need CAP_NET_RAW; without it
     # they self-skip. Build a dedicated test binary and grant the capability

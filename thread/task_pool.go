@@ -5,6 +5,7 @@ import (
 	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/loggo"
 	"runtime"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,9 +34,12 @@ type Task struct {
 type TaskPool struct {
 	tasks      chan Task
 	numWorkers int
-	idSeq      int
-	doneNum    int
-	sleepNum   int
+	// idSeq / doneNum / sleepNum 会被多个 worker 与调用方并发读写，
+	// 必须走原子操作：曾经用普通 int，-race 下能稳定报 DATA RACE，
+	// 且多 worker 的自增会丢计数。
+	idSeq    atomic.Int64
+	doneNum  atomic.Int64
+	sleepNum atomic.Int64
 }
 
 // Init 初始化任务池
@@ -84,12 +88,12 @@ func (tp *TaskPool) worker(id int) {
 			loggo.Debug("Worker %d executing task %d", id, task.id)
 			task.f() // 执行任务
 			task.done <- true
-			tp.doneNum++
+			tp.doneNum.Add(1)
 			loggo.Debug("Task %d done\n", task.id)
 		}
 
 		if len(tasks) == 0 {
-			tp.sleepNum++
+			tp.sleepNum.Add(1)
 			sleepTime = min(2*sleepTime, 1*time.Millisecond)
 			time.Sleep(sleepTime) // 如果没有任务，稍微休眠一下
 		}
@@ -98,9 +102,9 @@ func (tp *TaskPool) worker(id int) {
 
 // AddTask 添加任务到任务池，并等待任务完成
 func (tp *TaskPool) AddTask(f func()) error {
-	tp.idSeq++
+	id := tp.idSeq.Add(1)
 	task := Task{
-		id:   tp.idSeq,
+		id:   int(id),
 		f:    f,
 		done: make(chan bool),
 	}
@@ -119,17 +123,17 @@ func (tp *TaskPool) TaskNum() int {
 }
 
 func (tp *TaskPool) DoneNum() int {
-	return tp.doneNum
+	return int(tp.doneNum.Load())
 }
 
 func (tp *TaskPool) ResetDoneNum() {
-	tp.doneNum = 0
+	tp.doneNum.Store(0)
 }
 
 func (tp *TaskPool) SleepNum() int {
-	return tp.sleepNum
+	return int(tp.sleepNum.Load())
 }
 
 func (tp *TaskPool) ResetSleepNum() {
-	tp.sleepNum = 0
+	tp.sleepNum.Store(0)
 }

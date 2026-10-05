@@ -3,6 +3,7 @@ package thread
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -48,7 +49,6 @@ func Test0003(t *testing.T) {
 				fmt.Println("tick")
 			}
 		}
-		return nil
 	})
 	g.Go("", func() error {
 		time.Sleep(time.Second * 5)
@@ -69,7 +69,6 @@ func Test0004(t *testing.T) {
 				fmt.Println("tick father")
 			}
 		}
-		return nil
 	})
 	g.Go("", func() error {
 		time.Sleep(time.Second * 10)
@@ -84,7 +83,6 @@ func Test0004(t *testing.T) {
 				fmt.Println("tick")
 			}
 		}
-		return nil
 	})
 	gg.Go("", func() error {
 		time.Sleep(time.Second * 5)
@@ -108,7 +106,6 @@ func Test0005(t *testing.T) {
 				fmt.Println("tick 1")
 			}
 		}
-		return nil
 	})
 
 	g.Go("", func() error {
@@ -120,7 +117,6 @@ func Test0005(t *testing.T) {
 				fmt.Println("tick 2")
 			}
 		}
-		return nil
 	})
 
 	time.Sleep(time.Second * 5)
@@ -130,14 +126,15 @@ func Test0005(t *testing.T) {
 }
 
 func Test0006(t *testing.T) {
-	done := 0
+	// done 会被 exit 回调写、被两个 worker 读，必须用原子变量
+	var done atomic.Bool
 	g := NewGroup("", nil, func() {
-		done = 1
+		done.Store(true)
 		fmt.Println("stop")
 	})
 
 	g.Go("", func() error {
-		for done == 0 {
+		for !done.Load() {
 			fmt.Println("tick 1")
 			time.Sleep(time.Second)
 		}
@@ -145,7 +142,7 @@ func Test0006(t *testing.T) {
 	})
 
 	g.Go("", func() error {
-		for done == 0 {
+		for !done.Load() {
 			fmt.Println("tick 2")
 			time.Sleep(time.Second)
 		}
@@ -185,7 +182,6 @@ func Test0007(t *testing.T) {
 				fmt.Println("tick 3")
 			}
 		}
-		return nil
 	})
 
 	time.Sleep(time.Second * 5)
@@ -198,9 +194,10 @@ func Test008(t *testing.T) {
 		fmt.Println("stop")
 	})
 
-	exit := false
+	// exit 由另一个 goroutine 写、被 worker 读，必须用原子变量
+	var exit atomic.Bool
 	g.Go("test", func() error {
-		for !exit {
+		for !exit.Load() {
 			fmt.Println("tick")
 			time.Sleep(time.Second)
 		}
@@ -214,7 +211,7 @@ func Test008(t *testing.T) {
 
 	go func() {
 		time.Sleep(time.Second * 7)
-		exit = true
+		exit.Store(true)
 	}()
 
 	g.Wait()
@@ -234,7 +231,6 @@ func Test0009(t *testing.T) {
 				fmt.Println("tick father")
 			}
 		}
-		return nil
 	})
 	g.Go("", func() error {
 		time.Sleep(time.Second * 30)
@@ -249,7 +245,6 @@ func Test0009(t *testing.T) {
 				fmt.Println("tick1")
 			}
 		}
-		return nil
 	})
 	gg1.Go("", func() error {
 		time.Sleep(time.Second * 5)
@@ -264,7 +259,6 @@ func Test0009(t *testing.T) {
 				fmt.Println("tick2")
 			}
 		}
-		return nil
 	})
 	gg2.Go("", func() error {
 		time.Sleep(time.Second * 20)

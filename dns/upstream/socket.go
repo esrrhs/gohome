@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -20,17 +21,33 @@ type SocketUpstream struct {
 // NewSocketUpstream 创建一个 UDP/TCP 上游（例如 "223.5.5.5:53" 或 "tcp://223.5.5.5:53"）
 func NewSocketUpstream(addr string) (*SocketUpstream, error) {
 	network := "udp"
-	cleanAddr := addr
-	if strings.HasPrefix(addr, "tcp://") {
+	cleanAddr := strings.TrimSpace(addr)
+	if strings.HasPrefix(cleanAddr, "tcp://") {
 		network = "tcp"
-		cleanAddr = strings.TrimPrefix(addr, "tcp://")
-	} else if strings.HasPrefix(addr, "udp://") {
+		cleanAddr = strings.TrimPrefix(cleanAddr, "tcp://")
+	} else if strings.HasPrefix(cleanAddr, "udp://") {
 		network = "udp"
-		cleanAddr = strings.TrimPrefix(addr, "udp://")
+		cleanAddr = strings.TrimPrefix(cleanAddr, "udp://")
 	}
 
-	if !strings.Contains(cleanAddr, ":") {
+	if cleanAddr == "" {
+		return nil, errors.New("empty upstream address")
+	}
+
+	// 未显式带端口时补默认 53
+	if !hasPort(cleanAddr) {
 		cleanAddr = net.JoinHostPort(cleanAddr, "53")
+	}
+
+	host, port, err := net.SplitHostPort(cleanAddr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid upstream address %q: %w", addr, err)
+	}
+	if host == "" {
+		return nil, fmt.Errorf("invalid upstream address %q: empty host", addr)
+	}
+	if _, err := net.LookupPort(network, port); err != nil {
+		return nil, fmt.Errorf("invalid upstream address %q: bad port %q", addr, port)
 	}
 
 	return &SocketUpstream{
@@ -41,6 +58,16 @@ func NewSocketUpstream(addr string) (*SocketUpstream, error) {
 			Timeout: DefaultTimeout,
 		},
 	}, nil
+}
+
+// hasPort 判断地址是否已经带了端口。
+// IPv6 字面量必须写成 "[2001:db8::1]:53"，裸的 "2001:db8::1" 会被判为非法地址。
+func hasPort(addr string) bool {
+	if strings.HasPrefix(addr, "[") {
+		i := strings.LastIndex(addr, "]")
+		return i >= 0 && i+1 < len(addr) && addr[i+1] == ':'
+	}
+	return strings.Contains(addr, ":")
 }
 
 func (s *SocketUpstream) Address() string {
