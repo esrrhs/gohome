@@ -57,9 +57,14 @@ jobs:
       run: |
         go test -race -count=1 ./common/... ./list/... ./lru/... ./pool/... ./thread/... ./dns/... ./loggo/... ./platform/... ./thirdparty/...
 
+    # cryptonight/inter 是 Go 作者上游移植的算法实现，其 sha3 测试专门做
+    # unsafe 非对齐指针访问，Go 1.26 的 -race 内置 checkptr 会直接 fatal；
+    # 与 Gofmt/Vet 步骤一致，上游同步目录不纳入本仓库门禁，这些包仍由普通
+    # Test 步骤与 Big Endian 工作流覆盖。
     - name: Test with race detector (network & crypto)
       run: |
-        go test -race -count=1 ./network/... ./crypto/...
+        set -euo pipefail
+        go test -race -count=1 ./network/... $(go list ./crypto/... | grep -v '/crypto/cryptonight/inter/')
 
     # Raw ICMP tests (IPv4 and IPv6 loopback) need CAP_NET_RAW; without it
     # they self-skip. Build a dedicated test binary and grant the capability
