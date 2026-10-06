@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -32,6 +33,15 @@ type Config struct {
 
 var gConfig Config
 var gInited bool
+
+// logFiles 缓存当天各级别日志文件的句柄，避免每条日志都 open/close。
+// logFileMu 同时保护句柄表和实际写入，保证并发日志行不交错。
+var (
+	logFileMu     sync.Mutex
+	logFiles      = make(map[int]*os.File)
+	logFileDate   string
+	logFilePrefix string
+)
 
 func init() {
 	gConfig.Prefix = "default"
@@ -86,9 +96,35 @@ func enabled(level int) bool {
 }
 
 func writeFile(level int, str string) {
-	file := openLog(level)
-	file.WriteString(str)
-	file.Close()
+	logFileMu.Lock()
+	defer logFileMu.Unlock()
+	f := getLogFileLocked(level)
+	f.WriteString(str)
+}
+
+// getLogFileLocked 返回当天指定级别的日志文件句柄（按天缓存复用）；
+// 跨天首次写入时关闭前一天的全部句柄并重新打开。调用方必须持有 logFileMu。
+func getLogFileLocked(level int) *os.File {
+	date := time.Now().Format("2006-01-02")
+	if date != logFileDate || gConfig.Prefix != logFilePrefix {
+		for l, f := range logFiles {
+			f.Close()
+			delete(logFiles, l)
+		}
+		logFileDate = date
+		logFilePrefix = gConfig.Prefix
+	}
+	f := logFiles[level]
+	if f == nil {
+		fileName := gConfig.Prefix + "_" + levelName(level) + "_" + date + ".log"
+		var e error
+		f, e = os.OpenFile(fileName, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+		if e != nil {
+			panic(e)
+		}
+		logFiles[level] = f
+	}
+	return f
 }
 
 func Debug(format string, a ...interface{}) {
@@ -243,16 +279,6 @@ func NameToLevel(name string) int {
 		return LEVEL_ERROR
 	}
 	return -1
-}
-
-func openLog(level int) *os.File {
-	date := time.Now().Format("2006-01-02")
-	fileName := gConfig.Prefix + "_" + levelName(level) + "_" + date + ".log"
-	f, e := os.OpenFile(fileName, os.O_WRONLY|os.O_APPEND|os.O_CREATE, os.ModePerm)
-	if e != nil {
-		panic(e)
-	}
-	return f
 }
 
 func checkDate(config Config) {

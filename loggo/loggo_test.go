@@ -3,7 +3,9 @@ package loggo
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -225,6 +227,75 @@ func TestNoOutputShortCircuit(t *testing.T) {
 	Info("visible %d", 7)
 	if !strings.Contains(buf.String(), "visible 7") {
 		t.Fatalf("expected visible log after re-enabling print, got %q", buf.String())
+	}
+}
+
+// TestWriteFileReusesHandle 验证同一天的日志复用同一文件句柄（不再每条 open/close）、
+// 并发写入不丢行、文件权限不带可执行位。
+func TestWriteFileReusesHandle(t *testing.T) {
+	origPrefix := gConfig.Prefix
+	const prefix = "testhandle"
+	gConfig.Prefix = prefix
+	fileName := prefix + "_WARN_" + time.Now().Format("2006-01-02") + ".log"
+
+	defer func() {
+		logFileMu.Lock()
+		if f := logFiles[LEVEL_WARN]; f != nil {
+			f.Close()
+			delete(logFiles, LEVEL_WARN)
+		}
+		// 置空前缀，让后续使用原 prefix 的写入重新打开各自句柄。
+		logFilePrefix = ""
+		logFileMu.Unlock()
+		gConfig.Prefix = origPrefix
+		os.Remove(fileName)
+	}()
+
+	writeFile(LEVEL_WARN, "first line\n")
+	logFileMu.Lock()
+	f1 := logFiles[LEVEL_WARN]
+	logFileMu.Unlock()
+	if f1 == nil {
+		t.Fatal("expected cached log handle after first writeFile")
+	}
+
+	writeFile(LEVEL_WARN, "second line\n")
+	logFileMu.Lock()
+	f2 := logFiles[LEVEL_WARN]
+	logFileMu.Unlock()
+	if f1 != f2 {
+		t.Fatal("writeFile reopened the log file instead of reusing the cached handle")
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			writeFile(LEVEL_WARN, fmt.Sprintf("concurrent %d\n", i))
+		}(i)
+	}
+	wg.Wait()
+
+	data, err := os.ReadFile(fileName)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "first line\n") ||
+		!strings.Contains(content, "second line\n") {
+		t.Fatalf("log file missing sequential writes: %q", content)
+	}
+	for i := 0; i < 20; i++ {
+		if !strings.Contains(content, fmt.Sprintf("concurrent %d\n", i)) {
+			t.Fatalf("log file missing concurrent write %d: %q", i, content)
+		}
+	}
+
+	if fi, err := os.Stat(fileName); err != nil {
+		t.Fatalf("stat log file: %v", err)
+	} else if perm := fi.Mode().Perm(); perm&0o111 != 0 {
+		t.Errorf("log file perm = %o, must not have executable bits", perm)
 	}
 }
 
