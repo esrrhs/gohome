@@ -2,6 +2,8 @@ package thread
 
 import (
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -61,4 +63,72 @@ func Test3(t *testing.T) {
 	fmt.Println("4 Stop", ret)
 	tp.Stop()
 	fmt.Println("Stop")
+}
+
+// TestConcurrentStat 并发 AddJob/GetStat 下统计不能丢计数，-race 下不能报竞争。
+func TestConcurrentStat(t *testing.T) {
+	var processed atomic.Int32
+	tp := NewThreadPool(8, 64, func(i interface{}) {
+		processed.Add(1)
+	})
+
+	const writers = 8
+	const perWriter = 500
+	const total = writers * perWriter
+
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(seed int) {
+			defer wg.Done()
+			for i := 0; i < perWriter; i++ {
+				tp.AddJob(seed*perWriter+i, i)
+			}
+		}(w)
+	}
+
+	stop := make(chan struct{})
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				tp.GetStat()
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}()
+
+	wg.Wait()
+	for processed.Load() < total {
+		time.Sleep(time.Millisecond)
+	}
+	close(stop)
+	<-readerDone
+	tp.Stop()
+
+	stat := tp.GetStat()
+	totalPush := 0
+	totalProc := 0
+	for i := range stat.Pushnum {
+		totalPush += stat.Pushnum[i]
+		totalProc += stat.Processnum[i]
+	}
+	if totalPush != total {
+		t.Errorf("Pushnum total = %d, want %d", totalPush, total)
+	}
+	if totalProc != total {
+		t.Errorf("Processnum total = %d, want %d", totalProc, total)
+	}
+
+	tp.ResetStat()
+	stat = tp.GetStat()
+	for i := range stat.Pushnum {
+		if stat.Pushnum[i] != 0 || stat.Processnum[i] != 0 {
+			t.Fatalf("ResetStat did not clear counters at %d: %+v", i, stat)
+		}
+	}
 }

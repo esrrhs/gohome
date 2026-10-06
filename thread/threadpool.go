@@ -29,7 +29,11 @@ type ThreadPool struct {
 	exef           func(interface{})
 	ca             []chan interface{}
 	control        chan int
-	stat           ThreadPoolStat
+	// pushNum/processNum 会被多个 AddJob 调用方与 worker 并发更新，
+	// GetStat/ResetStat 也会并发读取，必须走原子操作，
+	// 否则 -race 下报 DATA RACE 且自增丢计数。
+	pushNum    []atomic.Int64
+	processNum []atomic.Int64
 }
 
 type ThreadPoolStat struct {
@@ -41,16 +45,18 @@ type ThreadPoolStat struct {
 func NewThreadPool(max int, buffer int, exef func(interface{})) *ThreadPool {
 	ca := make([]chan interface{}, max)
 	control := make(chan int, max)
-	for index, _ := range ca {
+	for index := range ca {
 		ca[index] = make(chan interface{}, buffer)
 	}
 
-	stat := ThreadPoolStat{}
-	stat.Datalen = make([]int, max)
-	stat.Pushnum = make([]int, max)
-	stat.Processnum = make([]int, max)
-
-	tp := &ThreadPool{max: max, exef: exef, ca: ca, control: control, stat: stat}
+	tp := &ThreadPool{
+		max:        max,
+		exef:       exef,
+		ca:         ca,
+		control:    control,
+		pushNum:    make([]atomic.Int64, max),
+		processNum: make([]atomic.Int64, max),
+	}
 
 	for index := range ca {
 		go tp.run(index)
@@ -64,14 +70,16 @@ func NewThreadPool(max int, buffer int, exef func(interface{})) *ThreadPool {
 }
 
 func (tp *ThreadPool) AddJob(hash int, v interface{}) {
-	tp.ca[common.AbsInt(hash)%len(tp.ca)] <- v
-	tp.stat.Pushnum[common.AbsInt(hash)%len(tp.ca)]++
+	index := common.AbsInt(hash) % len(tp.ca)
+	tp.ca[index] <- v
+	tp.pushNum[index].Add(1)
 }
 
 func (tp *ThreadPool) AddJobTimeout(hash int, v interface{}, timeoutms int) bool {
+	index := common.AbsInt(hash) % len(tp.ca)
 	select {
-	case tp.ca[common.AbsInt(hash)%len(tp.ca)] <- v:
-		tp.stat.Pushnum[common.AbsInt(hash)%len(tp.ca)]++
+	case tp.ca[index] <- v:
+		tp.pushNum[index].Add(1)
 		return true
 	case <-time.After(time.Duration(timeoutms) * time.Millisecond):
 		return false
@@ -99,21 +107,29 @@ func (tp *ThreadPool) run(index int) {
 			return
 		case v := <-tp.ca[index]:
 			tp.exef(v)
-			tp.stat.Processnum[index]++
+			tp.processNum[index].Add(1)
 		}
 	}
 }
 
+// GetStat 返回此刻统计值的快照，不复用池内部的计数存储。
 func (tp *ThreadPool) GetStat() ThreadPoolStat {
-	for index := range tp.ca {
-		tp.stat.Datalen[index] = len(tp.ca[index])
+	stat := ThreadPoolStat{
+		Datalen:    make([]int, len(tp.ca)),
+		Pushnum:    make([]int, len(tp.ca)),
+		Processnum: make([]int, len(tp.ca)),
 	}
-	return tp.stat
+	for index := range tp.ca {
+		stat.Datalen[index] = len(tp.ca[index])
+		stat.Pushnum[index] = int(tp.pushNum[index].Load())
+		stat.Processnum[index] = int(tp.processNum[index].Load())
+	}
+	return stat
 }
 
 func (tp *ThreadPool) ResetStat() {
 	for index := range tp.ca {
-		tp.stat.Pushnum[index] = 0
-		tp.stat.Processnum[index] = 0
+		tp.pushNum[index].Store(0)
+		tp.processNum[index].Store(0)
 	}
 }
