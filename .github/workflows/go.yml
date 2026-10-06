@@ -40,8 +40,13 @@ jobs:
           exit 1
         fi
 
+    # crypto/cryptonight/inter 是从上游移植的算法实现（含 amd64 汇编），
+    # Go 1.26 的 asmdecl 检查会对其汇编命名报错；与 Gofmt 步骤一致，
+    # 这些跟随上游同步的目录不纳入本仓库的 vet 门禁。
     - name: Vet
-      run: go vet ./...
+      run: |
+        set -euo pipefail
+        go vet $(go list ./... | grep -v '/crypto/cryptonight/inter/')
 
     - name: Test
       run: go test -v ./...
