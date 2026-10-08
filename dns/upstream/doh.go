@@ -99,8 +99,9 @@ func (u *DoHUpstream) SetProxy(proxyAddr string) error {
 	return u.rebuildClient()
 }
 
-// Close 释放 DoH 上游占用的空闲连接
-func (u *DoHUpstream) Close() {
+// Close 释放 DoH 上游占用的空闲连接。
+// 返回 error 是为了满足 io.Closer，使 resolver 重建上游时能通过类型断言关闭本类型。
+func (u *DoHUpstream) Close() error {
 	u.mu.RLock()
 	client := u.httpClient
 	u.mu.RUnlock()
@@ -110,6 +111,7 @@ func (u *DoHUpstream) Close() {
 			t.CloseIdleConnections()
 		}
 	}
+	return nil
 }
 
 func (u *DoHUpstream) Address() string {
