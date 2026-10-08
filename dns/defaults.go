@@ -15,6 +15,7 @@ var DefaultChinaMainDomains = []string{
 	"taobao.com", "alipay.com", "alibaba.com", "aliyun.com", "alicdn.com", "tmall.com",
 	"jd.com", "360buy.com", "360buyimg.com", "jcloud.com",
 	"bilibili.com", "bilivideo.com", "hdslb.com",
+	"iqiyi.com", "youku.com",
 	"bytedance.com", "douyin.com", "douyinvod.com", "tiktokcdn.com", "toutiao.com",
 	"163.com", "126.net", "netease.com",
 	"sina.com.cn", "weibo.com", "weibocdn.com",
@@ -23,6 +24,7 @@ var DefaultChinaMainDomains = []string{
 	"kuaishou.com", "yximgs.com",
 	"xiaomi.com", "mi.com", "miui.com",
 	"huawei.com", "vmall.com", "hicloud.com",
+	"ipip.net", "3322.net",
 	"apple.com.cn", "apple.com", // apple 国内 CDN 优化直连可根据需要配置
 }
 
@@ -39,7 +41,8 @@ var DefaultRemoteDoH = []string{
 	"https://8.8.8.8/dns-query",
 }
 
-// DefaultReservedCIDRs RFC 标准局域网与回环私有地址
+// DefaultReservedCIDRs RFC 标准局域网、回环、链路本地、CGNAT 与组播/保留地址。
+// 这些网段均非公网单播目的地，分流时一律直连（经 SPP 也无法到达）。
 var DefaultReservedCIDRs = []string{
 	"10.0.0.0/8",
 	"172.16.0.0/12",
@@ -47,7 +50,11 @@ var DefaultReservedCIDRs = []string{
 	"127.0.0.0/8",
 	"169.254.0.0/16",
 	"100.64.0.0/10", // CGNAT
-	"::1/128",
-	"fc00::/7",
-	"fe80::/10",
+	"224.0.0.0/4",   // 组播
+	"240.0.0.0/4",   // 保留（含 255.255.255.255 广播）
+	"::/128",        // 未指定地址
+	"::1/128",       // 回环
+	"fc00::/7",      // 唯一本地地址
+	"fe80::/10",     // 链路本地
+	"ff00::/8",      // IPv6 组播
 }
