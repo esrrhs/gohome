@@ -322,13 +322,13 @@ func checkDate(config Config) {
 
 		t, e := time.Parse("2006-01-02", date)
 		if e != nil {
-			Error("loggo delete Parse file fail %v %v %v", f.Name(), date, err)
+			Error("loggo delete Parse file fail %v %v %v", f.Name(), date, e)
 			continue
 		}
 		tunix := t.Unix()
 		if nowunix-tunix > int64(config.MaxDay)*24*3600 {
 			err := os.Remove(f.Name())
-			if e != nil {
+			if err != nil {
 				Error("loggo delete log file fail %v %v", f.Name(), err)
 				continue
 			}
