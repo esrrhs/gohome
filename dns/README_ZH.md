@@ -37,6 +37,7 @@
 - **热更新只覆盖用户自定义部分**：`UpdateDirectIPs()` 与 `UpdateDirectDomains()` 始终保留内置默认值（保留网段 / `.cn` 等顶级域与国内骨干域名），不会把内置规则整段冲掉。
 - **缓存 TTL 会递减**：命中缓存时返回的记录 TTL 是剩余存活时间，而非上游原始 TTL，避免下游拿到过期时间戳。
 - **`Resolve()` 只查 A 记录**（IPv4）；需要同时拿到 A/AAAA 时用 `ResolveAll()`，结果里 IPv4 排在前面。
+- **分流走向会被记录**：每次实际发生分流（命中直连/代理规则、竞速采纳、Fake-IP 分配）都会按域名去重落盘，`RoutedDomains()` 可取最近判定在前的快照，`RoutedDomain(name)` 单查，`ClearRouteRecords()` 清空。`Reason` 取值固定为 `direct_domain` / `proxy_domain` / `parallel_direct` / `parallel_remote` / `fakeip`；解析失败不形成记录，缓存命中不重复记录。容量由 `Config.RouteRecordCapacity` 控制（默认 1000，LRU 淘汰；设为负数关闭）。
 - **资源释放**：`Resolver.Close()` 释放 GeoIP 等句柄；`FakeIPPool.PurgeExpired()` 用于清理过期映射（分配时也会在接近容量时自动清理）。
 
 ---

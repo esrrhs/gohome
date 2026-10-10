@@ -70,6 +70,11 @@ func (s *stubResolver) LoadProxyDomainFile(p string) (int, error) { return 0, ni
 func (s *stubResolver) ReloadGeoIPDatabase(p string) error        { return nil }
 func (s *stubResolver) UpdateProxyAddress(a string) error         { return nil }
 func (s *stubResolver) ClearCache()                               {}
+func (s *stubResolver) RoutedDomains() []DomainRoute              { return nil }
+func (s *stubResolver) RoutedDomain(domain string) (DomainRoute, bool) {
+	return DomainRoute{}, false
+}
+func (s *stubResolver) ClearRouteRecords() {}
 
 // freePort 取一个当前空闲的回环端口
 func freePort(t *testing.T) int {

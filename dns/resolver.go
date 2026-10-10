@@ -54,18 +54,23 @@ type Config struct {
 	Timeout time.Duration
 	// 缓存容量，默认 2000
 	CacheCapacity int
+
+	// 分流记录容量：按域名去重记录每次 DNS 分流的最终走向
+	// （直连/代理及判定依据），LRU 淘汰，默认 1000；设为负数关闭记录。
+	RouteRecordCapacity int
 }
 
 // DefaultConfig 提供零配置、开箱即用的默认参数
 func DefaultConfig() Config {
 	return Config{
-		DirectUpstreams: DefaultDomesticDNS,
-		RemoteUpstreams: DefaultRemoteDoH,
-		EnableFakeIP:    false, // 默认关闭 Fake-IP，业务按需开启
-		FakeIPRange:     "198.18.0.0/15",
-		FakeIPTTL:       2 * time.Hour,
-		Timeout:         3 * time.Second,
-		CacheCapacity:   2000,
+		DirectUpstreams:     DefaultDomesticDNS,
+		RemoteUpstreams:     DefaultRemoteDoH,
+		EnableFakeIP:        false, // 默认关闭 Fake-IP，业务按需开启
+		FakeIPRange:         "198.18.0.0/15",
+		FakeIPTTL:           2 * time.Hour,
+		Timeout:             3 * time.Second,
+		CacheCapacity:       2000,
+		RouteRecordCapacity: DefaultRouteRecordCapacity,
 	}
 }
 
@@ -102,6 +107,15 @@ type Resolver interface {
 	UpdateProxyAddress(proxyAddr string) error
 	// 清空 DNS 缓存
 	ClearCache()
+
+	// ---- 分流记录（记录实际发生过分流的域名及最终走向）----
+	// RoutedDomains 返回全部分流记录快照，按最近判定时间倒序；
+	// 未开启记录（RouteRecordCapacity < 0）时返回 nil。
+	RoutedDomains() []DomainRoute
+	// RoutedDomain 查询单个域名最近一次分流结论。
+	RoutedDomain(domain string) (DomainRoute, bool)
+	// ClearRouteRecords 清空已记录的分流域名。
+	ClearRouteRecords()
 }
 
 // StandardResolver 实现了 Resolver 接口
@@ -119,6 +133,10 @@ type StandardResolver struct {
 
 	fakeIPPool *fakeip.FakeIPPool
 	cache      *cache.DNSCache
+
+	// routes 为 nil 表示关闭分流记录（RouteRecordCapacity < 0），
+	// recordRoute 对 nil 是空操作。
+	routes *routeRecorder
 }
 
 // NewResolver 创建并初始化一个 Resolver 实例
@@ -136,6 +154,9 @@ func NewResolver(cfg Config) (*StandardResolver, error) {
 	if cfg.CacheCapacity <= 0 {
 		cfg.CacheCapacity = 2000
 	}
+	if cfg.RouteRecordCapacity == 0 {
+		cfg.RouteRecordCapacity = DefaultRouteRecordCapacity
+	}
 	if cfg.RegionCode == "" {
 		cfg.RegionCode = "CN"
 	}
@@ -147,6 +168,7 @@ func NewResolver(cfg Config) (*StandardResolver, error) {
 		directIPs:     matcher.NewIPNetList(),
 		geodb:         matcher.NewGeoDB(),
 		cache:         cache.NewDNSCache(cfg.CacheCapacity),
+		routes:        newRouteRecorder(cfg.RouteRecordCapacity),
 	}
 
 	// 1. 初始化 Fake-IP 池
@@ -272,6 +294,7 @@ func (r *StandardResolver) Resolve(ctx context.Context, domain string) ([]net.IP
 	if r.cfg.EnableFakeIP && r.fakeIPPool != nil {
 		if !r.directDomains.Has(d) {
 			fakeIP := r.fakeIPPool.Allocate(d)
+			r.recordRoute(d, true, RouteReasonFakeIP)
 			return []net.IP{fakeIP}, nil
 		}
 	}
@@ -377,6 +400,7 @@ func (r *StandardResolver) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg
 	if r.cfg.EnableFakeIP && r.fakeIPPool != nil && q.Qtype == dns.TypeA {
 		if !r.directDomains.Has(qName) {
 			fakeIP := r.fakeIPPool.Allocate(qName)
+			r.recordRoute(qName, true, RouteReasonFakeIP)
 			resp := new(dns.Msg)
 			resp.SetReply(req)
 			rr := &dns.A{
@@ -448,12 +472,21 @@ func (r *StandardResolver) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg
 func (r *StandardResolver) exchangeInternal(ctx context.Context, req *dns.Msg, qName string) (*dns.Msg, error) {
 	// A. 显式命中白名单直连域名 -> 仅走国内上游
 	if r.directDomains.Has(qName) {
-		return r.queryDirect(ctx, req)
+		resp, err := r.queryDirect(ctx, req)
+		// 只在拿到确定结果时落盘分流结论；上游全失败不形成走向。
+		if err == nil && resp != nil {
+			r.recordRoute(qName, false, RouteReasonDirectDomain)
+		}
+		return resp, err
 	}
 
 	// B. 显式命中黑名单代理域名 -> 仅走海外加密上游
 	if r.proxyDomains.Has(qName) && len(r.remoteUpstreams) > 0 {
-		return r.queryRemote(ctx, req)
+		resp, err := r.queryRemote(ctx, req)
+		if err == nil && resp != nil {
+			r.recordRoute(qName, true, RouteReasonProxyDomain)
+		}
+		return resp, err
 	}
 
 	// C. 未命中域名：并发竞速（Dual-Stack Parallel Query）
@@ -500,12 +533,19 @@ func (r *StandardResolver) queryRemote(ctx context.Context, req *dns.Msg) (*dns.
 
 // queryParallel 并发查询国内与海外上游
 func (r *StandardResolver) queryParallel(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
+	qName := fakeip.NormalizeDomain(req.Question[0].Name)
+
 	r.mu.RLock()
 	hasRemote := len(r.remoteUpstreams) > 0
 	r.mu.RUnlock()
 
 	if !hasRemote {
-		return r.queryDirect(ctx, req)
+		// 未配置远程上游时竞速退化为纯直连，仍是确定的分流走向。
+		resp, err := r.queryDirect(ctx, req)
+		if err == nil && resp != nil {
+			r.recordRoute(qName, false, RouteReasonParallelDirect)
+		}
+		return resp, err
 	}
 
 	type queryResult struct {
@@ -543,8 +583,13 @@ func (r *StandardResolver) queryParallel(ctx context.Context, req *dns.Msg) (*dn
 
 			if !res.isDirect {
 				remoteResp = res.resp
-				// 如果国内已经失败且海外成功，直接采纳海外
+				// 如果国内已经失败且海外成功，直接采纳海外。
+				// 仅在远程确实带回答案时记录走向：SERVFAIL/空应答最终
+				// 会在 Exchange 层报错，不构成一次有效分流。
 				if received == 2 {
+					if len(remoteResp.Answer) > 0 {
+						r.recordRoute(qName, true, RouteReasonParallelRemote)
+					}
 					return remoteResp, nil
 				}
 			} else {
@@ -553,6 +598,7 @@ func (r *StandardResolver) queryParallel(ctx context.Context, req *dns.Msg) (*dn
 				if len(ips) > 0 {
 					// 检查 IP 是否全都在中国境内或私有网段
 					if r.isAllDomestic(ips) {
+						r.recordRoute(qName, false, RouteReasonParallelDirect)
 						return res.resp, nil
 					}
 					// 命中境外 IP 或疑似污染，放弃国内结果，等待/使用海外结果
@@ -561,6 +607,9 @@ func (r *StandardResolver) queryParallel(ctx context.Context, req *dns.Msg) (*dn
 			}
 		case <-queryCtx.Done():
 			if remoteResp != nil {
+				if len(remoteResp.Answer) > 0 {
+					r.recordRoute(qName, true, RouteReasonParallelRemote)
+				}
 				return remoteResp, nil
 			}
 			return nil, queryCtx.Err()
@@ -568,6 +617,9 @@ func (r *StandardResolver) queryParallel(ctx context.Context, req *dns.Msg) (*dn
 	}
 
 	if remoteResp != nil {
+		if len(remoteResp.Answer) > 0 {
+			r.recordRoute(qName, true, RouteReasonParallelRemote)
+		}
 		return remoteResp, nil
 	}
 	return nil, errors.New("parallel dns query failed")
@@ -710,6 +762,27 @@ func (r *StandardResolver) UpdateProxyAddress(proxyAddr string) error {
 
 func (r *StandardResolver) ClearCache() {
 	r.cache.Clear()
+}
+
+// recordRoute 是所有分流路径落盘记录的唯一入口；
+// routes 为 nil（关闭记录）时是空操作。
+func (r *StandardResolver) recordRoute(domain string, proxy bool, reason RouteReason) {
+	r.routes.record(domain, proxy, reason)
+}
+
+// RoutedDomains 返回分流记录快照（最近判定的域名在前）。
+func (r *StandardResolver) RoutedDomains() []DomainRoute {
+	return r.routes.snapshot()
+}
+
+// RoutedDomain 查询单个域名最近一次分流结论。
+func (r *StandardResolver) RoutedDomain(domain string) (DomainRoute, bool) {
+	return r.routes.get(fakeip.NormalizeDomain(domain))
+}
+
+// ClearRouteRecords 清空分流记录。
+func (r *StandardResolver) ClearRouteRecords() {
+	r.routes.clear()
 }
 
 // Close 释放 resolver 持有的资源（如 GeoIP 数据库句柄），关闭后不应继续使用。

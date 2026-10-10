@@ -654,3 +654,214 @@ func TestResolver_QueryParallel_TimeoutReturnsRemote(t *testing.T) {
 		t.Fatalf("unexpected ips: %v", ips)
 	}
 }
+
+// ---- 分流记录 ----
+
+func mustRoutedDomain(t *testing.T, r *StandardResolver, domain string) DomainRoute {
+	t.Helper()
+	rt, ok := r.RoutedDomain(domain)
+	if !ok {
+		t.Fatalf("domain %q missing from route records: %v", domain, r.RoutedDomains())
+	}
+	return rt
+}
+
+// 命中显式直连/代理域名规则时，记录对应走向与规则依据。
+func TestResolver_RouteRecord_DirectAndProxyRules(t *testing.T) {
+	directAddr, _, stopDirect := startUDPHandlerStub(t, replyA("10.0.0.90"))
+	defer stopDirect()
+	remoteAddr, _, stopRemote := startUDPHandlerStub(t, replyA("198.51.100.90"))
+	defer stopRemote()
+
+	r := newStubResolver(t, []string{directAddr}, []string{remoteAddr}, func(c *Config) {
+		c.DirectDomains = []string{"rule-direct.test"}
+		c.ProxyDomains = []string{"rule-proxy.test"}
+	})
+
+	if _, err := r.Resolve(context.Background(), "rule-direct.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Resolve(context.Background(), "rule-proxy.test"); err != nil {
+		t.Fatal(err)
+	}
+
+	d := mustRoutedDomain(t, r, "rule-direct.test")
+	if d.Proxy || d.Reason != RouteReasonDirectDomain {
+		t.Fatalf("direct rule verdict mismatch: %+v", d)
+	}
+	p := mustRoutedDomain(t, r, "rule-proxy.test")
+	if !p.Proxy || p.Reason != RouteReasonProxyDomain {
+		t.Fatalf("proxy rule verdict mismatch: %+v", p)
+	}
+
+	all := r.RoutedDomains()
+	if len(all) != 2 {
+		t.Fatalf("expected 2 records, got %d: %v", len(all), all)
+	}
+	// 最近判定（rule-proxy）排第一
+	if all[0].Domain != "rule-proxy.test" {
+		t.Fatalf("records must be ordered by last decision desc, got %v", all)
+	}
+}
+
+// 竞速采纳境内直连结果 -> parallel_direct；直连失败远程兜底 -> parallel_remote。
+func TestResolver_RouteRecord_Parallel(t *testing.T) {
+	directAddr, _, stopDirect := startUDPHandlerStub(t, replyA("10.0.0.91"))
+	defer stopDirect()
+	remoteAddr, _, stopRemote := startUDPHandlerStub(t, replyA("198.51.100.91"))
+	defer stopRemote()
+	r := newStubResolver(t, []string{directAddr}, []string{remoteAddr})
+
+	if _, err := r.Resolve(context.Background(), "parallel-direct.test"); err != nil {
+		t.Fatal(err)
+	}
+	d := mustRoutedDomain(t, r, "parallel-direct.test")
+	if d.Proxy || d.Reason != RouteReasonParallelDirect {
+		t.Fatalf("parallel direct verdict mismatch: %+v", d)
+	}
+
+	failDirect, _, stopFailDirect := startUDPHandlerStub(t, servFailHandler)
+	defer stopFailDirect()
+	okRemote, _, stopOkRemote := startUDPHandlerStub(t, replyA("198.51.100.92"))
+	defer stopOkRemote()
+	r2 := newStubResolver(t, []string{failDirect}, []string{okRemote})
+
+	if _, err := r2.Resolve(context.Background(), "parallel-remote.test"); err != nil {
+		t.Fatal(err)
+	}
+	p := mustRoutedDomain(t, r2, "parallel-remote.test")
+	if !p.Proxy || p.Reason != RouteReasonParallelRemote {
+		t.Fatalf("parallel remote verdict mismatch: %+v", p)
+	}
+}
+
+// Fake-IP 快速路径直接判定为代理（fakeip），无需上游应答。
+func TestResolver_RouteRecord_FakeIP(t *testing.T) {
+	addr, _, stop := startUDPHandlerStub(t, replyA("10.0.0.93"))
+	defer stop()
+	r := newStubResolver(t, []string{addr}, []string{"127.0.0.1:1"}, func(c *Config) {
+		c.EnableFakeIP = true
+		c.FakeIPRange = "198.18.0.0/15"
+	})
+
+	if _, err := r.Resolve(context.Background(), "fake-routed.test"); err != nil {
+		t.Fatal(err)
+	}
+	got := mustRoutedDomain(t, r, "fake-routed.test")
+	if !got.Proxy || got.Reason != RouteReasonFakeIP {
+		t.Fatalf("fake-ip verdict mismatch: %+v", got)
+	}
+	// 查询侧做归一化：大小写与尾点不影响读取
+	got2, ok := r.RoutedDomain("FAKE-ROUTED.TEST.")
+	if !ok || got2.Domain != "fake-routed.test" {
+		t.Fatalf("normalized lookup failed: %+v ok=%v", got2, ok)
+	}
+}
+
+// 两侧上游都失败时不形成分流走向，不得留下记录。
+func TestResolver_RouteRecord_FailureNotRecorded(t *testing.T) {
+	directAddr, _, stopDirect := startUDPHandlerStub(t, servFailHandler)
+	defer stopDirect()
+	remoteAddr, _, stopRemote := startUDPHandlerStub(t, servFailHandler)
+	defer stopRemote()
+	r := newStubResolver(t, []string{directAddr}, []string{remoteAddr})
+
+	if _, err := r.Resolve(context.Background(), "all-fail-routed.test"); err == nil {
+		t.Fatal("expected resolve failure")
+	}
+	if len(r.RoutedDomains()) != 0 {
+		t.Fatalf("failed resolution must not be recorded, got %v", r.RoutedDomains())
+	}
+	if _, ok := r.RoutedDomain("all-fail-routed.test"); ok {
+		t.Fatal("failed resolution must not be queryable")
+	}
+}
+
+// 同一域名重复解析（第二次命中缓存）只保留一条记录。
+func TestResolver_RouteRecord_CacheHitNoDuplicate(t *testing.T) {
+	addr, _, stop := startUDPHandlerStub(t, replyA("10.0.0.94"))
+	defer stop()
+	r := newStubResolver(t, []string{addr}, []string{"127.0.0.1:1"}, func(c *Config) {
+		c.DirectDomains = []string{"cached-route.test"}
+	})
+
+	for i := 0; i < 3; i++ {
+		if _, err := r.Resolve(context.Background(), "cached-route.test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all := r.RoutedDomains()
+	if len(all) != 1 || all[0].Domain != "cached-route.test" {
+		t.Fatalf("expected exactly one deduped record, got %v", all)
+	}
+}
+
+// RouteRecordCapacity 为负时关闭记录：写入空转，读取返回 nil。
+func TestResolver_RouteRecord_Disabled(t *testing.T) {
+	addr, _, stop := startUDPHandlerStub(t, replyA("10.0.0.95"))
+	defer stop()
+	r := newStubResolver(t, []string{addr}, []string{"127.0.0.1:1"}, func(c *Config) {
+		c.RouteRecordCapacity = -1
+		c.DirectDomains = []string{"disabled-record.test"}
+	})
+
+	if r.routes != nil {
+		t.Fatalf("negative capacity must yield nil recorder, got %+v", r.routes)
+	}
+	if _, err := r.Resolve(context.Background(), "disabled-record.test"); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.RoutedDomains(); got != nil {
+		t.Fatalf("disabled recorder snapshot must be nil, got %v", got)
+	}
+	if _, ok := r.RoutedDomain("disabled-record.test"); ok {
+		t.Fatal("disabled recorder must not report records")
+	}
+	// 关闭状态下清空也必须安全
+	r.ClearRouteRecords()
+}
+
+// ClearRouteRecords 只清分流记录、不影响 DNS 缓存：清空后同一域名再次解析
+// 若命中缓存，不会重新产生分流记录（缓存命中不经过分流判定）。
+func TestResolver_RouteRecord_Clear(t *testing.T) {
+	addr, _, stop := startUDPHandlerStub(t, replyA("10.0.0.96"))
+	defer stop()
+	r := newStubResolver(t, []string{addr}, []string{"127.0.0.1:1"}, func(c *Config) {
+		c.DirectDomains = []string{"clear-route.test"}
+	})
+
+	if _, err := r.Resolve(context.Background(), "clear-route.test"); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.RoutedDomains()) != 1 {
+		t.Fatal("expected one record before clear")
+	}
+	r.ClearRouteRecords()
+	if len(r.RoutedDomains()) != 0 {
+		t.Fatalf("records remain after clear: %v", r.RoutedDomains())
+	}
+	if _, err := r.Resolve(context.Background(), "clear-route.test"); err != nil {
+		t.Fatal(err)
+	}
+	// 第二次解析命中缓存、不经过 exchangeInternal，不应重新产生记录。
+	if len(r.RoutedDomains()) != 0 {
+		t.Fatalf("cache hit must not re-record after clear, got %v", r.RoutedDomains())
+	}
+}
+
+// 未配置远程上游时竞速退化为纯直连，也要留下 parallel_direct 记录。
+func TestResolver_RouteRecord_NoRemoteDegradesToDirect(t *testing.T) {
+	addr, _, stop := startUDPHandlerStub(t, replyA("10.0.0.97"))
+	defer stop()
+	r := newStubResolver(t, []string{addr}, []string{":53"}, func(c *Config) {
+		c.Timeout = 500 * time.Millisecond
+	})
+
+	if _, err := r.Resolve(context.Background(), "no-remote.test"); err != nil {
+		t.Fatal(err)
+	}
+	got := mustRoutedDomain(t, r, "no-remote.test")
+	if got.Proxy || got.Reason != RouteReasonParallelDirect {
+		t.Fatalf("degraded parallel verdict mismatch: %+v", got)
+	}
+}
