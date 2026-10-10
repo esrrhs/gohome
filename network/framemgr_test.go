@@ -2,6 +2,7 @@ package network
 
 import (
 	"bytes"
+	"container/list"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -69,6 +70,129 @@ func TestFrameMgrReqMapUsesHoleId(t *testing.T) {
 		if _, ok := ids[want]; !ok {
 			t.Fatalf("missing REQ for hole %d, got %v", want, ids)
 		}
+	}
+}
+
+func recvDataFrame(id int32, payload []byte) *Frame {
+	return &Frame{
+		Type: int32(Frame_DATA),
+		Id:   id,
+		Data: &FrameData{Type: int32(FrameData_USER_DATA), Data: payload},
+	}
+}
+
+func reqIdsFromSendList(sl *list.List) map[int32]struct{} {
+	ids := map[int32]struct{}{}
+	for e := sl.Front(); e != nil; e = e.Next() {
+		fr := e.Value.(*Frame)
+		if fr.Type == int32(Frame_REQ) {
+			for _, id := range fr.Dataid {
+				ids[id] = struct{}{}
+			}
+		}
+	}
+	return ids
+}
+
+// TestFrameMgrReqWhenBeginHole covers the case where recvid itself (the
+// begin slot of recvwin) is missing while later frames already arrived.
+// Previously FrontInter() returned nil on an empty begin, so no REQ was
+// ever produced for the first missing frame and recovery relied solely on
+// the sender's timeout retransmission.
+func TestFrameMgrReqWhenBeginHole(t *testing.T) {
+	fm := NewFrameMgr(64, 1000, 16, 64, 200, 0, 0)
+	fm.rttns = int64(time.Second)
+
+	if err := fm.recvwin.Set(1, recvDataFrame(1, []byte("a"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := fm.recvwin.Set(2, recvDataFrame(2, []byte("bb"))); err != nil {
+		t.Fatal(err)
+	}
+
+	fm.combineWindowToRecvBuffer(time.Now().UnixNano())
+	ids := reqIdsFromSendList(fm.GetSendList())
+	if _, ok := ids[0]; !ok {
+		t.Fatalf("missing REQ for begin hole 0, got %v", ids)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("only hole 0 should be REQ'd, got %v", ids)
+	}
+}
+
+// TestFrameMgrReqAfterConsumeThenHole drives frame 0 through the full
+// receive path so recvid advances to 1, then loses frame 1 and delivers
+// 2 and 3 out of order: a single REQ for 1 must be produced.
+func TestFrameMgrReqAfterConsumeThenHole(t *testing.T) {
+	fm := NewFrameMgr(64, 1000, 16, 64, 200, 0, 0)
+	fm.rttns = int64(time.Second)
+
+	fm.OnRecvFrame(recvDataFrame(0, []byte("x")))
+	fm.Update()
+	fm.GetSendList()
+	if fm.recvid != 1 {
+		t.Fatalf("recvid after draining frame 0 = %d, want 1", fm.recvid)
+	}
+	fm.SkipRecvBuffer(fm.GetRecvBufferSize())
+
+	fm.OnRecvFrame(recvDataFrame(2, []byte("y")))
+	fm.OnRecvFrame(recvDataFrame(3, []byte("zz")))
+	fm.Update()
+	ids := reqIdsFromSendList(fm.GetSendList())
+	if _, ok := ids[1]; !ok {
+		t.Fatalf("missing REQ for hole 1, got %v", ids)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("only hole 1 should be REQ'd, got %v", ids)
+	}
+}
+
+// TestFrameMgrReqAcrossWrap verifies hole scanning when recvid is near
+// maxId and some frames already wrapped around the id ring.
+func TestFrameMgrReqAcrossWrap(t *testing.T) {
+	const maxId int32 = 10
+	fm := NewFrameMgr(64, int(maxId), 1024, 5, 200, 0, 0)
+	fm.rttns = int64(time.Second)
+
+	// Deliver 0..7 in order so recvid slides to 8.
+	for id := int32(0); id < 8; id++ {
+		fm.OnRecvFrame(recvDataFrame(id, []byte{byte(id)}))
+		fm.Update()
+		fm.GetSendList()
+	}
+	if fm.recvid != 8 {
+		t.Fatalf("recvid = %d, want 8", fm.recvid)
+	}
+
+	// Frame 8 lost; frame 9 arrives: REQ must name exactly 8.
+	fm.OnRecvFrame(recvDataFrame(9, []byte("9")))
+	fm.Update()
+	ids := reqIdsFromSendList(fm.GetSendList())
+	if len(ids) != 1 {
+		t.Fatalf("exactly hole 8 should be REQ'd before wrap, got %v", ids)
+	}
+	if _, ok := ids[8]; !ok {
+		t.Fatalf("missing REQ for hole 8, got %v", ids)
+	}
+
+	// Wrapped frame 0 also arrives. The REQ rate limit may suppress a
+	// resend inside one rtt; force the next combine to re-evaluate and
+	// confirm the wrapped arrival neither hides hole 8 nor adds spurious
+	// ids for frames the sender has not produced yet.
+	fm.OnRecvFrame(recvDataFrame(0, []byte("wrap0")))
+	fm.Update()
+	fm.GetSendList()
+	if err, v := fm.recvwin.Get(0); err != nil || v == nil {
+		t.Fatalf("wrapped frame 0 should be accepted in recvwin: err=%v v=%v", err, v)
+	}
+	fm.rttns = 0
+	fm.combineWindowToRecvBuffer(time.Now().UnixNano())
+	ids = reqIdsFromSendList(fm.GetSendList())
+	if len(ids) != 1 {
+		t.Fatalf("exactly hole 8 should be REQ'd across wrap, got %v", ids)
+	}
+	if _, ok := ids[8]; !ok {
+		t.Fatalf("missing REQ for hole 8 after wrap, got %v", ids)
 	}
 }
 

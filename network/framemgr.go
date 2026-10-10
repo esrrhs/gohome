@@ -594,23 +594,37 @@ func (fm *FrameMgr) combineWindowToRecvBuffer(cur int64) {
 		}
 	}
 
+	// Walk arrived frames in ring order starting at recvid, even when the
+	// begin slot (recvid itself) is a hole: FrontInter() returns nil in that
+	// case, which used to suppress every REQ until the sender's timeout
+	// retransmission happened. Holes between the cursor and the next arrived
+	// frame are all REQ'd in one pass.
+	maxReq := int(fm.windowsize)
+	if n := fm.frame_max_size / 2 / 4; n < maxReq {
+		maxReq = n
+	}
 	reqtmp := make(map[int32]int)
-	e := fm.recvwin.FrontInter()
 	id := fm.recvid
-	for len(reqtmp) < int(fm.windowsize) && len(reqtmp)*4 < fm.frame_max_size/2 && e != nil {
-		f := e.Value.(*Frame)
-		//loggo.Debug("debugid %v start add req id %v %v %v", fm.debugid, fm.recvid, f.Id, id)
-		if f.Id != id {
+	for e := fm.recvwin.FrontInterFromBegin(); e != nil && len(reqtmp) < maxReq; e = e.Next() {
+		fid := int32(e.Id())
+		//loggo.Debug("debugid %v start add req id %v %v %v", fm.debugid, fm.recvid, fid, id)
+		for id != fid && len(reqtmp) < maxReq {
 			oldReq := fm.reqmap[id]
 			if cur-oldReq > fm.rttns {
 				reqtmp[id]++
 				fm.reqmap[id] = cur
 				//loggo.Debug("debugid %v add req id %v ", fm.debugid, id)
 			}
-		} else {
-			e = e.Next()
+			id++
+			if id >= fm.frame_max_id {
+				id = 0
+			}
 		}
-
+		if id != fid {
+			// Stopped only because the REQ budget was exhausted.
+			break
+		}
+		// fid has arrived; advance the cursor past it.
 		id++
 		if id >= fm.frame_max_id {
 			id = 0
