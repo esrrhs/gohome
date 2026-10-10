@@ -37,6 +37,7 @@
 - **Hot reload only replaces your custom part**: `UpdateDirectIPs()` and `UpdateDirectDomains()` always keep the built-in defaults (reserved CIDRs, `.cn` TLDs, popular China domains) instead of wiping them.
 - **Cached TTL decays**: a cache hit returns the remaining lifetime, not the upstream's original TTL, so downstream clients never see a stale timestamp.
 - **`Resolve()` queries A records only** (IPv4). Use `ResolveAll()` when you also need AAAA; IPv4 results come first.
+- **Split-routing decisions are recorded**: every actual routing decision (direct/proxy rule hit, parallel-race adoption, Fake-IP allocation) is stored once per domain. `RoutedDomains()` returns a snapshot with the most recently decided domain first, `RoutedDomain(name)` looks one up, and `ClearRouteRecords()` wipes them. `Reason` is always one of `direct_domain` / `proxy_domain` / `parallel_direct` / `parallel_remote` / `fakeip`; failed resolutions produce no record and cache hits are not recorded again. Capacity is `Config.RouteRecordCapacity` (default 1000, LRU eviction; set it negative to disable).
 - **Resource cleanup**: `Resolver.Close()` releases the GeoIP handle; `FakeIPPool.PurgeExpired()` reclaims expired mappings (also triggered automatically when the pool approaches capacity).
 
 ---
