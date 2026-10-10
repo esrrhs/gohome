@@ -183,6 +183,125 @@ func TestNew7(t *testing.T) {
 	}
 }
 
+func collectInterFromBegin(rob *ROBuffergo) []int {
+	var got []int
+	for e := rob.FrontInterFromBegin(); e != nil; e = e.Next() {
+		got = append(got, e.Id())
+	}
+	return got
+}
+
+func TestROBufferFrontInterFromBeginEmpty(t *testing.T) {
+	rob := NewROBuffer(5, 0, 10)
+	if e := rob.FrontInterFromBegin(); e != nil {
+		t.Fatalf("empty window should yield nil iterator, got id=%d", e.Id())
+	}
+}
+
+func TestROBufferFrontInterFromBeginFilled(t *testing.T) {
+	rob := NewROBuffer(5, 0, 10)
+	for _, id := range []int{0, 1, 2, 3, 4} {
+		if err := rob.Set(id, id*10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := collectInterFromBegin(rob)
+	want := []int{0, 1, 2, 3, 4}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	}
+	e := rob.FrontInterFromBegin()
+	if e.Id() != 0 || e.Value.(int) != 0 {
+		t.Fatalf("first element id=%d value=%v", e.Id(), e.Value)
+	}
+}
+
+func TestROBufferFrontInterFromBeginHoleAtBegin(t *testing.T) {
+	// The begin slot is empty but later slots are filled. FrontInter gives
+	// up; FrontInterFromBegin must still iterate the arrived slots.
+	rob := NewROBuffer(5, 0, 10)
+	if err := rob.Set(2, 20); err != nil {
+		t.Fatal(err)
+	}
+	if err := rob.Set(3, 30); err != nil {
+		t.Fatal(err)
+	}
+	if e := rob.FrontInter(); e != nil {
+		t.Fatalf("FrontInter must be nil when begin is a hole, got id=%d", e.Id())
+	}
+	got := collectInterFromBegin(rob)
+	want := []int{2, 3}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	}
+}
+
+func TestROBufferFrontInterFromBeginOnlyLastSlotFilled(t *testing.T) {
+	// The physical slot right before begin must not be skipped.
+	rob := NewROBuffer(5, 0, 10)
+	if err := rob.Set(4, 40); err != nil {
+		t.Fatal(err)
+	}
+	got := collectInterFromBegin(rob)
+	if len(got) != 1 || got[0] != 4 {
+		t.Fatalf("got %v want [4]", got)
+	}
+}
+
+func TestROBufferFrontInterFromBeginAfterPop(t *testing.T) {
+	rob := NewROBuffer(5, 0, 10)
+	for _, id := range []int{0, 1, 2} {
+		if err := rob.Set(id, id*10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := rob.PopFront(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rob.PopFront(); err != nil {
+		t.Fatal(err)
+	}
+	// begin now expects id 2, which has arrived; the two reused slots are
+	// holes for the future window.
+	got := collectInterFromBegin(rob)
+	want := []int{2}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("got %v want %v", got, want)
+	}
+
+	// After consuming id 2, begin expects id 3. Arrive 4 and 5 while 3 is
+	// missing: begin is a hole and iteration must still reach 4, 5.
+	if err := rob.PopFront(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rob.Set(4, 40); err != nil {
+		t.Fatal(err)
+	}
+	if err := rob.Set(5, 50); err != nil {
+		t.Fatal(err)
+	}
+	got = collectInterFromBegin(rob)
+	want = []int{4, 5}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	}
+}
+
 func isIdInRange(recvid int, windowsize int, id int, maxid int) bool {
 	begin := recvid
 	end := recvid + windowsize

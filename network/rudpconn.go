@@ -676,6 +676,11 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 
 	reason := ""
 
+	// ipv4.NewPacketConn is not AF-specific at the sendmmsg layer: x/net's
+	// internal socket only tags the fd as "udp" and encodes each message's
+	// sockaddr from its real address family, so WriteBatch works for
+	// AF_INET6 sockets/destinations on Linux too (covered by the
+	// TestIPv6_RUDP_Loopback CI case).
 	pconn := ipv4.NewPacketConn(conn)
 	// 预分配消息数组，避免循环内分配
 	msgs := make([]ipv4.Message, 0, c.config.BatchSendPkgs)

@@ -188,6 +188,7 @@ type ROBuffergoInter struct {
 	startindex int
 	index      int
 	Value      interface{}
+	id         int
 	b          *ROBuffergo
 }
 
@@ -202,8 +203,38 @@ func (b *ROBuffergo) FrontInter() *ROBuffergoInter {
 		startindex: b.begin,
 		index:      b.begin,
 		Value:      b.buffer[b.begin],
+		id:         b.id[b.begin],
 		b:          b,
 	}
+}
+
+// FrontInterFromBegin behaves like FrontInter, but iteration also starts
+// when the begin slot itself is empty: the returned iterator points at the
+// first filled slot at or after begin in ring order (nil when the whole
+// window is empty). Pair it with Id() and a caller cursor to detect holes
+// before the first filled slot.
+func (b *ROBuffergo) FrontInterFromBegin() *ROBuffergoInter {
+	if b.begin >= len(b.flag) {
+		return nil
+	}
+	bi := &ROBuffergoInter{
+		startindex: b.begin,
+		index:      b.begin,
+		b:          b,
+	}
+	if b.flag[b.begin] {
+		bi.Value = b.buffer[b.begin]
+		bi.id = b.id[b.begin]
+		return bi
+	}
+	// begin itself is a hole: Next() scans the remaining len-1 slots,
+	// covering every slot in the window before returning nil.
+	return bi.Next()
+}
+
+// Id returns the frame id carried by the slot under the iterator.
+func (bi *ROBuffergoInter) Id() int {
+	return bi.id
 }
 
 func (bi *ROBuffergoInter) Next() *ROBuffergoInter {
@@ -220,5 +251,6 @@ func (bi *ROBuffergoInter) Next() *ROBuffergoInter {
 		}
 	}
 	bi.Value = bi.b.buffer[bi.index]
+	bi.id = bi.b.id[bi.index]
 	return bi
 }
