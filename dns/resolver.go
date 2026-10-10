@@ -46,6 +46,9 @@ type Config struct {
 
 	// GeoIP 数据库文件路径（GeoLite2-Country.mmdb）
 	GeoIPFile string
+	// 境内归属地国家码，用于竞速结果与 ShouldProxy 的 GeoIP 判定，默认 "CN"。
+	// 部署在其他国家时（如 -lor US 搭配美国境内 DNS）应设置为对应国家码。
+	RegionCode string
 
 	// 查询超时时间，默认 3s
 	Timeout time.Duration
@@ -132,6 +135,9 @@ func NewResolver(cfg Config) (*StandardResolver, error) {
 	}
 	if cfg.CacheCapacity <= 0 {
 		cfg.CacheCapacity = 2000
+	}
+	if cfg.RegionCode == "" {
+		cfg.RegionCode = "CN"
 	}
 
 	r := &StandardResolver{
@@ -573,10 +579,10 @@ func (r *StandardResolver) isAllDomestic(ips []net.IP) bool {
 		if r.directIPs.Contains(ip) {
 			continue
 		}
-		// 2. 如果配置了 GeoIP，检测是否在 CN
+		// 2. 如果配置了 GeoIP，检测是否在境内归属地
 		code, err := r.geodb.GetCountryCode(ip)
 		if err == nil && len(code) > 0 {
-			if code != "CN" {
+			if code != r.cfg.RegionCode {
 				return false
 			}
 		}
@@ -604,7 +610,7 @@ func (r *StandardResolver) ShouldProxy(target string) (bool, error) {
 		// GeoIP 判定
 		code, err := r.geodb.GetCountryCode(ip)
 		if err == nil && len(code) > 0 {
-			return code != "CN", nil
+			return code != r.cfg.RegionCode, nil
 		}
 		return false, nil
 	}
