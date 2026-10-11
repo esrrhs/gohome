@@ -71,6 +71,7 @@ func ShellRunTimeout(script string, silent bool, timeout int, param ...string) (
 
 	begin := time.Now()
 	cmd := exec.CommandContext(ctx, "sh", tmpparam...)
+	setProcessGroupKill(cmd)
 	out, err := cmd.CombinedOutput()
 	outstr := string(out)
 	if err != nil {
@@ -150,6 +151,7 @@ func ShellRunExeTimeout(exe string, silent bool, timeout int, param ...string) (
 
 	begin := time.Now()
 	cmd := exec.CommandContext(ctx, exe, param...)
+	setProcessGroupKill(cmd)
 	out, err := cmd.CombinedOutput()
 	outstr := string(out)
 	if err != nil {
