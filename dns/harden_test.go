@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -393,6 +394,110 @@ func TestHardenShouldProxy_GeoIP(t *testing.T) {
 	}
 	if proxy, err := r.ShouldProxy("8.8.8.8"); err != nil || proxy {
 		t.Fatalf("unknown-geolocation IP must stay direct, got (%v,%v)", proxy, err)
+	}
+}
+
+// ===========================================================================
+// 缓存命中/未命中累计计数（CacheHits/CacheMisses）
+// ===========================================================================
+
+// 首次查询 miss 并落缓存；第二次命中缓存且不再触达上游；ClearCache 清空
+// 条目但不清零累计计数；清理后再次查询产生新的 miss。
+func TestHardenCacheCounters_HitMissClearPersists(t *testing.T) {
+	addr, queries, stop := startUDPHandlerStub(t, replyA("10.1.2.3"))
+	defer stop()
+	r := newStubResolver(t, []string{addr}, []string{"127.0.0.1:1"}, func(c *Config) {
+		// 直连白名单保证只走直连上游，计数路径确定。
+		c.DirectDomains = []string{"counted.test"}
+	})
+
+	if h, m := r.CacheHits(), r.CacheMisses(); h != 0 || m != 0 {
+		t.Fatalf("fresh resolver counters = (%d,%d), want (0,0)", h, m)
+	}
+
+	req := upstream.BuildQuery("counted.test", dns.TypeA)
+	if _, err := r.Exchange(context.Background(), req); err != nil {
+		t.Fatalf("first exchange: %v", err)
+	}
+	if h, m := r.CacheHits(), r.CacheMisses(); h != 0 || m != 1 {
+		t.Fatalf("after first query counters = (%d,%d), want (0,1)", h, m)
+	}
+	if r.CacheLen() != 1 {
+		t.Fatalf("CacheLen = %d, want 1", r.CacheLen())
+	}
+	if got := atomic.LoadInt32(queries); got != 1 {
+		t.Fatalf("upstream queries = %d, want 1", got)
+	}
+
+	// 第二次同查询必须命中缓存，不再触达上游。
+	if _, err := r.Exchange(context.Background(), req); err != nil {
+		t.Fatalf("second exchange: %v", err)
+	}
+	if h, m := r.CacheHits(), r.CacheMisses(); h != 1 || m != 1 {
+		t.Fatalf("after second query counters = (%d,%d), want (1,1)", h, m)
+	}
+	if got := atomic.LoadInt32(queries); got != 1 {
+		t.Fatalf("cached query must not reach upstream, queries = %d", got)
+	}
+
+	// ClearCache 清条目但累计计数不清零。
+	r.ClearCache()
+	if r.CacheLen() != 0 {
+		t.Fatalf("CacheLen after clear = %d, want 0", r.CacheLen())
+	}
+	if h, m := r.CacheHits(), r.CacheMisses(); h != 1 || m != 1 {
+		t.Fatalf("counters must survive ClearCache, got (%d,%d)", h, m)
+	}
+
+	// 清理后重新查询：新 miss、重新触达上游；再来一次得到第二个 hit。
+	if _, err := r.Exchange(context.Background(), req); err != nil {
+		t.Fatalf("post-clear exchange: %v", err)
+	}
+	if h, m := r.CacheHits(), r.CacheMisses(); h != 1 || m != 2 {
+		t.Fatalf("post-clear counters = (%d,%d), want (1,2)", h, m)
+	}
+	if _, err := r.Exchange(context.Background(), req); err != nil {
+		t.Fatalf("post-clear cached exchange: %v", err)
+	}
+	if h, m := r.CacheHits(), r.CacheMisses(); h != 2 || m != 2 {
+		t.Fatalf("final counters = (%d,%d), want (2,2)", h, m)
+	}
+}
+
+// Fake-IP 合成应答与 PTR 反查在缓存查找之前短路返回，既不写缓存也不
+// 增加 hit/miss 计数。
+func TestHardenCacheCounters_FakeIPBypassesCache(t *testing.T) {
+	addr, queries, stop := startUDPHandlerStub(t, replyA("10.0.0.50"))
+	defer stop()
+	r := newStubResolver(t, []string{addr}, []string{"127.0.0.1:1"}, func(c *Config) {
+		c.EnableFakeIP = true
+		c.FakeIPRange = "198.18.0.0/15"
+	})
+
+	aReq := upstream.BuildQuery("synthetic.test", dns.TypeA)
+	for i := 0; i < 2; i++ {
+		resp, err := r.Exchange(context.Background(), aReq)
+		if err != nil || len(resp.Answer) != 1 {
+			t.Fatalf("fake-ip exchange #%d: resp=%v err=%v", i, resp, err)
+		}
+	}
+	fakeIPs, err := r.Resolve(context.Background(), "synthetic.test")
+	if err != nil || len(fakeIPs) != 1 {
+		t.Fatalf("resolve fake ip: %v %v", fakeIPs, err)
+	}
+	arpa := strings.Join(reverseOctets(fakeIPs[0].String()), ".") + ".in-addr.arpa"
+	if _, err := r.Exchange(context.Background(), upstream.BuildQuery(arpa, dns.TypePTR)); err != nil {
+		t.Fatalf("fake-ip PTR exchange: %v", err)
+	}
+
+	if h, m := r.CacheHits(), r.CacheMisses(); h != 0 || m != 0 {
+		t.Fatalf("fake-ip path must not touch cache counters, got (%d,%d)", h, m)
+	}
+	if r.CacheLen() != 0 {
+		t.Fatalf("fake-ip answers must not be cached, CacheLen = %d", r.CacheLen())
+	}
+	if got := atomic.LoadInt32(queries); got != 0 {
+		t.Fatalf("fake-ip path must not reach upstream, queries = %d", got)
 	}
 }
 
