@@ -63,6 +63,40 @@ func TestCacheSetAndGet(t *testing.T) {
 	}
 }
 
+func TestCacheHitsAndMisses(t *testing.T) {
+	c := NewDNSCache(10)
+	key := KeyForMsg("example.com", dns.TypeA, dns.ClassINET)
+
+	c.Get(key) // 未写入：miss
+	c.Get(key) // 再次未命中：miss
+	if c.Hits() != 0 || c.Misses() != 2 {
+		t.Fatalf("before set hits=%d misses=%d, want 0/2", c.Hits(), c.Misses())
+	}
+
+	c.Set(key, newResp(t, "example.com", 300, "1.2.3.4"))
+	c.Get(key)
+	c.Get(key)
+	if c.Hits() != 2 || c.Misses() != 2 {
+		t.Fatalf("after set hits=%d misses=%d, want 2/2", c.Hits(), c.Misses())
+	}
+
+	// 过期条目的查找计为 miss（直接把过期时间改到过去，避免等 TTL）；Clear 不清零计数。
+	c.Set(key, newResp(t, "example.com", 300, "1.2.3.4"))
+	c.mu.Lock()
+	c.items[key].ExpiresAt = time.Now().Add(-time.Second)
+	c.mu.Unlock()
+	if _, ok := c.Get(key); ok {
+		t.Fatal("expected expired entry to miss")
+	}
+	if c.Misses() != 3 {
+		t.Fatalf("misses after expiry = %d, want 3", c.Misses())
+	}
+	c.Clear()
+	if c.Hits() != 2 || c.Misses() != 3 {
+		t.Fatalf("Clear must not reset stats: hits=%d misses=%d", c.Hits(), c.Misses())
+	}
+}
+
 func TestCacheIgnoresEmptyAnswer(t *testing.T) {
 	c := NewDNSCache(10)
 	key := KeyForMsg("example.com", dns.TypeA, dns.ClassINET)
