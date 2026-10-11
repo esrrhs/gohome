@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,6 +12,22 @@ import (
 	"github.com/esrrhs/gohome/loggo"
 	"github.com/miekg/dns"
 )
+
+// clientAddrCtxKey 是请求方地址在 context 中的私有键类型。
+type clientAddrCtxKey struct{}
+
+// ContextWithClientAddr 把本次 DNS 请求的对端地址写入 context，
+// 供下游 Resolver 记录查询日志或做按客户端的策略控制。
+func ContextWithClientAddr(ctx context.Context, addr net.Addr) context.Context {
+	return context.WithValue(ctx, clientAddrCtxKey{}, addr)
+}
+
+// ClientAddrFromContext 取出 ContextWithClientAddr 写入的对端地址；
+// 未写入时返回 nil。
+func ClientAddrFromContext(ctx context.Context) net.Addr {
+	addr, _ := ctx.Value(clientAddrCtxKey{}).(net.Addr)
+	return addr
+}
 
 const (
 	// serverStartTimeout 限制等待两个监听器完成绑定（或绑定失败）的时间，
@@ -58,7 +75,10 @@ func (s *Server) Start() error {
 	}
 
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-		resp, err := s.resolver.Exchange(context.Background(), r)
+		// 把对端地址透传给 resolver：查询日志/按客户端策略需要区分请求来源，
+		// Resolver 只拿到 *dns.Msg 时无从获知。
+		ctx := ContextWithClientAddr(context.Background(), w.RemoteAddr())
+		resp, err := s.resolver.Exchange(ctx, r)
 		if err != nil || resp == nil {
 			dns.HandleFailed(w, r)
 			return
