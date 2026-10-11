@@ -280,7 +280,7 @@ func GunzipString(data string) string {
 	if err != nil {
 		return ""
 	}
-	r.Close()
 	ret, _ := ioutil.ReadAll(r)
+	r.Close()
 	return string(ret)
 }

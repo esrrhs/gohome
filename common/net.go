@@ -132,6 +132,10 @@ func GetRootDomain(host string) (string, error) {
 		}
 	}
 
+	// 1.1 去掉根点：FQDN 常以 "." 结尾（如 "www.baidu.com."），
+	// publicsuffix 会因空 label 报错，这里规范化掉
+	host = strings.TrimSuffix(host, ".")
+
 	// 2. 特殊处理 IP 地址 (如果是 IP，publicsuffix 会报错或返回空，视具体逻辑而定)
 	// 如果业务只要域名，可以忽略这一步；如果想保留 IP 原样返回，加上这个判断
 	if net.ParseIP(host) != nil {
