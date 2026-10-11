@@ -121,8 +121,14 @@ func TestResolver_CachesRepeatedQueries(t *testing.T) {
 	if got := atomic.LoadInt32(queries); got != 1 {
 		t.Fatalf("expected 1 upstream query thanks to the cache, got %d", got)
 	}
+	if n := r.CacheLen(); n != 1 {
+		t.Fatalf("CacheLen = %d, want 1", n)
+	}
 
 	r.ClearCache()
+	if n := r.CacheLen(); n != 0 {
+		t.Fatalf("CacheLen after ClearCache = %d, want 0", n)
+	}
 	if _, err := r.Resolve(ctx, "cached.test"); err != nil {
 		t.Fatalf("resolve after ClearCache failed: %v", err)
 	}
