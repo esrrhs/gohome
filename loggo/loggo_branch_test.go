@@ -361,3 +361,119 @@ func TestPlainPrintAndDebugGating(t *testing.T) {
 		t.Errorf("Debug must be gated at INFO level, got %q", buf.String())
 	}
 }
+
+// rewriteStderrFile 打不开 Prefix+".stderr"（父目录不存在）时必须 panic
+func TestRewriteStderrOpenFailurePanics(t *testing.T) {
+	orig := gConfig
+	t.Cleanup(func() { gConfig = orig })
+	gConfig.Prefix = filepath.Join(t.TempDir(), "missing-dir", "x")
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("rewriteStderrFile must panic when the stderr file cannot be opened")
+		}
+	}()
+	rewriteStderrFile()
+}
+
+// getLogFileLocked 打开日志文件失败（Prefix 指向不存在的目录）时必须 panic
+func TestGetLogFileOpenFailurePanics(t *testing.T) {
+	resetLogHandles()
+	t.Cleanup(resetLogHandles)
+
+	orig := gConfig
+	t.Cleanup(func() { gConfig = orig })
+	gConfig.Prefix = filepath.Join(t.TempDir(), "missing-dir", "p")
+
+	logFileMu.Lock()
+	defer logFileMu.Unlock()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("getLogFileLocked must panic on OpenFile failure")
+		}
+	}()
+	_ = getLogFileLocked(LEVEL_INFO)
+}
+
+// 配置 checkDate 的输出 sink：错误只能走 printer，不碰日志文件
+func setupCheckDatePrinter(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	orig := gConfig
+	t.Cleanup(func() { gConfig = orig })
+	var buf bytes.Buffer
+	SetPrinter(&buf)
+	gConfig.Level = LEVEL_ERROR
+	gConfig.NoPrint = false
+	gConfig.NoLogFile = true
+	gConfig.NoLogColor = true
+	return &buf
+}
+
+// cwd 权限 000：darwin 上 os.Getwd 因 stat(".") 被拒失败，
+// checkDate 必须记录 Getwd fail 并安全返回。
+func TestCheckDateGetwdFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory DAC permissions")
+	}
+	dir := t.TempDir()
+	t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+	t.Chdir(dir)
+	if err := os.Chmod(dir, 0000); err != nil {
+		t.Fatal(err)
+	}
+	buf := setupCheckDatePrinter(t)
+
+	checkDate(Config{Prefix: "rot", MaxDay: 1})
+
+	if !strings.Contains(buf.String(), "Getwd fail") {
+		t.Fatalf("expected Getwd failure log, got %q", buf.String())
+	}
+}
+
+// cwd 权限 0100（仅搜索不可读）：Getwd 成功但 ReadDir 被拒，
+// checkDate 必须记录 ReadDir fail 并返回。
+func TestCheckDateReadDirFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory DAC permissions")
+	}
+	dir := t.TempDir()
+	t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+	t.Chdir(dir)
+	if err := os.Chmod(dir, 0100); err != nil {
+		t.Fatal(err)
+	}
+	buf := setupCheckDatePrinter(t)
+
+	checkDate(Config{Prefix: "rot", MaxDay: 1})
+
+	if !strings.Contains(buf.String(), "ReadDir fail") {
+		t.Fatalf("expected ReadDir failure log, got %q", buf.String())
+	}
+}
+
+// 目录条目必须被 IsDir 跳过，不能被当成 .log 文件处理
+func TestCheckDateSkipsDirectories(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	orig := gConfig
+	t.Cleanup(func() { gConfig = orig })
+	gConfig.NoLogFile = true
+	gConfig.NoPrint = true
+
+	if err := os.Mkdir("subdir", 0755); err != nil {
+		t.Fatal(err)
+	}
+	old := "rot_DEBUG_" + time.Now().AddDate(0, 0, -5).Format("2006-01-02") + ".log"
+	if err := os.WriteFile(old, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	checkDate(Config{Prefix: "rot", MaxDay: 1})
+
+	if fi, err := os.Stat("subdir"); err != nil || !fi.IsDir() {
+		t.Fatalf("directory entry must remain untouched, stat=%v err=%v", fi, err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("expired log must still be removed, err=%v", err)
+	}
+}
