@@ -122,6 +122,13 @@ func (fm *FrameMgr) SetCongestion(ct Congestion) {
 
 func NewFrameMgr(frame_max_size int, frame_max_id int, buffersize int, windowsize int, resend_timems int, compress int, openstat int) *FrameMgr {
 
+	// NewROBuffer returns nil when frame_max_id <= 0 or windowsize >=
+	// frame_max_id, which would otherwise surface as a nil-pointer panic on
+	// the first send/recv operation. Fail fast with a clear message instead.
+	if frame_max_id <= 0 || windowsize <= 0 || windowsize >= frame_max_id {
+		panic("invalid frame ring params: require windowsize > 0 and 0 < windowsize < frame_max_id")
+	}
+
 	sendb := glist.NewRBuffergo(buffersize, false)
 	recvb := glist.NewRBuffergo(buffersize, false)
 
