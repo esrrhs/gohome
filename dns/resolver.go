@@ -107,6 +107,8 @@ type Resolver interface {
 	UpdateProxyAddress(proxyAddr string) error
 	// 清空 DNS 缓存
 	ClearCache()
+	// CacheLen 返回当前 DNS 缓存条目数（可能含已过期但尚未懒清理的条目）
+	CacheLen() int
 
 	// ---- 分流记录（记录实际发生过分流的域名及最终走向）----
 	// RoutedDomains 返回全部分流记录快照，按最近判定时间倒序；
@@ -762,6 +764,11 @@ func (r *StandardResolver) UpdateProxyAddress(proxyAddr string) error {
 
 func (r *StandardResolver) ClearCache() {
 	r.cache.Clear()
+}
+
+// CacheLen 返回当前缓存条目数，供运维观测缓存规模。
+func (r *StandardResolver) CacheLen() int {
+	return r.cache.Len()
 }
 
 // recordRoute 是所有分流路径落盘记录的唯一入口；

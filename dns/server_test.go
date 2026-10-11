@@ -70,6 +70,7 @@ func (s *stubResolver) LoadProxyDomainFile(p string) (int, error) { return 0, ni
 func (s *stubResolver) ReloadGeoIPDatabase(p string) error        { return nil }
 func (s *stubResolver) UpdateProxyAddress(a string) error         { return nil }
 func (s *stubResolver) ClearCache()                               {}
+func (s *stubResolver) CacheLen() int                             { return 0 }
 func (s *stubResolver) RoutedDomains() []DomainRoute              { return nil }
 func (s *stubResolver) RoutedDomain(domain string) (DomainRoute, bool) {
 	return DomainRoute{}, false
