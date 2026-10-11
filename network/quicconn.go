@@ -221,7 +221,7 @@ func (c *QuicConn) Close() error {
 	owned := c.dialOwned
 	c.cancel = nil
 	c.dialOwned = nil
-	// Cancel while holding dialMu so finishDial observing ctx.Err() cannot
+	// Cancel while holding dialMu so Dial observing ctx.Err() cannot
 	// race ahead of cancel and hand out a connection that Close is aborting.
 	if cancel != nil {
 		cancel()
@@ -292,24 +292,6 @@ func (c *QuicConn) setDialOwned(closer io.Closer) {
 	c.dialMu.Lock()
 	c.dialOwned = closer
 	c.dialMu.Unlock()
-}
-
-// finishDial clears dial abort state. Succeeds only if ctx is still live and
-// we still own closer (Close has not stolen dialOwned).
-func (c *QuicConn) finishDial(ctx context.Context, closer io.Closer) bool {
-	c.dialMu.Lock()
-	stillOwn := c.dialOwned == closer
-	canceled := ctx.Err() != nil || !stillOwn
-	c.cancel = nil
-	c.dialOwned = nil
-	c.dialMu.Unlock()
-	if canceled {
-		if closer != nil && stillOwn {
-			closer.Close()
-		}
-		return false
-	}
-	return true
 }
 
 func (c *QuicConn) Dial(dst string) (Conn, error) {

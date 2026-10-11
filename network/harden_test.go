@@ -2,10 +2,12 @@ package network
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1367,5 +1369,656 @@ func TestHardenSock5ClientRequestErrors(t *testing.T) {
 	bnd, err := Sock5SetUDPRequest(c, "1.2.3.4", 80, 1000)
 	if err != nil || bnd != "1.2.3.4:8080" {
 		t.Fatalf("bnd = %q err = %v", bnd, err)
+	}
+}
+
+// ---------- kcp loopback ----------
+
+// hardenPtrCloser is a pointer-receiver io.Closer: KcpConn.finishDial compares
+// dialOwned via interface equality, which panics on func-typed closers (the
+// production Dial wraps its resource in a pointer for exactly this reason).
+type hardenPtrCloser struct{ closed int32 }
+
+func (h *hardenPtrCloser) Close() error {
+	atomic.AddInt32(&h.closed, 1)
+	return nil
+}
+
+// hardenRegisterController installs a dialer Control callback and returns a
+// pointer to its invocation counter plus the restore cleanup.
+func hardenRegisterController() (*int32, func()) {
+	old := gControlOnConnSetup
+	var n int32
+	RegisterDialerController(func(network, address string, c syscall.RawConn) error {
+		atomic.AddInt32(&n, 1)
+		return nil
+	})
+	return &n, func() { gControlOnConnSetup = old }
+}
+
+func hardenKcpListen(t *testing.T) Conn {
+	t.Helper()
+	l, err := NewConn("kcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := l.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("kcp listen: %v", err)
+	}
+	return ln
+}
+
+// hardenKcpServe accepts one session on ln and echoes exactly one message.
+func hardenKcpServe(t *testing.T, ln Conn, done chan<- struct{}) {
+	t.Helper()
+	go func() {
+		srv, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer srv.Close()
+		buf := make([]byte, 256)
+		n, err := io.ReadFull(srv, buf[:16])
+		if err != nil {
+			t.Errorf("kcp server read: %v", err)
+			return
+		}
+		if _, err := srv.Write(buf[:n]); err != nil {
+			t.Errorf("kcp server write: %v", err)
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+		close(done)
+	}()
+}
+
+// Full local loopback round trip: listener/dialer/session Info strings, the
+// registered dialer Control callback, and a bidirectional echo.
+func TestHardenKcpLoopbackEchoAndInfo(t *testing.T) {
+	if (&KcpConn{}).Name() != "kcp" {
+		t.Fatal("KcpConn.Name")
+	}
+	ctrl, restore := hardenRegisterController()
+	defer restore()
+
+	ln := hardenKcpListen(t)
+	defer ln.Close()
+	addr := ln.(*KcpConn).listener.Addr().String()
+	if got := ln.Info(); got != "kcp--"+addr {
+		t.Fatalf("listener Info = %q", got)
+	}
+
+	done := make(chan struct{})
+	hardenKcpServe(t, ln, done)
+	time.Sleep(100 * time.Millisecond)
+
+	d, err := NewConn("kcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli, err := d.Dial(addr)
+	if err != nil {
+		t.Fatalf("kcp dial: %v", err)
+	}
+	defer cli.Close()
+	if atomic.LoadInt32(ctrl) == 0 {
+		t.Fatal("dialer Control callback not invoked for kcp Dial")
+	}
+	if got := cli.Info(); !strings.Contains(got, "<--kcp-->") {
+		t.Fatalf("dialed Info = %q", got)
+	}
+
+	msg := []byte("kcp-loopback-016")
+	if _, err := cli.Write(msg); err != nil {
+		t.Fatalf("kcp write: %v", err)
+	}
+	_ = cli.(*KcpConn).sess.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(cli, buf); err != nil {
+		t.Fatalf("kcp echo read: %v", err)
+	}
+	if string(buf) != string(msg) {
+		t.Fatalf("kcp echo mismatch: %q", buf)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("kcp server goroutine did not finish")
+	}
+}
+
+func TestHardenKcpListenAndDialErrors(t *testing.T) {
+	// Port out of range: ListenWithOptions fails to bind.
+	if _, err := (&KcpConn{}).Listen("127.0.0.1:99999"); err == nil {
+		t.Fatal("kcp Listen on invalid port should fail")
+	}
+	// Port out of range fails address resolution before any socket binds.
+	if _, err := (&KcpConn{}).Dial("127.0.0.1:99999"); err == nil {
+		t.Fatal("kcp Dial to invalid port should fail")
+	}
+	// Accept after listener Close must surface the listener error.
+	ln := hardenKcpListen(t)
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ln.Accept(); err == nil {
+		t.Fatal("kcp Accept after Close should fail")
+	}
+}
+
+// White-box coverage for the dial-abort ownership state machine that cannot
+// be driven deterministically over the wire:
+//   - Close while a Dial is in flight cancels its context and closes the
+//     in-flight owned resource (kcpconn.go Close branches);
+//   - finishDial only succeeds with a live context while ownership is held.
+func TestHardenKcpCloseAbortAndFinishDial(t *testing.T) {
+	canceled := false
+	owned := &hardenPtrCloser{}
+	c := &KcpConn{
+		cancel:    func() { canceled = true },
+		dialOwned: owned,
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close with in-flight dial state: %v", err)
+	}
+	if !canceled || atomic.LoadInt32(&owned.closed) != 1 {
+		t.Fatalf("Close must cancel in-flight dial and close its resource: %v/%d", canceled, owned.closed)
+	}
+
+	fd := &KcpConn{}
+
+	// Ownership stolen by Close: finishDial fails and must not close the
+	// resource (Close already did).
+	want := &hardenPtrCloser{}
+	fd.dialOwned = &hardenPtrCloser{}
+	if fd.finishDial(context.Background(), want) {
+		t.Fatal("finishDial must fail when dialOwned was stolen")
+	}
+	if atomic.LoadInt32(&want.closed) != 0 {
+		t.Fatal("finishDial must not close a resource it no longer owns")
+	}
+
+	// Context canceled while still owning: fail and close the resource.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	self := &hardenPtrCloser{}
+	fd.dialOwned = self
+	if fd.finishDial(ctx2, self) {
+		t.Fatal("finishDial must fail on canceled context")
+	}
+	if atomic.LoadInt32(&self.closed) != 1 {
+		t.Fatal("finishDial must close the owned resource on cancel")
+	}
+
+	// Happy path: live context, still owner -> success, state cleared, and
+	// the resource stays open for the delivered conn.
+	happy := &hardenPtrCloser{}
+	fd.dialOwned = happy
+	if !fd.finishDial(context.Background(), happy) {
+		t.Fatal("finishDial must succeed on the happy path")
+	}
+	if fd.dialOwned != nil || fd.cancel != nil {
+		t.Fatal("finishDial must clear dial state")
+	}
+	if atomic.LoadInt32(&happy.closed) != 0 {
+		t.Fatal("happy path must hand the open resource to the delivered conn")
+	}
+}
+
+// ---------- quic loopback ----------
+
+func hardenQuicListen(t *testing.T) Conn {
+	t.Helper()
+	l, err := NewConn("quic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := l.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("quic listen: %v", err)
+	}
+	return ln
+}
+
+// hardenQuicEvict forces the shared client session for key out of the
+// process cache so a test leaves no warm session behind.
+func hardenQuicEvict(key string) {
+	if v, ok := quicClientSessionCache.Load(key); ok {
+		v.(*quicClientSession).idleEvict()
+		quicClientSessionCache.CompareAndDelete(key, v)
+	}
+}
+
+// hardenQuicEchoServer accepts up to n conns and echoes one 16-byte message
+// on each.
+func hardenQuicEchoServer(t *testing.T, ln Conn, n int) {
+	t.Helper()
+	go func() {
+		for i := 0; i < n; i++ {
+			srv, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(srv Conn) {
+				defer srv.Close()
+				buf := make([]byte, 16)
+				if _, err := io.ReadFull(srv, buf); err != nil {
+					return
+				}
+				_, _ = srv.Write(buf)
+				time.Sleep(100 * time.Millisecond)
+			}(srv)
+		}
+	}()
+}
+
+func hardenQuicEcho(t *testing.T, cli Conn) {
+	t.Helper()
+	msg := []byte("quic-loopback!!!")
+	if _, err := cli.Write(msg); err != nil {
+		t.Fatalf("quic write: %v", err)
+	}
+	_ = cli.(*QuicConn).stream.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(cli, buf); err != nil {
+		t.Fatalf("quic echo read: %v", err)
+	}
+	if string(buf) != string(msg) {
+		t.Fatalf("quic echo mismatch: %q", buf)
+	}
+}
+
+func TestHardenQuicLoopbackEchoAndInfo(t *testing.T) {
+	if (&QuicConn{}).Name() != "quic" {
+		t.Fatal("QuicConn.Name")
+	}
+	ctrl, restore := hardenRegisterController()
+	defer restore()
+
+	ln := hardenQuicListen(t)
+	defer ln.Close()
+	addr := ln.(*QuicConn).listener.Addr().String()
+	if got := ln.Info(); got != "quic--"+addr {
+		t.Fatalf("listener Info = %q", got)
+	}
+	hardenQuicEchoServer(t, ln, 1)
+	time.Sleep(100 * time.Millisecond)
+
+	d, err := NewConn("quic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli, err := d.Dial(addr)
+	if err != nil {
+		t.Fatalf("quic dial: %v", err)
+	}
+	defer func() {
+		_ = cli.Close()
+		hardenQuicEvict(addr)
+	}()
+	if atomic.LoadInt32(ctrl) == 0 {
+		t.Fatal("dialer Control callback not invoked for quic Dial")
+	}
+	if got := cli.Info(); !strings.Contains(got, "<--quic-->") {
+		t.Fatalf("dialed Info = %q", got)
+	}
+	hardenQuicEcho(t, cli)
+}
+
+// Closing the last conn keeps the session warm (idle timer armed); the next
+// Dial must reuse that session, stop the idle timer, and carry data on a new
+// stream without a second handshake.
+func TestHardenQuicWarmSessionReuse(t *testing.T) {
+	ln := hardenQuicListen(t)
+	defer ln.Close()
+	addr := ln.(*QuicConn).listener.Addr().String()
+	hardenQuicEchoServer(t, ln, 2)
+	time.Sleep(100 * time.Millisecond)
+
+	d1, err := NewConn("quic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli1, err := d1.Dial(addr)
+	if err != nil {
+		t.Fatalf("first dial: %v", err)
+	}
+	qc1 := cli1.(*QuicConn)
+	cs := qc1.clientSess
+	sharedSession := qc1.qsession
+	hardenQuicEcho(t, cli1)
+	if err := cli1.Close(); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+	cs.mu.Lock()
+	if cs.refs != 0 || cs.idleTimer == nil || cs.closed {
+		cs.mu.Unlock()
+		t.Fatal("warm session must have refs=0 with idle timer armed after Close")
+	}
+	cs.mu.Unlock()
+
+	d2, err := NewConn("quic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli2, err := d2.Dial(addr)
+	if err != nil {
+		t.Fatalf("reuse dial: %v", err)
+	}
+	defer func() {
+		_ = cli2.Close()
+		hardenQuicEvict(addr)
+	}()
+	qc2 := cli2.(*QuicConn)
+	if qc2.qsession != sharedSession || qc2.clientSess != cs {
+		t.Fatal("second Dial must reuse the cached QUIC session")
+	}
+	cs.mu.Lock()
+	if cs.refs != 1 || cs.idleTimer != nil || cs.closed {
+		cs.mu.Unlock()
+		t.Fatalf("reused session refs/timer/closed = %d/%v/%v, want 1/nil/false", cs.refs, cs.idleTimer, cs.closed)
+	}
+	cs.mu.Unlock()
+	hardenQuicEcho(t, cli2)
+}
+
+// Immediate release (dial failure/abort path) shuts the session and its UDP
+// socket down right away and evicts the cache entry.
+func TestHardenQuicImmediateRelease(t *testing.T) {
+	ln := hardenQuicListen(t)
+	defer ln.Close()
+	addr := ln.(*QuicConn).listener.Addr().String()
+	hardenQuicEchoServer(t, ln, 1)
+	time.Sleep(100 * time.Millisecond)
+
+	d, err := NewConn("quic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli, err := d.Dial(addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	qc := cli.(*QuicConn)
+	cs := qc.clientSess
+	pconn := cs.pconn
+
+	cs.release(true)
+	if !cs.closed {
+		t.Fatal("immediate release must mark the session closed")
+	}
+	if _, ok := quicClientSessionCache.Load(addr); ok {
+		t.Fatal("immediate release must evict the cache entry")
+	}
+	if _, err := pconn.WriteTo([]byte("z"), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}); err == nil {
+		t.Fatal("immediate release must close the dial-side PacketConn")
+	}
+	// Closing the delivered conn afterwards must stay safe: refs clamp at 0
+	// and no second shutdown runs.
+	if err := cli.Close(); err != nil {
+		t.Fatalf("close after immediate release: %v", err)
+	}
+}
+
+// Legacy/defensive close path for a non-cached direct conn owns its session
+// and UDP socket and must close both.
+func TestHardenQuicLegacyClosePath(t *testing.T) {
+	ln := hardenQuicListen(t)
+	defer ln.Close()
+	addr := ln.(*QuicConn).listener.Addr().String()
+	hardenQuicEchoServer(t, ln, 1)
+	time.Sleep(100 * time.Millisecond)
+
+	d, err := NewConn("quic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli, err := d.Dial(addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	qc := cli.(*QuicConn)
+	cs := qc.clientSess
+	session := qc.qsession
+	pconn := cs.pconn
+
+	// Detach from the cache-backed ownership model: the cache entry goes
+	// away and the conn itself takes ownership of session + socket.
+	quicClientSessionCache.CompareAndDelete(addr, cs)
+	qc.clientSess = nil
+	qc.pconn = pconn
+
+	if err := cli.Close(); err != nil {
+		t.Fatalf("legacy close: %v", err)
+	}
+	if session.Context().Err() == nil {
+		t.Fatal("legacy close must shut the QUIC session down")
+	}
+	if _, err := pconn.WriteTo([]byte("z"), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}); err == nil {
+		t.Fatal("legacy close must close the owned PacketConn")
+	}
+
+	// Error arms of the legacy teardown: the already-dead session is closed
+	// once more and a PacketConn whose Close fails surfaces as the result.
+	again := &QuicConn{qsession: session, pconn: hardenFailPacketConn{}}
+	if err := again.Close(); err == nil {
+		t.Fatal("legacy close with failing resources must return an error")
+	}
+	// Nil session + failing PacketConn: the socket error is reported directly.
+	onlyPconn := &QuicConn{pconn: hardenFailPacketConn{}}
+	if err := onlyPconn.Close(); err == nil || err.Error() != "harden fail close" {
+		t.Fatalf("legacy close pconn error = %v", err)
+	}
+}
+
+// hardenFailPacketConn is a PacketConn stub whose every op fails, used to
+// exercise legacy teardown error propagation.
+type hardenFailPacketConn struct{}
+
+func (hardenFailPacketConn) ReadFrom([]byte) (int, net.Addr, error) {
+	return 0, nil, errors.New("harden fail read")
+}
+func (hardenFailPacketConn) WriteTo([]byte, net.Addr) (int, error) {
+	return 0, errors.New("harden fail write")
+}
+func (hardenFailPacketConn) Close() error                     { return errors.New("harden fail close") }
+func (hardenFailPacketConn) LocalAddr() net.Addr              { return nil }
+func (hardenFailPacketConn) SetDeadline(time.Time) error      { return nil }
+func (hardenFailPacketConn) SetReadDeadline(time.Time) error  { return nil }
+func (hardenFailPacketConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestHardenQuicListenAndDialErrors(t *testing.T) {
+	// TLS config is generated first (cannot fail locally); binding an
+	// out-of-range port must surface the quic listen error.
+	if _, err := (&QuicConn{}).Listen("127.0.0.1:99999"); err == nil {
+		t.Fatal("quic Listen on invalid port should fail")
+	}
+	// Address resolution fails before any handshake.
+	if _, err := (&QuicConn{}).Dial("127.0.0.1:99999"); err == nil {
+		t.Fatal("quic Dial to invalid port should fail")
+	}
+	// Accept after listener Close must return the close error.
+	ln := hardenQuicListen(t)
+	go func() { _, _ = ln.Accept() }()
+	time.Sleep(50 * time.Millisecond)
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ln.Accept(); err == nil {
+		t.Fatal("quic Accept after Close should fail")
+	}
+}
+
+// White-box: Close during an in-flight Dial cancels and closes the owned
+// abort closer; newOwnedCloser wraps real closers (not just nil receivers).
+func TestHardenQuicCloseInflightAndOwnedCloser(t *testing.T) {
+	canceled := false
+	ownedClosed := false
+	c := &QuicConn{
+		cancel:    func() { canceled = true },
+		dialOwned: newOwnedCloser(closerFunc(func() error { ownedClosed = true; return nil })),
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close with in-flight dial state: %v", err)
+	}
+	if !canceled || !ownedClosed {
+		t.Fatalf("Close must cancel in-flight dial and close its resource: %v/%v", canceled, ownedClosed)
+	}
+
+	realClosed := false
+	o := newOwnedCloser(closerFunc(func() error { realClosed = true; return nil }))
+	if err := o.Close(); err != nil || !realClosed {
+		t.Fatalf("ownedCloser with real closer: closed=%v err=%v", realClosed, err)
+	}
+}
+
+// When OpenStreamSync cannot complete because the server-side bidirectional
+// stream limit is saturated on the shared session and the session dies
+// underneath the Dial, Dial returns the open error and its own deferred
+// cleanup must invoke the abort closer (release(true)) instead of leaking
+// the reference; release(true) on the sole owner shuts down and evicts the
+// cache entry immediately.
+func TestHardenQuicDialAbortedAtStreamOpen(t *testing.T) {
+	ctrl, restore := hardenRegisterController()
+	defer restore()
+	ln := hardenQuicListen(t)
+	defer ln.Close()
+	addr := ln.(*QuicConn).listener.Addr().String()
+	defer hardenQuicEvict(addr)
+
+	cli, err := (&QuicConn{}).Dial(addr)
+	if err != nil {
+		t.Fatalf("warm dial: %v", err)
+	}
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if atomic.LoadInt32(ctrl) == 0 {
+		t.Fatal("dialer Control callback not invoked")
+	}
+	v, ok := quicClientSessionCache.Load(udpAddr.String())
+	if !ok {
+		t.Fatal("warm session not cached")
+	}
+	cs := v.(*quicClientSession)
+	// Saturate the server-advertised bidirectional stream limit adaptively:
+	// open until the next grant does not arrive (quic-go reserves one slot,
+	// so the exact count is version-dependent).
+	var opened []io.Closer
+	for {
+		probeCtx, probeCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		s, oerr := cs.session.OpenStreamSync(probeCtx)
+		probeCancel()
+		if oerr != nil {
+			if !errors.Is(oerr, context.DeadlineExceeded) {
+				t.Fatalf("unexpected saturation error: %v", oerr)
+			}
+			break
+		}
+		opened = append(opened, s)
+	}
+	if len(opened) == 0 {
+		t.Fatal("expected to open at least one stream")
+	}
+	defer func() {
+		for _, s := range opened {
+			_ = s.Close()
+		}
+	}()
+	// Drop the warm conn: refs -> 0 and the idle timer arms while the session
+	// (with its saturated streams) stays cached for reuse.
+	if err := cli.Close(); err != nil {
+		t.Fatalf("warm conn close: %v", err)
+	}
+
+	c := &QuicConn{}
+	done := make(chan struct{})
+	var dconn Conn
+	var derr error
+	go func() {
+		dconn, derr = c.Dial(addr)
+		close(done)
+	}()
+	time.Sleep(200 * time.Millisecond)
+	// Kill the shared session underneath the blocked Dial (server restart,
+	// idle eviction, etc.): OpenStreamSync fails on its own, so Dial's own
+	// deferred cleanup -- not Close() -- must close the abort closer.
+	cs.shutdown()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream-open dial did not return after session shutdown")
+	}
+	// Dial already cleared its in-flight state; Close afterwards is a no-op.
+	if err := c.Close(); err != nil {
+		t.Fatalf("close after finished dial: %v", err)
+	}
+	if derr == nil {
+		_ = dconn.Close()
+		t.Fatal("dial blocked on OpenStreamSync must fail after session shutdown")
+	}
+	if dconn != nil {
+		t.Fatal("failed dial must return nil conn")
+	}
+	if _, ok := quicClientSessionCache.Load(udpAddr.String()); ok {
+		t.Fatal("aborted sole-owner dial must release(true) and evict the session")
+	}
+	cs.mu.Lock()
+	closed := cs.closed
+	refs := cs.refs
+	cs.mu.Unlock()
+	if !closed || refs != 0 {
+		t.Fatalf("session after abort: closed=%v refs=%d", closed, refs)
+	}
+}
+
+// A Dial stuck in the QUIC handshake against a non-QUIC UDP peer is aborted
+// by Close: acquireQuicSession returns the dial error, closes the dialing
+// PacketConn, and never caches a session.
+func TestHardenQuicDialHandshakeAborted(t *testing.T) {
+	// Local UDP blackhole: accepts and discards datagrams, never speaks QUIC.
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("blackhole listen: %v", err)
+	}
+	defer pc.Close()
+	addr := pc.LocalAddr().String()
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			if _, _, rerr := pc.ReadFromUDP(buf); rerr != nil {
+				return
+			}
+		}
+	}()
+
+	c := &QuicConn{}
+	done := make(chan struct{})
+	var conn Conn
+	var dialErr error
+	go func() {
+		conn, dialErr = c.Dial(addr)
+		close(done)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if err := c.Close(); err != nil {
+		t.Fatalf("close during dial: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("aborted QUIC dial did not return within 5s")
+	}
+	if dialErr == nil {
+		_ = conn.Close()
+		t.Fatal("aborted QUIC dial must fail")
+	}
+	if conn != nil {
+		t.Fatal("failed dial must return a nil conn")
+	}
+	if _, ok := quicClientSessionCache.Load(addr); ok {
+		t.Fatal("dead session must not be cached")
 	}
 }
