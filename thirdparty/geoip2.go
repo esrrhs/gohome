@@ -49,35 +49,27 @@ func LoadGeoip2(file string) error {
 	mu.Lock()
 	old := gdb
 	gdb = db
-	mu.Unlock()
-
+	// 必须在写锁内 Close：linux/darwin 的 geoip2 reader 走 mmap，
+	// Close 即 munmap。锁外关闭会与持 RLock 的在途 City() 解码竞争，
+	// 直接把查询打成 SIGBUS/SIGSEGV（Go 级 -race 看不到，崩溃栈才可见）。
 	if old != nil {
 		_ = old.Close()
 	}
+	mu.Unlock()
 	return nil
 }
 
 // CloseGeoip2 releases the loaded database.
 func CloseGeoip2() error {
 	mu.Lock()
-	old := gdb
-	gdb = nil
-	mu.Unlock()
-
-	if old == nil {
+	defer mu.Unlock()
+	// 同 LoadGeoip2：在写锁内 munmap，等在途查询先走完。
+	if gdb == nil {
 		return nil
 	}
-	return old.Close()
-}
-
-// reader returns the loaded reader, or ErrGeoipNotLoaded.
-func reader() (*geoip2.Reader, error) {
-	mu.RLock()
-	defer mu.RUnlock()
-	if gdb == nil {
-		return nil, ErrGeoipNotLoaded
-	}
-	return gdb, nil
+	err := gdb.Close()
+	gdb = nil
+	return err
 }
 
 // geoCountry is the subset of the MaxMind country record the package exposes.
@@ -92,9 +84,12 @@ type geoCountry struct {
 // Country() because geoip2-golang maps GeoLite2-Country onto isCity|isCountry,
 // so both work; City() additionally covers City databases.
 func country(ipaddr string) (geoCountry, error) {
-	r, err := reader()
-	if err != nil {
-		return geoCountry{}, err
+	// RLock 必须覆盖整个 City() 解码：Load/Close 在写锁内 munmap，
+	// 只取指针再锁外查询会和热重载竞争（mmap 段被解除映射）。
+	mu.RLock()
+	defer mu.RUnlock()
+	if gdb == nil {
+		return geoCountry{}, ErrGeoipNotLoaded
 	}
 
 	ip := net.ParseIP(ipaddr)
@@ -102,7 +97,7 @@ func country(ipaddr string) (geoCountry, error) {
 		return geoCountry{}, errors.New("ip " + ipaddr + " ParseIP nil")
 	}
 
-	record, err := r.City(ip)
+	record, err := gdb.City(ip)
 	if err != nil {
 		return geoCountry{}, err
 	}
