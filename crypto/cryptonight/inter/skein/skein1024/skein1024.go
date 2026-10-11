@@ -79,13 +79,16 @@ func (s *hashFunc) Sum(b []byte) []byte {
 
 	var out [threefish.BlockSize1024]byte
 	var ctr uint64
+	start := len(b)
 	for i := s0.hashsize; i > 0; i -= threefish.BlockSize1024 {
 		s0.output(&out, ctr)
 		ctr++
 		b = append(b, out[:]...)
 	}
 
-	return b[:s0.hashsize]
+	// hash.Hash 契约：返回值必须保留调用方传入的前缀 b，因此末尾切片
+	// 起点是 start 而非 0（hashsize 不足整块时同时裁掉最后一个输出块的余尾）。
+	return b[:start+s0.hashsize]
 }
 
 func (s *hashFunc) update(block *[16]uint64) {
