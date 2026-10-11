@@ -65,7 +65,9 @@ func (c *DNSCache) Get(key string) (*dns.Msg, bool) {
 	return resp, true
 }
 
-// decayTTL 把消息里所有记录的 TTL 收敛到不超过 remaining
+// decayTTL 把消息里所有记录的 TTL 收敛到不超过 remaining。
+// OPT（EDNS0）是元记录：其 Ttl 字段实际编码 extended rcode/版本/标志
+// （如 DNSSEC DO 位 0x8000），没有 TTL 语义，绝不能改写。
 func decayTTL(msg *dns.Msg, remaining time.Duration) {
 	if msg == nil || remaining <= 0 {
 		return
@@ -74,21 +76,17 @@ func decayTTL(msg *dns.Msg, remaining time.Duration) {
 	if secs == 0 {
 		secs = 1
 	}
-	for _, rr := range msg.Answer {
-		if h := rr.Header(); h != nil && h.Ttl > secs {
-			h.Ttl = secs
+	clamp := func(rrs []dns.RR) {
+		for _, rr := range rrs {
+			h := rr.Header()
+			if h != nil && h.Rrtype != dns.TypeOPT && h.Ttl > secs {
+				h.Ttl = secs
+			}
 		}
 	}
-	for _, rr := range msg.Ns {
-		if h := rr.Header(); h != nil && h.Ttl > secs {
-			h.Ttl = secs
-		}
-	}
-	for _, rr := range msg.Extra {
-		if h := rr.Header(); h != nil && h.Ttl > secs {
-			h.Ttl = secs
-		}
-	}
+	clamp(msg.Answer)
+	clamp(msg.Ns)
+	clamp(msg.Extra)
 }
 
 // Set 存入缓存，根据 Msg Answer 中的最小 TTL 设置过期时间
@@ -112,6 +110,16 @@ func (c *DNSCache) Set(key string, msg *dns.Msg) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// 同名 key 刷新只是替换已有条目，不增加条目数，不触发驱逐；
+	// 否则满容时的每次刷新都会误删一个无关邻居，使工作集持续缩水。
+	if _, exists := c.items[key]; exists {
+		c.items[key] = &Entry{
+			Msg:       msg.Copy(),
+			ExpiresAt: time.Now().Add(time.Duration(minTTL) * time.Second),
+		}
+		return
+	}
 
 	// 简易容量控制：超容时随手清理一个过期或随机项
 	if len(c.items) >= c.capacity {
