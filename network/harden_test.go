@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -1563,6 +1564,122 @@ func TestHardenKcpCloseAbortAndFinishDial(t *testing.T) {
 	}
 	if atomic.LoadInt32(&happy.closed) != 0 {
 		t.Fatal("happy path must hand the open resource to the delivered conn")
+	}
+}
+
+// A Close landing while Dial is parked inside the UDP bind deterministically
+// hits the post-bind cancel window: Go's ListenConfig keeps running the
+// Control callback after the dial context is canceled (a canceled listener
+// bind still succeeds), so the abort must be caught by Dial's own ctx.Err()
+// check right after setDialOwned, and Dial's deferred cleanup -- not Close,
+// which ran while dialOwned was still nil -- has to close the new socket.
+func TestHardenKcpDialAbortDuringBind(t *testing.T) {
+	old := gControlOnConnSetup
+	defer func() { gControlOnConnSetup = old }()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	RegisterDialerController(func(network, address string, c syscall.RawConn) error {
+		once.Do(func() { close(entered) })
+		<-release
+		return nil
+	})
+
+	c := &KcpConn{}
+	type dialResult struct {
+		conn Conn
+		err  error
+	}
+	result := make(chan dialResult, 1)
+	go func() {
+		conn, err := c.Dial("127.0.0.1:9")
+		result <- dialResult{conn, err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("Control callback not entered within 2s")
+	}
+	// Dial is parked in bind: cancel is installed but dialOwned is still nil.
+	if err := c.Close(); err != nil {
+		t.Fatalf("close during bind: %v", err)
+	}
+	close(release)
+	select {
+	case r := <-result:
+		if r.err == nil {
+			_ = r.conn.Close()
+			t.Fatal("Dial must fail when aborted during bind")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Dial did not return within 2s after bind release")
+	}
+}
+
+// A dialer Control callback that rejects the socket (firewall-style policy
+// failure) must surface from ListenPacket: Dial returns the bind error before
+// any dial-owned resource is registered, so no resource leaks and no abort.
+func TestHardenKcpDialControllerRejectsBind(t *testing.T) {
+	old := gControlOnConnSetup
+	defer func() { gControlOnConnSetup = old }()
+	RegisterDialerController(func(network, address string, c syscall.RawConn) error {
+		return errors.New("harden control reject")
+	})
+
+	conn, err := (&KcpConn{}).Dial("127.0.0.1:9")
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("Dial must fail when the Control callback rejects the bind")
+	}
+	if conn != nil {
+		t.Fatal("rejected bind must return a nil conn")
+	}
+}
+
+// The narrow cancel windows around ResolveUDPAddr/NewConn/finishDial have no
+// blocking hook, so spinning Close callers race a strictly sequential stream
+// of Dials. Aborting an in-flight Dial is the documented contract guarded by
+// dialMu, hence every outcome is legal: the test only asserts termination and
+// cleanup (and is race-clean) while best-effort covering the canceled
+// branches. kcp-go NewConn never blocks on a handshake, so a dead remote is
+// cheap and deterministic.
+func TestHardenKcpDialCancelWindowHammer(t *testing.T) {
+	const dialCount = 4000
+	const closerCount = 6
+	c := &KcpConn{}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < closerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = c.Close()
+				}
+			}
+		}()
+	}
+	var aborted, delivered int
+	for i := 0; i < dialCount; i++ {
+		conn, err := c.Dial("127.0.0.1:9")
+		if err != nil {
+			aborted++
+			continue
+		}
+		delivered++
+		_ = conn.Close() // io.ErrClosedPipe if Close stole it meanwhile: ignored
+	}
+	close(stop)
+	wg.Wait()
+	t.Logf("kcp cancel hammer: %d dials, %d delivered, %d aborted",
+		dialCount, delivered, aborted)
+	if delivered+aborted != dialCount {
+		t.Fatal("every Dial must finish exactly once")
 	}
 }
 
