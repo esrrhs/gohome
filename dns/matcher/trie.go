@@ -126,8 +126,10 @@ func (t *DomainTrie) LoadFromReader(r io.Reader) (int, error) {
 			parts := strings.Split(line, "/")
 			if len(parts) >= 2 && parts[1] != "" {
 				domains = append(domains, parts[1])
-				continue
 			}
+			// 已识别为 dnsmasq 行：域名段为空（如 "server=/"）时
+			// 直接跳过，不能再落到下面被当成普通域名入库
+			continue
 		}
 		// 普通域名行 (若带有空格或额外注释，取第一列)
 		fields := strings.Fields(line)
