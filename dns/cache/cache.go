@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -22,6 +23,8 @@ type DNSCache struct {
 	items    map[string]*Entry
 	sfGroup  singleflight.Group
 	capacity int
+	hits     atomic.Int64 // Get 命中（含未过期条目）次数
+	misses   atomic.Int64 // Get 未命中（含过期淘汰）次数
 }
 
 // NewDNSCache 创建 DNSCache
@@ -48,6 +51,7 @@ func (c *DNSCache) Get(key string) (*dns.Msg, bool) {
 	e, ok := c.items[key]
 	if !ok {
 		c.mu.RUnlock()
+		c.misses.Add(1)
 		return nil, false
 	}
 	if time.Now().After(e.ExpiresAt) {
@@ -55,6 +59,7 @@ func (c *DNSCache) Get(key string) (*dns.Msg, bool) {
 		c.mu.Lock()
 		delete(c.items, key)
 		c.mu.Unlock()
+		c.misses.Add(1) // 过期未命中同样计入 miss
 		return nil, false
 	}
 	resp := e.Msg.Copy()
@@ -62,8 +67,15 @@ func (c *DNSCache) Get(key string) (*dns.Msg, bool) {
 	c.mu.RUnlock()
 
 	decayTTL(resp, remaining)
+	c.hits.Add(1)
 	return resp, true
 }
+
+// Hits 返回缓存命中总次数（进程生命周期内累计，Clear 不清零）。
+func (c *DNSCache) Hits() int64 { return c.hits.Load() }
+
+// Misses 返回缓存未命中总次数（含条目过期后的重新查询）。
+func (c *DNSCache) Misses() int64 { return c.misses.Load() }
 
 // decayTTL 把消息里所有记录的 TTL 收敛到不超过 remaining。
 // OPT（EDNS0）是元记录：其 Ttl 字段实际编码 extended rcode/版本/标志
