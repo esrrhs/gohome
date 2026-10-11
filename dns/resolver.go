@@ -501,6 +501,12 @@ func (r *StandardResolver) queryDirect(ctx context.Context, req *dns.Msg) (*dns.
 	upstreams := r.directUpstreams
 	r.mu.RUnlock()
 
+	if len(upstreams) == 0 {
+		// queryRemote 有同类守卫而这里没有：竞速退化路径在直连列表为空时
+		// 会落到下方 fmt.Errorf("%w", nil)，给调用方吐出 "%!w(<nil>)" 垃圾串。
+		return nil, errors.New("no direct upstreams configured")
+	}
+
 	var lastErr error
 	for _, u := range upstreams {
 		resp, err := u.Exchange(ctx, req)
@@ -509,7 +515,10 @@ func (r *StandardResolver) queryDirect(ctx context.Context, req *dns.Msg) (*dns.
 		}
 		lastErr = err
 	}
-	return nil, fmt.Errorf("all direct upstreams failed: %w", lastErr)
+	if lastErr != nil {
+		return nil, fmt.Errorf("all direct upstreams failed: %w", lastErr)
+	}
+	return nil, errors.New("all direct upstreams returned empty response")
 }
 
 func (r *StandardResolver) queryRemote(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
@@ -530,7 +539,10 @@ func (r *StandardResolver) queryRemote(ctx context.Context, req *dns.Msg) (*dns.
 		}
 		lastErr = err
 	}
-	return nil, fmt.Errorf("all remote upstreams failed: %w", lastErr)
+	if lastErr != nil {
+		return nil, fmt.Errorf("all remote upstreams failed: %w", lastErr)
+	}
+	return nil, errors.New("all remote upstreams returned empty response")
 }
 
 // queryParallel 并发查询国内与海外上游
