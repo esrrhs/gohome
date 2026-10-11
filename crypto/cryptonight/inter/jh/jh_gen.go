@@ -87,11 +87,12 @@ func (s *state) Write(data []byte) (n int, err error) {
 
 	// There is data in the buffer, but the incoming data is insufficient for a full block
 	if s.datasizeInBuffer > 0 && s.datasizeInBuffer+databitlen < 512 {
-		if databitlen&7 == 0 {
-			copy(s.buffer[s.datasizeInBuffer>>3:], data[:64-(s.datasizeInBuffer>>3)])
-		} else {
-			copy(s.buffer[s.datasizeInBuffer>>3:], data[:64-(s.datasizeInBuffer>>3)+1])
-		}
+		// Write 只接收整字节（databitlen 恒为 8 的倍数），且本分支保证
+		// 缓冲与新数据合计不足一块：直接拷入全部新数据即可。原实现按
+		// 64-bufBytes 定长切片，当新数据比缺口还短时（如缓冲 31 字节、
+		// 再写入 32 字节）会切出 data[:33] 导致越界 panic；多余的尾部
+		// 字节在 Sum 填充时本来就会被清零，绝不能在这里越界读取。
+		copy(s.buffer[s.datasizeInBuffer>>3:], data)
 		s.datasizeInBuffer += databitlen
 		databitlen = 0
 	}
@@ -128,6 +129,12 @@ func (s *state) Write(data []byte) (n int, err error) {
 
 // Sum pads the message, process the padded block(s), truncate the hash value H to obtain the message digest
 func (s *state) Sum(b []byte) []byte {
+	// hash.Hash 契约：Sum 不得改变底层哈希状态。原实现直接在 s 上补 0x80、
+	// 追加长度块并执行 f8，导致连续两次 Sum 结果不同，且 Sum 后继续 Write
+	// 得到的摘要也是错的。这里在副本上完成填充与收尾。
+	s0 := *s
+	s = &s0
+
 	var i uint64
 
 	if s.databitlen&0x1ff == 0 {
