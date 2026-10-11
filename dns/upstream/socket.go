@@ -46,6 +46,11 @@ func NewSocketUpstream(addr string) (*SocketUpstream, error) {
 	if host == "" {
 		return nil, fmt.Errorf("invalid upstream address %q: empty host", addr)
 	}
+	if port == "" {
+		// "1.2.3.4:" 这种空端口会被 LookupPort 当成 0 接受，
+		// 构造出实际不可用的上游，必须在构造期拦下
+		return nil, fmt.Errorf("invalid upstream address %q: empty port", addr)
+	}
 	if _, err := net.LookupPort(network, port); err != nil {
 		return nil, fmt.Errorf("invalid upstream address %q: bad port %q", addr, port)
 	}
