@@ -26,14 +26,16 @@ func (g *GeoDB) Open(filePath string) error {
 		return err
 	}
 
+	// 旧库必须在写锁内回收：GetCountryCode 全程持 RLock 查询，
+	// 锁外 Close（mmap 平台即 munmap）会与仍在查询旧库的 goroutine
+	// 竞争，可能读到已解映射的内存导致 SIGBUS。
 	g.mu.Lock()
 	oldDB := g.db
 	g.db = db
-	g.mu.Unlock()
-
 	if oldDB != nil {
 		_ = oldDB.Close()
 	}
+	g.mu.Unlock()
 	return nil
 }
 
@@ -55,15 +57,16 @@ func (g *GeoDB) GetCountryCode(ip net.IP) (string, error) {
 		return "", errors.New("nil ip")
 	}
 
+	// RLock 必须覆盖整个 Country()：旧库的 Close/munmap 由 Open/Close 在
+	// 写锁保护下执行，锁释放后再查询会与解映射竞争。
 	g.mu.RLock()
-	db := g.db
-	g.mu.RUnlock()
+	defer g.mu.RUnlock()
 
-	if db == nil {
+	if g.db == nil {
 		return "", errors.New("geodb not loaded")
 	}
 
-	record, err := db.Country(ip)
+	record, err := g.db.Country(ip)
 	if err != nil {
 		return "", err
 	}
@@ -79,8 +82,13 @@ func (g *GeoDB) GetCountryCodeStr(ipStr string) (string, error) {
 	return g.GetCountryCode(ip)
 }
 
-// IsCountry 快速判断 IP 是否属于目标国家代码
+// IsCountry 快速判断 IP 是否属于目标国家代码。
+// targetCode 为空时一律 false：库中无归属地记录的 IP 会返回空 code，
+// 不能让空配置把所有未知 IP 都判成命中。
 func (g *GeoDB) IsCountry(ip net.IP, targetCode string) bool {
+	if targetCode == "" {
+		return false
+	}
 	code, err := g.GetCountryCode(ip)
 	if err != nil {
 		return false
