@@ -3,12 +3,14 @@ package common
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	randv2 "math/rand/v2"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/esrrhs/gohome/loggo"
+	"github.com/klauspost/compress/zstd"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
@@ -774,5 +777,195 @@ func TestHardenProtobufRoundtrip(t *testing.T) {
 	}
 	if err, _ := LoadProtobuf(bad); err == nil {
 		t.Fatal("corrupt descriptor set must error")
+	}
+}
+
+// ---------- 第二轮：残余错误/边界分支 ----------
+
+// 本地 RoundTripper 桩，替换包级 dohClient，全程不触外网：
+// 覆盖请求失败、JSON 解码失败、空结果与成功解析四个分支。
+type stubRoundTripper func(req *http.Request) (*http.Response, error)
+
+func (f stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestHardenResolveDomainToIPStubs(t *testing.T) {
+	orig := dohClient
+	t.Cleanup(func() { dohClient = orig })
+
+	mkResp := func(body string) *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}
+	}
+
+	// 传输层失败必须包装成 DoH request failed
+	dohClient = &http.Client{Transport: stubRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "223.5.5.5" {
+			t.Errorf("unexpected DoH host %q", req.URL.Host)
+		}
+		return nil, errors.New("dial boom")
+	})}
+	if _, err := ResolveDomainToIP("example.com"); err == nil ||
+		!strings.Contains(err.Error(), "DoH request failed") {
+		t.Fatalf("transport error must be wrapped, got %v", err)
+	}
+
+	// Body 不是合法 JSON 数组
+	dohClient = &http.Client{Transport: stubRoundTripper(func(*http.Request) (*http.Response, error) {
+		return mkResp("this-is-not-json"), nil
+	})}
+	if _, err := ResolveDomainToIP("example.com"); err == nil ||
+		!strings.Contains(err.Error(), "JSON decode failed") {
+		t.Fatalf("invalid JSON must be wrapped, got %v", err)
+	}
+
+	// 合法 JSON 但记录为空
+	dohClient = &http.Client{Transport: stubRoundTripper(func(*http.Request) (*http.Response, error) {
+		return mkResp("[]"), nil
+	})}
+	if _, err := ResolveDomainToIP("empty.example"); err == nil ||
+		!strings.Contains(err.Error(), "no valid A record") {
+		t.Fatalf("empty answer must error, got %v", err)
+	}
+
+	// 正常解析取第一条
+	dohClient = &http.Client{Transport: stubRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if !strings.Contains(req.URL.RawQuery, "example.com") {
+			t.Errorf("query must carry domain, got %q", req.URL.RawQuery)
+		}
+		return mkResp(`["1.2.3.4","5.6.7.8"]`), nil
+	})}
+	got, err := ResolveDomainToIP("example.com")
+	if err != nil || got != "1.2.3.4" {
+		t.Fatalf("ResolveDomainToIP = %q, %v", got, err)
+	}
+}
+
+// Copy 源是目录：os.Open 成功，但 io.Copy 读取目录 fd 报错（darwin/linux 均 EISDIR）
+func TestHardenCopyFromDirectory(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(t.TempDir(), "dst")
+	if err := Copy(dir, dst); err == nil {
+		t.Fatal("Copy from a directory must surface the read error")
+	}
+}
+
+// StrTableLine.FromStruct：interface 类型字段持有 nil 时走 AddData("") 分支
+func TestHardenStrTableLineNilInterface(t *testing.T) {
+	type row struct {
+		Any interface{}
+		N   int
+	}
+	tbl := &StrTable{}
+	tbl.FromStruct(&row{}, nil)
+	line := &StrTableLine{}
+	line.FromStruct(tbl, &row{N: 5}, nil)
+	if len(line.cols) != 2 || line.cols[0] != "" || line.cols[1] != "5" {
+		t.Fatalf("nil interface field must render empty string, got %#v", line.cols)
+	}
+}
+
+// Gzip 两种预设级别的往返（错误分支对应级别常量非法，当前为不可达死分支）
+func TestHardenGzipLevelsRoundtrip(t *testing.T) {
+	for _, src := range []string{"", "best-级别-压缩", strings.Repeat("xy", 500)} {
+		if got := GunzipString(GzipStringBestCompression(src)); got != src {
+			t.Errorf("BestCompression roundtrip mismatch for %q", src)
+		}
+		if got := GunzipString(GzipStringBestSpeed(src)); got != src {
+			t.Errorf("BestSpeed roundtrip mismatch for %q", src)
+		}
+	}
+}
+
+type errReader struct{}
+
+func (errReader) Read(p []byte) (int, error) { return 0, errors.New("entropy unavailable") }
+
+// crypto/rand 故障：UniqueId 直接消费包级 rand.Reader，读取失败必须返回 ""。
+// 注：GenerateTLSConfig 内的 rsa.GenerateKey 错误分支在 Go 1.26+ 默认
+// 忽略自定义 reader（除非 GODEBUG=cryptocustomrand=1），无法注入，判不可达。
+func TestHardenRandFailures(t *testing.T) {
+	orig := rand.Reader
+	t.Cleanup(func() { rand.Reader = orig })
+	rand.Reader = errReader{}
+
+	if got := UniqueId(); got != "" {
+		t.Fatalf("UniqueId on rand failure must return \"\", got %q", got)
+	}
+}
+
+// Rc4 并发首调：Load 未命中但 LoadOrStore 输掉竞态时必须采用赢家的 *rc4State，
+// 输出与单线程结果一致（-race 下验证）。
+func TestHardenRc4ConcurrentFirstLoad(t *testing.T) {
+	payload := []byte("concurrent-payload")
+
+	for round := 0; round < 3; round++ {
+		key := fmt.Sprintf("harden-rc4-race-%d", round)
+		// 直接用 KSA+XOR 计算期望值，避免预热 rc4States 导致走不到竞态分支
+		st := rc4KSA([]byte(key))
+		sbox := st.s
+		want := make([]byte, len(payload))
+		rc4XOR(&sbox, want, payload)
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := 0; i < 64; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				got, err := Rc4(key, payload)
+				if err != nil || !bytes.Equal(got, want) {
+					t.Errorf("concurrent Rc4 output mismatch: %v", err)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+	}
+}
+
+// 流式 zstd 帧不带 FrameContentSize，且解压结果 > zstdBufMax：
+// DeCompressDataZstd 走无 FCS 回退路径并在归还时丢弃超大 pool 缓冲重建。
+func TestHardenZstdNoFCSLargeDecode(t *testing.T) {
+	big := make([]byte, 1200<<10)
+	for i := range big {
+		big[i] = byte(i * 31)
+	}
+
+	var buf bytes.Buffer
+	enc, err := zstd.NewWriter(&buf, zstd.WithEncoderCRC(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enc.Write(big); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var hdr zstd.Header
+	if err := hdr.Decode(buf.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if hdr.HasFCS {
+		t.Fatal("streaming frame must omit FCS to exercise the fallback path")
+	}
+
+	dec, err := DeCompressDataZstd(buf.Bytes())
+	if err != nil {
+		t.Fatalf("no-FCS decode: %v", err)
+	}
+	if !bytes.Equal(dec, big) {
+		t.Fatal("no-FCS large payload roundtrip mismatch")
+	}
+	// 超大缓冲被丢弃重建后，pool 仍服务后续常规解压
+	if got, err := DeCompressDataZstd(CompressDataZstd([]byte("after-no-fcs"))); err != nil ||
+		string(got) != "after-no-fcs" {
+		t.Fatalf("pool after large no-FCS decode: %q %v", got, err)
 	}
 }
