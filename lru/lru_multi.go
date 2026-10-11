@@ -16,6 +16,10 @@ type LRUMultiCache[K comparable, V any] struct {
 }
 
 func NewLRUMultiCache[K comparable, V any](numCaches int, capacity int, ttl time.Duration) *LRUMultiCache[K, V] {
+	// numCaches<=0 会在分片取模时触发除零 panic，夹到 1
+	if numCaches <= 0 {
+		numCaches = 1
+	}
 	perSize := (capacity + numCaches - 1) / numCaches
 	caches := make([]*LRUCache[K, V], numCaches)
 	for i := 0; i < numCaches; i++ {

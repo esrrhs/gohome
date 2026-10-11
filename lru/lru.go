@@ -50,6 +50,11 @@ type entry[K comparable, V any] struct {
 }
 
 func NewLRUCache[K comparable, V any](capacity int, ttl time.Duration) *LRUCache[K, V] {
+	// capacity<=0 时，Set 的淘汰条件 Len()==capacity 恒不成立（0）
+	// 或永不成立（负数），缓存会无界增长。夹到 1 保证淘汰逻辑始终有效。
+	if capacity <= 0 {
+		capacity = 1
+	}
 	return &LRUCache[K, V]{
 		capacity: capacity,
 		cache:    make(map[K]*entry[K, V]),
