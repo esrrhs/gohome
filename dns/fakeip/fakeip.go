@@ -68,13 +68,19 @@ func NewFakeIPPool(cfgs ...Config) *FakeIPPool {
 
 	if ipnet != nil {
 		ip4 := ipnet.IP.To4()
-		base = binary.BigEndian.Uint32(ip4) + 1
+		ipNum := binary.BigEndian.Uint32(ip4)
 		ones, bits := ipnet.Mask.Size()
-		if bits == 32 && ones < 32 {
+		if bits == 32 && ones >= 32 {
+			// /32 单地址池：该地址本身即可用，无网络/广播地址保留
+			base = ipNum
+			maxOffset = 1
+		} else if bits == 32 {
+			base = ipNum + 1
 			total := uint32(1) << (32 - ones)
-			if total > 2 {
-				maxOffset = total - 2
-			}
+			// 去掉网络地址与广播地址两个偏移；ones<=31 时 total>=2 不会下溢。
+			// 不能只在 total>2 时赋值：/31 的 total=2 会让 maxOffset 保留
+			// 默认 131070，分配出的 IP 全部越出自定义网段。
+			maxOffset = total - 2
 		}
 	}
 	// 兜底：maxOffset 参与取模运算，必须大于 0
