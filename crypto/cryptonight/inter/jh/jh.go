@@ -134,11 +134,11 @@ func (s *state) Write(data []byte) (n int, err error) {
 
 	// There is data in the buffer, but the incoming data is insufficient for a full block
 	if s.datasizeInBuffer > 0 && s.datasizeInBuffer+databitlen < 512 {
-		if databitlen&7 == 0 {
-			copy(s.buffer[s.datasizeInBuffer>>3:], data[:64-(s.datasizeInBuffer>>3)])
-		} else {
-			copy(s.buffer[s.datasizeInBuffer>>3:], data[:64-(s.datasizeInBuffer>>3)+1])
-		}
+		// Write only receives whole bytes (databitlen is always a multiple of 8),
+		// and this branch guarantees buffered + new data is shorter than one block:
+		// copy all new data as-is. The old fixed-length slice panicked when the new
+		// chunk was shorter than the gap (e.g. 31 bytes buffered + 32 new bytes).
+		copy(s.buffer[s.datasizeInBuffer>>3:], data)
 		s.datasizeInBuffer += databitlen
 		databitlen = 0
 	}
@@ -175,6 +175,11 @@ func (s *state) Write(data []byte) (n int, err error) {
 
 // Sum pads the message, process the padded block(s), truncate the hash value H to obtain the message digest
 func (s *state) Sum(b []byte) []byte {
+	// hash.Hash contract: Sum must not mutate the underlying state.
+	// Finish padding on a copy so repeated Sum and Sum-then-Write stay correct.
+	s0 := *s
+	s = &s0
+
 	var i uint64
 
 	if s.databitlen&0x1ff == 0 {
