@@ -48,14 +48,18 @@ jobs:
         set -euo pipefail
         go vet $(go list ./... | grep -v '/crypto/cryptonight/inter/')
 
+    # network 包单包非 race 就要约 500s，逼近 go test 默认的 10m 上限，
+    # 机器负载稍高就会被误判成超时失败，因此显式放宽。
     - name: Test
-      run: go test -v ./...
+      run: go test -v -timeout 20m ./...
 
     # 竞态检测分两步：先跑并发原语密集的快包，快速拿到反馈；
     # network / crypto 全量带 -race 需要十几分钟，单独一步便于定位。
+    # -race 插桩下 network 全套件约 610s，远超 go test 默认的 10m 上限
+    # （会在测试刚起步时就被 panic: test timed out 打断），必须放宽超时。
     - name: Test with race detector
       run: |
-        go test -race -count=1 ./common/... ./list/... ./lru/... ./pool/... ./thread/... ./dns/... ./loggo/... ./platform/... ./thirdparty/...
+        go test -race -count=1 -timeout 20m ./common/... ./list/... ./lru/... ./pool/... ./thread/... ./dns/... ./loggo/... ./platform/... ./thirdparty/...
 
     # cryptonight/inter 是 Go 作者上游移植的算法实现，其 sha3 测试专门做
     # unsafe 非对齐指针访问，Go 1.26 的 -race 内置 checkptr 会直接 fatal；
@@ -64,7 +68,9 @@ jobs:
     - name: Test with race detector (network & crypto)
       run: |
         set -euo pipefail
-        go test -race -count=1 ./network/... $(go list ./crypto/... | grep -v '/crypto/cryptonight/inter/')
+        # network 在 -race 插桩下约需 610s，25m 为其留出约 2.5 倍余量，
+        # 避免 CI 机器负载波动再次触发默认 10m 超时。
+        go test -race -count=1 -timeout 25m ./network/... $(go list ./crypto/... | grep -v '/crypto/cryptonight/inter/')
 
     # Raw ICMP tests (IPv4 and IPv6 loopback) need CAP_NET_RAW; without it
     # they self-skip. Build a dedicated test binary and grant the capability
