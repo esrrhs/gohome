@@ -6,6 +6,9 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,7 +16,12 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
+
 	"github.com/esrrhs/gohome/common"
+	"github.com/esrrhs/gohome/list"
+	"github.com/esrrhs/gohome/thread"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -2137,5 +2145,2609 @@ func TestHardenQuicDialHandshakeAborted(t *testing.T) {
 	}
 	if _, ok := quicClientSessionCache.Load(addr); ok {
 		t.Fatal("dead session must not be cached")
+	}
+}
+
+// ---------- tcp harden ----------
+
+// Name/Info/Read/Write/Close on a bare TcpConn and deterministic error
+// branches of Listen/Dial without touching the network.
+func TestHardenTcpEmptyAndErrors(t *testing.T) {
+	c := &TcpConn{}
+	if c.Name() != "tcp" {
+		t.Fatal("TcpConn.Name")
+	}
+	if c.Info() != "empty tcp conn" {
+		t.Fatalf("empty Info = %q", c.Info())
+	}
+	if _, err := c.Read(make([]byte, 4)); err == nil || err.Error() != "empty conn" {
+		t.Fatalf("empty Read err = %v", err)
+	}
+	if _, err := c.Write([]byte("x")); err == nil || err.Error() != "empty conn" {
+		t.Fatalf("empty Write err = %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("empty Close: %v", err)
+	}
+
+	// Address resolution failures surface before any socket op.
+	if _, err := (&TcpConn{}).Dial(":::::not-an-addr"); err == nil {
+		t.Fatal("Dial with unparsable address must fail")
+	}
+	if _, err := (&TcpConn{}).Listen(":::::not-an-addr"); err == nil {
+		t.Fatal("Listen with unparsable address must fail")
+	}
+
+	// Bind failure while resolution succeeds: a second listener on an
+	// already-owned loopback port gets EADDRINUSE from ListenTCP.
+	first, err := (&TcpConn{}).Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("first listen: %v", err)
+	}
+	defer first.Close()
+	port := first.(*TcpConn).listener.Addr().(*net.TCPAddr).Port
+	if _, err := (&TcpConn{}).Listen("127.0.0.1:" + strconv.Itoa(port)); err == nil {
+		t.Fatal("second Listen on the same port must fail")
+	}
+
+	// Connection refused is a deterministic dial error on loopback.
+	refused, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	closedAddr := refused.Addr().String()
+	_ = refused.Close()
+	if conn, err := (&TcpConn{}).Dial(closedAddr); err == nil {
+		_ = conn.Close()
+		t.Fatal("Dial to a closed loopback port must fail")
+	}
+
+	// Accept after Close returns the listener error; bare Accept fails too.
+	if _, err := c.Accept(); err == nil || err.Error() != "not listen" {
+		t.Fatalf("bare Accept err = %v", err)
+	}
+	go func() {
+		if _, err := first.Accept(); err == nil {
+			t.Errorf("Accept after Close must fail")
+		}
+	}()
+	_ = first.Close()
+}
+
+// Full loopback echo plus listener/dialer Info strings and Control callback.
+func TestHardenTcpLoopbackInfo(t *testing.T) {
+	ctrl, restore := hardenRegisterController()
+	defer restore()
+	ln, err := (&TcpConn{}).Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	laddr := ln.(*TcpConn).listener.Addr().String()
+	if got := ln.Info(); got != "tcp--"+laddr {
+		t.Fatalf("listener Info = %q", got)
+	}
+	accepted := make(chan Conn, 1)
+	go func() {
+		s, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		accepted <- s
+	}()
+
+	cli, err := (&TcpConn{}).Dial(laddr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cli.Close()
+	if atomic.LoadInt32(ctrl) == 0 {
+		t.Fatal("dialer Control callback not invoked")
+	}
+	if !strings.Contains(cli.Info(), "<--tcp-->") {
+		t.Fatalf("dialer Info = %q", cli.Info())
+	}
+	srv := <-accepted
+	defer srv.Close()
+
+	msg := []byte("tcp-loopback-16")
+	if _, err := cli.Write(msg); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	echo := make([]byte, len(msg))
+	if _, err := io.ReadFull(srv, echo); err != nil {
+		t.Fatalf("server read: %v", err)
+	}
+	if string(echo) != string(msg) {
+		t.Fatalf("server got %q", echo)
+	}
+	if _, err := srv.Write(echo); err != nil {
+		t.Fatalf("server write: %v", err)
+	}
+	back := make([]byte, len(msg))
+	if _, err := io.ReadFull(cli, back); err != nil {
+		t.Fatalf("client read: %v", err)
+	}
+	if string(back) != string(msg) {
+		t.Fatalf("echo mismatch %q", back)
+	}
+}
+
+// The post-connect cancel window (ctx canceled between DialContext success
+// and Dial's own ctx.Err check) has no blocking hook: loopback TCP connects
+// in microseconds. Two complementary best-effort drivers are used, both
+// asserting only termination/per-conn cleanup (every outcome is legal):
+//
+//  1. Timed aborts: the Control hook runs immediately before the kernel
+//     connect, so a Close scheduled a few hundred microseconds later lands
+//     right when the handshake completes. Inside net.Dialer the conn-ready
+//     and ctx-done signals are a randomized select, so a successful connect
+//     racing a canceled ctx surfaces here as DialContext success followed by
+//     the post-connect cancel check.
+//  2. A stream of Dials with spinning Close callers covers the same window
+//     under a different interleaving.
+func TestHardenTcpDialCancelWindowHammer(t *testing.T) {
+	ln, err := (&TcpConn{}).Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	addr := ln.(*TcpConn).listener.Addr().String()
+	go func() {
+		for {
+			s, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(s Conn) {
+				io.Copy(io.Discard, s)
+				_ = s.Close()
+			}(s)
+		}
+	}()
+
+	old := gControlOnConnSetup
+	defer func() { gControlOnConnSetup = old }()
+	for attempt := 0; attempt < 600; attempt++ {
+		c := &TcpConn{}
+		delay := time.Duration(50+attempt%400) * time.Microsecond
+		RegisterDialerController(func(network, address string, raw syscall.RawConn) error {
+			go func() {
+				time.Sleep(delay)
+				_ = c.Close()
+			}()
+			return nil
+		})
+		if conn, derr := c.Dial(addr); derr == nil {
+			_ = conn.Close()
+		}
+	}
+
+	RegisterDialerController(func(network, address string, raw syscall.RawConn) error { return nil })
+	const dialCount = 3000
+	c := &TcpConn{}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = c.Close()
+				}
+			}
+		}()
+	}
+	var delivered, aborted int
+	for i := 0; i < dialCount; i++ {
+		conn, derr := c.Dial(addr)
+		if derr != nil {
+			aborted++
+			continue
+		}
+		delivered++
+		_ = conn.Close()
+	}
+	close(stop)
+	wg.Wait()
+	t.Logf("tcp cancel hammer: %d stream dials, %d delivered, %d aborted",
+		dialCount, delivered, aborted)
+	if delivered+aborted != dialCount {
+		t.Fatal("every Dial must finish exactly once")
+	}
+}
+
+// ---------- udp harden ----------
+
+// Bare/listener/dialer error branches that need no peer traffic.
+func TestHardenUdpEmptyAndErrors(t *testing.T) {
+	c := &UdpConn{}
+	if c.Name() != "udp" {
+		t.Fatal("UdpConn.Name")
+	}
+	if c.Info() != "empty udp conn" {
+		t.Fatalf("empty Info = %q", c.Info())
+	}
+	if _, err := c.Read(make([]byte, 4)); err == nil || err.Error() != "empty conn" {
+		t.Fatalf("empty Read err = %v", err)
+	}
+	if _, err := c.Write([]byte("x")); err == nil || err.Error() != "empty conn" {
+		t.Fatalf("empty Write err = %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("empty Close: %v", err)
+	}
+	// checkConfig must auto-install defaults on a bare conn.
+	cfg := c.GetConfig()
+	if cfg == nil || cfg.MaxPacketSize != 10240 {
+		t.Fatalf("auto default config = %+v", cfg)
+	}
+	custom := DefaultUdpConfig()
+	custom.MaxPacketSize = 1234
+	c.SetConfig(custom)
+	if c.GetConfig().MaxPacketSize != 1234 {
+		t.Fatal("SetConfig/GetConfig")
+	}
+
+	// Resolution failure and double-bind failure of Listen.
+	if _, err := (&UdpConn{}).Listen(":::::not-an-addr"); err == nil {
+		t.Fatal("Listen with unparsable address must fail")
+	}
+	ln0, err := (&UdpConn{}).Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("first listen: %v", err)
+	}
+	port := ln0.(*UdpConn).listener.listenerconn.LocalAddr().(*net.UDPAddr).Port
+	if _, err := (&UdpConn{}).Listen("127.0.0.1:" + strconv.Itoa(port)); err == nil {
+		t.Fatal("second Listen on the same port must fail")
+	}
+
+	// A listener itself can neither Read nor Write.
+	if _, err := ln0.Read(make([]byte, 4)); err == nil || err.Error() != "listener can not be read" {
+		t.Fatalf("listener Read err = %v", err)
+	}
+	if _, err := ln0.Write([]byte("x")); err == nil || err.Error() != "listener can not be write" {
+		t.Fatalf("listener Write err = %v", err)
+	}
+	// Bare Accept fails; Accept on a closed listener fails as well.
+	if _, err := (&UdpConn{}).Accept(); err == nil || err.Error() != "not listen" {
+		t.Fatal("bare Accept must fail with not listen")
+	}
+	go func() {
+		if _, err := ln0.Accept(); err == nil {
+			t.Errorf("Accept after Close must fail")
+		}
+	}()
+	_ = ln0.Close()
+
+	// Dial resolution failure.
+	if conn, err := (&UdpConn{}).Dial(":::::not-an-addr"); err == nil {
+		_ = conn.Close()
+		t.Fatal("Dial with unparsable address must fail")
+	}
+}
+
+// A rejecting Control callback surfaces from DialContext (bind/connect
+// failure), and a Close landing while Dial is parked inside the callback
+// cancels the dial through Close's cancel branch.
+func TestHardenUdpDialControllerPaths(t *testing.T) {
+	old := gControlOnConnSetup
+	defer func() { gControlOnConnSetup = old }()
+
+	RegisterDialerController(func(network, address string, raw syscall.RawConn) error {
+		return errors.New("harden control reject")
+	})
+	if conn, err := (&UdpConn{}).Dial("127.0.0.1:9"); err == nil {
+		_ = conn.Close()
+		t.Fatal("Dial must fail when Control rejects")
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	RegisterDialerController(func(network, address string, raw syscall.RawConn) error {
+		once.Do(func() { close(entered) })
+		<-release
+		return nil
+	})
+	c := &UdpConn{}
+	type result struct {
+		conn Conn
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		conn, err := c.Dial("127.0.0.1:9")
+		done <- result{conn, err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("Control callback not entered")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close during dial: %v", err)
+	}
+	close(release)
+	select {
+	case r := <-done:
+		if r.err == nil {
+			_ = r.conn.Close()
+			t.Fatal("Dial parked in Control must fail once Close cancels it")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Dial did not return after Control release")
+	}
+}
+
+// End-to-end listener/sonny lifecycle: Info strings, oversized read buffer,
+// read/write after sonny close, stale-sonny eviction on late packets, and a
+// fresh sonny accepted from the same source afterwards.
+func TestHardenUdpSonnyLifecycle(t *testing.T) {
+	ln, err := (&UdpConn{}).Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	luc := ln.(*UdpConn)
+	addr := luc.listener.listenerconn.LocalAddr().String()
+	if got := ln.Info(); got != "udp--"+addr {
+		t.Fatalf("listener Info = %q", got)
+	}
+
+	cli, err := net.Dial("udp", addr)
+	if err != nil {
+		t.Fatalf("raw udp client: %v", err)
+	}
+	defer cli.Close()
+	accepted := make(chan Conn, 1)
+	go func() {
+		s, aerr := ln.Accept()
+		if aerr == nil {
+			accepted <- s
+		}
+	}()
+	if _, err := cli.Write([]byte("udp-sonny-16!!!")); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	var srv Conn
+	select {
+	case srv = <-accepted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Accept timeout")
+	}
+	defer srv.Close()
+	if !strings.Contains(srv.Info(), "<--udp-->") {
+		t.Fatalf("sonny Info = %q", srv.Info())
+	}
+
+	// An undersized read consumes the queued datagram and reports the size
+	// mismatch (production behavior), so resend before doing a full read.
+	msg := []byte("udp-sonny-16!!!")
+	small := make([]byte, 8)
+	if _, err := srv.Read(small); err == nil || err.Error() != "read buffer too small" {
+		t.Fatalf("oversized Read err = %v", err)
+	}
+	if _, err := cli.Write(msg); err != nil {
+		t.Fatalf("resend: %v", err)
+	}
+	buf := make([]byte, 64)
+	n, err := srv.Read(buf)
+	if err != nil || string(buf[:n]) != string(msg) {
+		t.Fatalf("sonny Read n=%d err=%v", n, err)
+	}
+	if _, err := srv.Write([]byte("pong-udp")); err != nil {
+		t.Fatalf("sonny Write: %v", err)
+	}
+	rbuf := make([]byte, 16)
+	if rn, rerr := cli.Read(rbuf); rerr != nil || string(rbuf[:rn]) != "pong-udp" {
+		t.Fatalf("client reply n=%d err=%v", rn, rerr)
+	}
+
+	// Close the sonny: further Read/Write fail immediately.
+	if err := srv.Close(); err != nil {
+		t.Fatalf("sonny close: %v", err)
+	}
+	if _, err := srv.Read(buf); err == nil || err.Error() != "read closed conn" {
+		t.Fatalf("closed sonny Read err = %v", err)
+	}
+	if _, err := srv.Write([]byte("x")); err == nil || err.Error() != "write closed conn" {
+		t.Fatalf("closed sonny Write err = %v", err)
+	}
+	// A packet arriving while a closed sonny is still registered must evict
+	// it from the map and be dropped. Close already deletes the entry, so
+	// re-register the closed sonny under the client's source key to
+	// deterministically drive the stale-entry branch.
+	srcKey := cli.LocalAddr().String()
+	luc.listener.sonny.Store(srcKey, srv)
+	if _, err := cli.Write([]byte("late")); err != nil {
+		t.Fatalf("late write: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := luc.listener.sonny.Load(srcKey); !ok {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, ok := luc.listener.sonny.Load(srcKey); ok {
+		t.Fatal("stale closed sonny must be evicted on the next packet")
+	}
+	// The next packet creates a brand-new sonny and enqueues it.
+	if _, err := cli.Write([]byte("next-udp-packet!")); err != nil {
+		t.Fatalf("next write: %v", err)
+	}
+	srv2, err := ln.Accept()
+	if err != nil {
+		t.Fatalf("re-accept after stale eviction: %v", err)
+	}
+	defer srv2.Close()
+	n, err = srv2.Read(buf)
+	if err != nil || string(buf[:n]) != "next-udp-packet!" {
+		t.Fatalf("new sonny read n=%d err=%v", n, err)
+	}
+
+	// Closing the listener stops the recv group and closes every sonny.
+	_ = ln.Close()
+	if _, err := srv2.Read(buf); err == nil {
+		t.Fatal("sonny must be closed when the listener closes")
+	}
+}
+
+// Defensive channel-closed-without-flag branch of sonny Read.
+func TestHardenUdpSonnyReadClosedChannel(t *testing.T) {
+	ch := common.NewChannel(1)
+	ch.Close()
+	u := &UdpConn{
+		config: DefaultUdpConfig(),
+		listenersonny: &udpConnListenerSonny{
+			recvch: ch,
+		},
+	}
+	if _, err := u.Read(make([]byte, 4)); err == nil || err.Error() != "read closed conn" {
+		t.Fatalf("closed-channel Read err = %v", err)
+	}
+}
+
+// Unbuffered recv channels plus an unread accept channel force every
+// loopRecv push to time out: new-sonny recv push, the accept-backlog reject
+// (which closes the rejected sonny), and the live-sonny recv push.
+func TestHardenUdpLoopRecvBackpressure(t *testing.T) {
+	cfg := &UdpConfig{
+		MaxPacketSize:       1024,
+		RecvChanLen:         0, // unbuffered: first push has no reader -> timeout
+		AcceptChanLen:       1,
+		RecvChanPushTimeout: 30,
+	}
+	factory := &UdpConn{}
+	factory.SetConfig(cfg)
+	ln, err := factory.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	addr := ln.(*UdpConn).listener.listenerconn.LocalAddr().String()
+
+	c1, err := net.Dial("udp", addr)
+	if err != nil {
+		t.Fatalf("client1: %v", err)
+	}
+	defer c1.Close()
+	if _, err := c1.Write([]byte("a")); err != nil {
+		t.Fatalf("c1 write: %v", err)
+	}
+	c2, err := net.Dial("udp", addr)
+	if err != nil {
+		t.Fatalf("client2: %v", err)
+	}
+	defer c2.Close()
+	// c2's recv push times out (unbuffered), the accept push then fills the
+	// one-slot accept channel (c1 occupies it) and times out too: loopRecv
+	// closes c2's rejected sonny itself.
+	if _, err := c2.Write([]byte("b")); err != nil {
+		t.Fatalf("c2 write: %v", err)
+	}
+	// c1's live sonny also has an unbuffered, unread recv channel.
+	if _, err := c1.Write([]byte("c")); err != nil {
+		t.Fatalf("c1 second write: %v", err)
+	}
+	// Worst case: three 30ms push timeouts plus scheduling slack.
+	time.Sleep(300 * time.Millisecond)
+	luc := ln.(*UdpConn)
+	if n := lenSyncMap(&luc.listener.sonny); n != 1 {
+		t.Fatalf("rejected c2 sonny must self-close/evict, map len = %d", n)
+	}
+}
+
+// Accept must skip stale entries (missing from the map or already closed)
+// and return the next live sonny; RecvChanPushTimeout<=0 selects the
+// non-blocking push path.
+func TestHardenUdpAcceptSkipsStale(t *testing.T) {
+	cfg := &UdpConfig{
+		MaxPacketSize:       1024,
+		RecvChanLen:         16,
+		AcceptChanLen:       16,
+		RecvChanPushTimeout: 0, // non-blocking push branch
+	}
+	factory := &UdpConn{}
+	factory.SetConfig(cfg)
+	ln, err := factory.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	luc := ln.(*UdpConn)
+	addr := luc.listener.listenerconn.LocalAddr().String()
+
+	missingDst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 59999}
+	missing := &UdpConn{config: cfg, listenersonny: &udpConnListenerSonny{dstaddr: missingDst, recvch: common.NewChannel(1)}}
+	luc.listener.accept.Write(missing)
+
+	storedDst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 59998}
+	stored := &UdpConn{config: cfg, listenersonny: &udpConnListenerSonny{dstaddr: storedDst, isclose: 1, recvch: common.NewChannel(1)}}
+	luc.listener.sonny.Store(storedDst.String(), stored)
+	luc.listener.accept.Write(stored)
+
+	got := make(chan Conn, 1)
+	go func() {
+		s, aerr := ln.Accept()
+		if aerr == nil {
+			got <- s
+		}
+	}()
+
+	cli, err := net.Dial("udp", addr)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	defer cli.Close()
+	if _, err := cli.Write([]byte("live-udp-packet")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	select {
+	case srv := <-got:
+		defer srv.Close()
+		buf := make([]byte, 32)
+		n, rerr := srv.Read(buf)
+		if rerr != nil || string(buf[:n]) != "live-udp-packet" {
+			t.Fatalf("live sonny read n=%d err=%v", n, rerr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Accept must skip stale entries and return the live sonny")
+	}
+}
+
+// GetConfig lazily installs defaults when no config was ever set.
+func TestHardenUdpGetConfigLazyDefault(t *testing.T) {
+	c := &UdpConn{}
+	if c.GetConfig().RecvChanLen != 128 {
+		t.Fatal("GetConfig on a zero-value UdpConn must install defaults")
+	}
+}
+
+// Closing the receive socket out from under a running loopRecv surfaces the
+// read error while the group has not been stopped.
+func TestHardenUdpLoopRecvSocketError(t *testing.T) {
+	ln, err := (&UdpConn{}).Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	luc := ln.(*UdpConn)
+	_ = luc.listener.listenerconn.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if luc.listener.wg.IsExit() {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	_ = ln.Close()
+}
+
+// The post-connect cancel window of UDP Dial is a few-instruction race with
+// no blocking hook (connected UDP setup is instant); spinning Close callers
+// against a live listener exercise it best-effort while asserting
+// termination and cleanup.
+func TestHardenUdpDialCancelWindowHammer(t *testing.T) {
+	ln, err := (&UdpConn{}).Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	addr := ln.(*UdpConn).listener.listenerconn.LocalAddr().String()
+	go func() {
+		for {
+			if _, aerr := ln.Accept(); aerr != nil {
+				return
+			}
+		}
+	}()
+
+	const dialCount = 3000
+	c := &UdpConn{}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = c.Close()
+				}
+			}
+		}()
+	}
+	var delivered, aborted int
+	for i := 0; i < dialCount; i++ {
+		conn, derr := c.Dial(addr)
+		if derr != nil {
+			aborted++
+			continue
+		}
+		delivered++
+		_ = conn.Close()
+	}
+	close(stop)
+	wg.Wait()
+	t.Logf("udp cancel hammer: %d dials, %d delivered, %d aborted",
+		dialCount, delivered, aborted)
+	if delivered+aborted != dialCount {
+		t.Fatal("every Dial must finish exactly once")
+	}
+}
+
+func lenSyncMap(m *sync.Map) int {
+	n := 0
+	m.Range(func(_, _ interface{}) bool { n++; return true })
+	return n
+}
+
+// A connected UDP dialer round-trips through the listener: covers dialer
+// Read/Write and the live-sonny push path.
+func TestHardenUdpDialerRoundTrip(t *testing.T) {
+	ln, err := (&UdpConn{}).Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	addr := ln.(*UdpConn).listener.listenerconn.LocalAddr().String()
+	accepted := make(chan Conn, 1)
+	go func() {
+		s, aerr := ln.Accept()
+		if aerr == nil {
+			accepted <- s
+		}
+	}()
+	cli, err := (&UdpConn{}).Dial(addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cli.Close()
+	if !strings.Contains(cli.Info(), "<--udp-->") {
+		t.Fatalf("dialer Info = %q", cli.Info())
+	}
+	if _, err := cli.Write([]byte("udp-dialer-16!")); err != nil {
+		t.Fatalf("dialer write: %v", err)
+	}
+	srv := <-accepted
+	defer srv.Close()
+	buf := make([]byte, 32)
+	n, err := srv.Read(buf)
+	if err != nil || string(buf[:n]) != "udp-dialer-16!" {
+		t.Fatalf("server read n=%d err=%v", n, err)
+	}
+	if _, err := srv.Write(buf[:n]); err != nil {
+		t.Fatalf("server echo: %v", err)
+	}
+	echo := make([]byte, 32)
+	if en, eerr := cli.Read(echo); eerr != nil || string(echo[:en]) != "udp-dialer-16!" {
+		t.Fatalf("dialer echo n=%d err=%v", en, eerr)
+	}
+}
+
+// ---------- rhttp harden ----------
+
+// Bare/listener error branches that need no peer traffic.
+func TestHardenRhttpEmptyAndErrors(t *testing.T) {
+	c := &RhttpConn{}
+	if got := c.Info(); got != "empty http conn" {
+		t.Fatalf("empty Info=%q", got)
+	}
+	if _, err := c.Read(nil); err == nil || !strings.Contains(err.Error(), "read empty buffer") {
+		t.Fatalf("nil Read err=%v", err)
+	}
+	if _, err := c.Write(nil); err == nil || !strings.Contains(err.Error(), "write empty data") {
+		t.Fatalf("nil Write err=%v", err)
+	}
+	if _, err := c.Read(make([]byte, 4)); err == nil || !strings.Contains(err.Error(), "empty conn") {
+		t.Fatalf("bare Read err=%v", err)
+	}
+	if _, err := c.Write([]byte("x")); err == nil || !strings.Contains(err.Error(), "empty conn") {
+		t.Fatalf("bare Write err=%v", err)
+	}
+	if _, err := c.Accept(); err == nil || !strings.Contains(err.Error(), "not listen") {
+		t.Fatalf("bare Accept err=%v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("bare Close: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if _, err := c.Read(make([]byte, 4)); err == nil || !strings.Contains(err.Error(), "read closed conn") {
+		t.Fatalf("closed Read err=%v", err)
+	}
+	if _, err := c.Write([]byte("x")); err == nil || !strings.Contains(err.Error(), "write closed conn") {
+		t.Fatalf("closed Write err=%v", err)
+	}
+
+	fac := &RhttpConn{}
+	ln, err := fac.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	lc := ln.(*RhttpConn)
+	if got := lc.Info(); !strings.Contains(got, "rhttp listener") {
+		t.Fatalf("listener Info=%q", got)
+	}
+	if _, err := lc.Read(make([]byte, 4)); err == nil || !strings.Contains(err.Error(), "listener can not be read") {
+		t.Fatalf("listener Read err=%v", err)
+	}
+	if _, err := lc.Write([]byte("x")); err == nil || !strings.Contains(err.Error(), "listener can not be write") {
+		t.Fatalf("listener Write err=%v", err)
+	}
+	addr := lc.listener.listenerconn.Addr().String()
+	if _, err := (&RhttpConn{}).Listen(addr); err == nil {
+		t.Fatal("rebind same addr must fail")
+	}
+	if _, err := (&RhttpConn{}).Listen(":::::not-an-addr"); err == nil {
+		t.Fatal("resolve garbage must fail")
+	}
+
+	accErr := make(chan error, 1)
+	go func() {
+		_, e := lc.Accept()
+		accErr <- e
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if err := lc.Close(); err != nil {
+		t.Fatalf("listener Close: %v", err)
+	}
+	select {
+	case err := <-accErr:
+		if err == nil {
+			t.Fatal("Accept after close must fail")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Accept did not unblock on listener close")
+	}
+}
+
+// Server-side Read polls an empty recvb until data arrives (100ms sleep
+// branch) and the dialer data loop round-trips the message.
+func TestHardenRhttpReadWaitsForData(t *testing.T) {
+	fac := &RhttpConn{}
+	ln, err := fac.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	addr := ln.(*RhttpConn).listener.listenerconn.Addr().String()
+
+	got := make(chan []byte, 1)
+	go func() {
+		s, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer s.Close()
+		buf := make([]byte, 64)
+		n, rerr := s.Read(buf)
+		if rerr == nil {
+			got <- buf[:n]
+		}
+	}()
+
+	cli, err := (&RhttpConn{}).Dial(addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cli.Close()
+	// Give the server-side Read time to enter the empty-buffer poll sleep.
+	time.Sleep(250 * time.Millisecond)
+	if _, err := cli.Write([]byte("rhttp-wait-9!")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	select {
+	case b := <-got:
+		if string(b) != "rhttp-wait-9!" {
+			t.Fatalf("server got %q", b)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server Read never got data")
+	}
+}
+
+// Whitebox sendb/recvb backpressure against crafted dialer groups:
+//   - stopped wg: Write queues what fits then returns the partial count with
+//     "closed conn" (cur>0), and again returns zero once full (cur==0);
+//     Read on an empty recvb with exited wg returns "closed conn";
+//   - live wg: Close landing while Write is blocked with/without queued bytes
+//     returns the partial/zero counts with "write closed conn".
+func TestHardenRhttpWriteBackpressureAndClose(t *testing.T) {
+	cfg4 := DefaultHttpConfig()
+	cfg4.BufferSize = 4
+	stopped := func() *RhttpConn {
+		wg := thread.NewGroup("harden rhttp stopped", nil, nil)
+		wg.Stop()
+		return &RhttpConn{
+			config: cfg4,
+			dialer: &httpConnDialer{wg: wg},
+			sendb:  list.NewRBuffergo(cfg4.BufferSize, true),
+			recvb:  list.NewRBuffergo(cfg4.BufferSize, true),
+		}
+	}
+
+	u := stopped()
+	n, err := u.Write([]byte("abcd1234"))
+	if n != 4 || err == nil {
+		t.Fatalf("partial blocked Write n=%d err=%v", n, err)
+	}
+	n, err = u.Write([]byte("zz"))
+	if n != 0 || err == nil {
+		t.Fatalf("full-buffer Write n=%d err=%v", n, err)
+	}
+	if _, err := u.Read(make([]byte, 4)); err == nil || !strings.Contains(err.Error(), "closed conn") {
+		t.Fatalf("empty read with exited wg err=%v", err)
+	}
+
+	live := func(capSize int) *RhttpConn {
+		return &RhttpConn{
+			config: DefaultHttpConfig(),
+			dialer: &httpConnDialer{wg: thread.NewGroup("harden rhttp live", nil, nil)},
+			sendb:  list.NewRBuffergo(capSize, true),
+			recvb:  list.NewRBuffergo(capSize, true),
+		}
+	}
+	waitWrite := func(c *RhttpConn, p []byte) (int, error) {
+		type res struct {
+			n   int
+			err error
+		}
+		ch := make(chan res, 1)
+		go func() {
+			wN, wErr := c.Write(p)
+			ch <- res{wN, wErr}
+		}()
+		// Ensure Write has entered the blocked sleep at least once.
+		time.Sleep(250 * time.Millisecond)
+		if cerr := c.Close(); cerr != nil {
+			t.Fatalf("Close: %v", cerr)
+		}
+		select {
+		case r := <-ch:
+			return r.n, r.err
+		case <-time.After(3 * time.Second):
+			t.Fatal("Write did not unblock on Close")
+			return 0, nil
+		}
+	}
+
+	// Cap 8 prefilled with 6: two more bytes fit before Close (partial).
+	pc := live(8)
+	pc.sendb.Write([]byte("123456"))
+	if n, err := waitWrite(pc, []byte("ABCD")); n != 2 || err == nil {
+		t.Fatalf("partial close Write n=%d err=%v", n, err)
+	}
+	// Cap 4 already full: zero bytes queued before Close.
+	zc := live(4)
+	zc.sendb.Write([]byte("1234"))
+	if n, err := waitWrite(zc, []byte("ABCD")); n != 0 || err == nil {
+		t.Fatalf("zero close Write n=%d err=%v", n, err)
+	}
+}
+
+// A listener Close with a factory cancel still attached must invoke it.
+func TestHardenRhttpListenerCancelOnClose(t *testing.T) {
+	ln, err := (&RhttpConn{}).Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	lc := ln.(*RhttpConn)
+	cancelled := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	lc.cancel = func() {
+		cancel()
+		close(cancelled)
+	}
+	if err := lc.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("listener cancel was not invoked")
+	}
+	_ = ctx
+}
+
+// Concurrent Close callers race the first isclose check; the loser rechecks
+// under closelock and returns early. Outcomes are idempotent, the test only
+// asserts no panic/deadlock and best-effort covers the locked recheck.
+func TestHardenRhttpCloseDoubleHammer(t *testing.T) {
+	fac := &RhttpConn{}
+	ln, err := fac.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	addr := ln.(*RhttpConn).listener.listenerconn.Addr().String()
+	go func() {
+		for {
+			s, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(s Conn) {
+				buf := make([]byte, 64)
+				for {
+					if _, rerr := s.Read(buf); rerr != nil {
+						return
+					}
+				}
+			}(s)
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		cli, derr := (&RhttpConn{}).Dial(addr)
+		if derr != nil {
+			t.Fatalf("dial %d: %v", i, derr)
+		}
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for j := 0; j < 16; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				_ = cli.Close()
+			}()
+		}
+		close(start)
+		wg.Wait()
+	}
+}
+
+// The dialer drain loop (after updateDialerSonny exits) is only entered on a
+// natural loop exit: Close() flips wg.IsExit before Join, so a close-driven
+// exit skips the loop. Retry exhaustion against a scripted server reaches it:
+// with queued recvb data the loop polls (10ms sleeps) until CloseWaitTimeoutMs
+// and breaks on the timeout; with an empty recvb it breaks immediately. In
+// both cases the self-initiated ProtoClose runs because Close() never did.
+func TestHardenRhttpDialerDrainAndSelfClose(t *testing.T) {
+	newScripted := func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Query().Get("type") {
+			case ProtoConnnect, ProtoClose:
+				w.WriteHeader(ProtoCodeOK)
+			default:
+				w.WriteHeader(ProtoCodeFail)
+				_, _ = w.Write([]byte("injected data fail"))
+			}
+		}))
+	}
+	dialOne := func(t *testing.T, ts *httptest.Server, seedRecv bool, waitMs int) *RhttpConn {
+		cfg := DefaultHttpConfig()
+		cfg.MaxRetryNum = 0
+		cfg.CloseWaitTimeoutMs = waitMs
+		self := &RhttpConn{}
+		self.SetConfig(cfg)
+		conn, err := self.Dial(ts.URL)
+		if err != nil {
+			t.Fatalf("dial scripted: %v", err)
+		}
+		sc := conn.(*RhttpConn)
+		if seedRecv && !sc.recvb.Write([]byte("x")) {
+			t.Fatal("recvb seed write failed")
+		}
+		return sc
+	}
+	waitExit := func(t *testing.T, sc *RhttpConn, minD time.Duration) {
+		start := time.Now()
+		deadline := start.Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if sc.dialer.wg.IsExit() {
+				if d := time.Since(start); d < minD {
+					t.Fatalf("drain took %v, want >= %v", d, minD)
+				}
+				if sc.isclose.Load() {
+					t.Fatal("natural exit must stay unclosed; self ProtoClose path requires it")
+				}
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatal("data loop did not exit after retry exhaustion + self close")
+	}
+
+	ts1 := newScripted()
+	sc1 := dialOne(t, ts1, true, 50)
+	waitExit(t, sc1, 45*time.Millisecond)
+	ts1.Close()
+
+	ts2 := newScripted()
+	sc2 := dialOne(t, ts2, false, 5000)
+	waitExit(t, sc2, 0)
+	ts2.Close()
+}
+
+// Accept skips queued entries whose sonny is missing from the map or already
+// closed, then returns the next live sonny pushed by a real Connect.
+func TestHardenRhttpAcceptSkipsStale(t *testing.T) {
+	cfg := DefaultHttpConfig()
+	cfg.AcceptChanLen = 4
+	fac := &RhttpConn{}
+	fac.SetConfig(cfg)
+	ln, err := fac.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	lc := ln.(*RhttpConn)
+	addr := lc.listener.listenerconn.Addr().String()
+
+	// checkSonnyClose scans the map and dereferences listenersonny, so the
+	// injected closed entry needs a real (empty) sonny shell.
+	dead := &RhttpConn{
+		id:            "/dead-id",
+		config:        cfg,
+		listenersonny: &httpConnListenerSonny{listener: lc.listener},
+	}
+	dead.isclose.Store(true)
+	lc.listener.sonny.Store(dead.id, dead)
+	if !lc.listener.accept.WriteTimeout(dead, 100) {
+		t.Fatal("queue dead failed")
+	}
+	ghost := &RhttpConn{id: "/ghost-id", config: cfg}
+	if !lc.listener.accept.WriteTimeout(ghost, 100) {
+		t.Fatal("queue ghost failed")
+	}
+
+	got := make(chan Conn, 1)
+	go func() {
+		s, aerr := lc.Accept()
+		if aerr == nil {
+			got <- s
+		}
+	}()
+	// Let Accept drain the two stale entries and park on the channel.
+	time.Sleep(200 * time.Millisecond)
+
+	cli, err := (&RhttpConn{}).Dial(addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cli.Close()
+	select {
+	case s := <-got:
+		if s.(*RhttpConn).id == dead.id || s.(*RhttpConn).id == ghost.id {
+			t.Fatalf("Accept returned stale sonny %s", s.(*RhttpConn).id)
+		}
+		_ = s.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("live sonny was not accepted")
+	}
+}
+
+// hardenRawHTTP speaks a hand-written HTTP/1.1 request; when readResp is
+// false it returns after a short wait (used for connection-cut cases).
+func hardenRawHTTP(t *testing.T, addr, req string, readResp bool) string {
+	t.Helper()
+	cn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("raw dial: %v", err)
+	}
+	defer cn.Close()
+	if _, err := cn.Write([]byte(req)); err != nil {
+		t.Fatalf("raw write: %v", err)
+	}
+	if !readResp {
+		time.Sleep(150 * time.Millisecond)
+		return ""
+	}
+	_ = cn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	b, err := io.ReadAll(cn)
+	if err != nil {
+		t.Fatalf("raw read: %v", err)
+	}
+	return string(b)
+}
+
+// Server-side protocol error branches: malformed URL/params/index, stale
+// closed sonny, body size limits, mid-body connection cuts, and accept
+// backlog rejection.
+func TestHardenRhttpServerProtocolErrors(t *testing.T) {
+	newL := func(cfg *HttpConfig) (*RhttpConn, string) {
+		f := &RhttpConn{}
+		f.SetConfig(cfg)
+		ln, err := f.Listen("127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		return ln.(*RhttpConn), ln.(*RhttpConn).listener.listenerconn.Addr().String()
+	}
+	expectCode := func(name string, code, want int) {
+		if code != want {
+			t.Fatalf("%s: code=%d want %d", name, code, want)
+		}
+	}
+
+	lc, addr := newL(DefaultHttpConfig())
+	defer lc.Close()
+	base := "http://" + addr
+	post := func(target string, body []byte) (int, string) {
+		var rdr io.Reader
+		if body != nil {
+			rdr = bytes.NewReader(body)
+		}
+		resp, err := http.Post(base+target, "application/octet-stream", rdr)
+		if err != nil {
+			t.Fatalf("POST %s: %v", target, err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+
+	// url.Parse failure on the request target.
+	// "//[" is a legal HTTP request target but url.Parse rejects the
+	// unterminated IPv6 host literal; the handler answers ProtoCodeFail.
+	r := hardenRawHTTP(t, addr,
+		"POST //[ HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", true)
+	if !strings.Contains(r, "404") || !strings.Contains(r, "url Parse fail") {
+		t.Fatalf("bad url resp=%q", r)
+	}
+
+	// A live sonny exercised through every parameter/body validation.
+	expectCode("connect", mustCode(post("/e1?type=connect", nil)), ProtoCodeOK)
+	expectCode("no type", mustCode(post("/e1", nil)), ProtoCodeFail)
+	expectCode("bad type", mustCode(post("/e1?type=nope", nil)), ProtoCodeFail)
+	expectCode("no index", mustCode(post("/e1?type=data", nil)), ProtoCodeFail)
+	expectCode("bad index", mustCode(post("/e1?type=data&index=abc", nil)), ProtoCodeFail)
+	// index == MaxMsgIndex-1 wraps to expectIndex 0: treated as a duplicate
+	// of a not-yet-received frame, answered from lastSend (empty).
+	expectCode("dup wrap", mustCode(post("/e1?type=data&index=99", nil)), ProtoCodeOK)
+	expectCode("index diff", mustCode(post("/e1?type=data&index=5", nil)), ProtoCodeFail)
+	expectCode("unknown id", mustCode(post("/missing?type=data&index=0", nil)), ProtoCodeFail)
+	expectCode("close", mustCode(post("/e1?type=close", nil)), ProtoCodeOK)
+
+	// Body over the default MaxPacketSize cap is rejected.
+	expectCode("connect big", mustCode(post("/big?type=connect", nil)), ProtoCodeOK)
+	expectCode("too large",
+		mustCode(post("/big?type=data&index=0", make([]byte, 100*1024+1))), ProtoCodeFail)
+
+	// An existing-but-closed sonny is refused before any parsing.
+	dead := &RhttpConn{
+		id:            "/e2",
+		config:        lc.config,
+		listenersonny: &httpConnListenerSonny{listener: lc.listener, lastRecvTime: time.Now()},
+	}
+	dead.isclose.Store(true)
+	lc.listener.sonny.Store(dead.id, dead)
+	expectCode("closed sonny", mustCode(post("/e2?type=data&index=0", nil)), ProtoCodeFail)
+	lc.listener.sonny.Delete(dead.id)
+
+	// MaxPacketSize 0 falls back to the 100KB default; a small body works.
+	zeroCfg := DefaultHttpConfig()
+	zeroCfg.MaxPacketSize = 0
+	lcZero, addrZero := newL(zeroCfg)
+	defer lcZero.Close()
+	zResp, err := http.Post("http://"+addrZero+"/z1?type=connect", "application/octet-stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zResp.Body.Close()
+	zResp2, err := http.Post("http://"+addrZero+"/z1?type=data&index=0",
+		"application/octet-stream", bytes.NewReader([]byte("x")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	zb, _ := io.ReadAll(zResp2.Body)
+	zResp2.Body.Close()
+	expectCode("default body limit", zResp2.StatusCode, ProtoCodeOK)
+	_ = zb
+	// Server-side body read error: declare 100 bytes, send 5, cut the TCP.
+	hardenRawHTTP(t, addrZero,
+		"POST /z1?type=data&index=1 HTTP/1.1\r\nHost: h\r\nContent-Length: 100\r\n\r\n12345",
+		false)
+
+	// Accept backlog with RecvChanPushTimeout 0 (defaults to 100ms): the
+	// second Connect fails pushing and is answered ProtoCodeFull; a real
+	// Dial there takes the client-side code!=OK failure path.
+	fullCfg := DefaultHttpConfig()
+	fullCfg.AcceptChanLen = 1
+	fullCfg.RecvChanPushTimeout = 0
+	lcFull, addrFull := newL(fullCfg)
+	defer lcFull.Close()
+	expectCode("f1", mustCode(postFull(addrFull, "/f1?type=connect")), ProtoCodeOK)
+	expectCode("f2 rejected", mustCode(postFull(addrFull, "/f2?type=connect")), ProtoCodeFull)
+	if _, err := (&RhttpConn{}).Dial(addrFull); err == nil {
+		t.Fatal("Dial against full accept queue must fail with ProtoCodeFull")
+	}
+}
+
+// Deterministic coverage of the under-lock isclose recheck: hold closelock
+// externally so every contender passes the first check and blocks on the
+// mutex; once released, all waiters after the winner hit the locked recheck.
+func TestHardenRhttpCloseLockedRecheck(t *testing.T) {
+	fac := &RhttpConn{}
+	ln, err := fac.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	addr := ln.(*RhttpConn).listener.listenerconn.Addr().String()
+	go func() {
+		for {
+			s, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(s Conn) {
+				buf := make([]byte, 64)
+				for {
+					if _, rerr := s.Read(buf); rerr != nil {
+						return
+					}
+				}
+			}(s)
+		}
+	}()
+	cli, err := (&RhttpConn{}).Dial(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cli.(*RhttpConn)
+	rc.closelock.Lock()
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = rc.Close()
+		}()
+	}
+	// All contenders pass the first isclose check and park on the mutex.
+	close(start)
+	time.Sleep(150 * time.Millisecond)
+	rc.closelock.Unlock()
+	wg.Wait()
+}
+
+func mustCode(code int, _ string) int { return code }
+
+func postFull(addr, target string) (int, string) {
+	resp, err := http.Post("http://"+addr+target, "application/octet-stream", nil)
+	if err != nil {
+		return 0, err.Error()
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+// Client-side edge paths: refused Dial, one-off postData transport with nil
+// context / non-positive timeout, malformed request URL, truncated response
+// body, gControl hooks for both transports, and a dialer whose ctx was
+// detached (nil fallback).
+func TestHardenRhttpClientEdgePaths(t *testing.T) {
+	// Refused Dial: error path + takeCancel.
+	ll, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedAddr := ll.Addr().String()
+	_ = ll.Close()
+	if _, err := (&RhttpConn{}).Dial(closedAddr); err == nil {
+		t.Fatal("dial to closed port must fail")
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(ProtoCodeOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer ts.Close()
+
+	cfg := DefaultHttpConfig()
+	cfg.RequestTimeoutMs = -1 // exercises the <=0 default branch
+	bare := &RhttpConn{}
+	bare.SetConfig(cfg)
+	code, body, err := bare.postData(nil, ts.URL, []byte("x"))
+	if err != nil || code != ProtoCodeOK || string(body) != "ok" {
+		t.Fatalf("one-off post code=%d body=%q err=%v", code, body, err)
+	}
+	if _, _, err := bare.postData(context.Background(), "://bad url", nil); err == nil {
+		t.Fatal("malformed URL must fail request construction")
+	}
+
+	// Truncated response body surfaces ReadAll failure.
+	tsCut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(ProtoCodeOK)
+		_, _ = w.Write([]byte("x"))
+	}))
+	defer tsCut.Close()
+	if _, _, err := bare.postData(context.Background(), tsCut.URL, nil); err == nil {
+		t.Fatal("truncated body must return read error")
+	}
+
+	// gControlOnConnSetup hooks for h1 and h2c dial transports.
+	ln, err := (&RhttpConn{}).Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	addr := ln.(*RhttpConn).listener.listenerconn.Addr().String()
+	go func() {
+		for {
+			s, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(s Conn) {
+				buf := make([]byte, 64)
+				for {
+					if _, rerr := s.Read(buf); rerr != nil {
+						return
+					}
+				}
+			}(s)
+		}
+	}()
+	old := gControlOnConnSetup
+	RegisterDialerController(func(network, address string, raw syscall.RawConn) error { return nil })
+	c1, err := (&RhttpConn{}).Dial(addr)
+	if err != nil {
+		t.Fatalf("h1 dial with control: %v", err)
+	}
+	c2, err := (&RhttpConn{}).Dial("h2c://" + addr)
+	if err != nil {
+		t.Fatalf("h2c dial with control: %v", err)
+	}
+
+	_ = c1.Close()
+	_ = c2.Close()
+	gControlOnConnSetup = old
+
+	// Detached dialer ctx: a dialer whose ctx is nil before its worker
+	// starts makes its data POSTs against context.Background. Setting the
+	// field after startup would race with updateDialerSonny, so the whole
+	// conn is constructed race-free and driven against a local server.
+	var hits int32
+	tsBg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(ProtoCodeOK)
+	}))
+	defer tsBg.Close()
+	bgWg := thread.NewGroup("harden rhttp nil-ctx dialer", nil, nil)
+	bgCfg := DefaultHttpConfig()
+	bgConn := &RhttpConn{
+		id:     "harden-nilctx",
+		config: bgCfg,
+		dialer: &httpConnDialer{wg: bgWg, url: tsBg.URL + "/x", retry: 0, ctx: nil, rt: nil},
+		sendb:  list.NewRBuffergo(bgCfg.BufferSize, true),
+		recvb:  list.NewRBuffergo(bgCfg.BufferSize, true),
+	}
+	bgWg.Go("nilctx updateDialerSonny", bgConn.updateDialerSonny)
+	bgDeadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(bgDeadline) && atomic.LoadInt32(&hits) == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	bgWg.Stop()
+	_ = bgWg.Join()
+	if atomic.LoadInt32(&hits) == 0 {
+		t.Fatal("nil-ctx dialer never posted")
+	}
+}
+
+// Whitebox lifecycle: GetConfig lazy default, loopRecv nil-server failure,
+// Serve error after a raw listener close, sonny Info and sonny-side cancel,
+// and the HBTimeout<=0 default inside checkSonnyClose.
+func TestHardenRhttpWhiteboxLifecycle(t *testing.T) {
+	if cfg := (&RhttpConn{}).GetConfig(); cfg == nil || cfg.MaxPacketSize == 0 {
+		t.Fatalf("GetConfig lazy default: %+v", cfg)
+	}
+
+	// loopRecv with no http.Server returns an error and marks the group exit.
+	wg := thread.NewGroup("harden rhttp nil srv", nil, nil)
+	lcNil := &RhttpConn{config: DefaultHttpConfig(), listener: &httpConnListener{wg: wg}}
+	wg.Go("loopRecv", lcNil.loopRecv)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !wg.IsExit() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !wg.IsExit() {
+		t.Fatal("loopRecv nil server must exit the group")
+	}
+
+	// Raw listener close (not Shutdown) makes Serve return a non-shutdown
+	// error which loopRecv propagates.
+	fac := &RhttpConn{}
+	ln, err := fac.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lc := ln.(*RhttpConn)
+	_ = lc.listener.listenerconn.Close()
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !lc.listener.wg.IsExit() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !lc.listener.wg.IsExit() {
+		t.Fatal("Serve error must mark listener group exit")
+	}
+	if err := lc.Close(); err != nil {
+		t.Fatalf("cleanup close: %v", err)
+	}
+
+	// Sonny Info + sonny-side cancel on Close.
+	ln2, err := (&RhttpConn{}).Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln2.Close()
+	addr2 := ln2.(*RhttpConn).listener.listenerconn.Addr().String()
+	accepted := make(chan Conn, 1)
+	go func() {
+		s, aerr := ln2.Accept()
+		if aerr == nil {
+			accepted <- s
+		}
+	}()
+	cli, err := (&RhttpConn{}).Dial(addr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := <-accepted
+	if !strings.Contains(srv.Info(), "listenersonny") {
+		t.Fatalf("sonny Info=%q", srv.Info())
+	}
+	cancelled := make(chan struct{})
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	srv.(*RhttpConn).cancel = func() {
+		cancel2()
+		close(cancelled)
+	}
+	if err := srv.Close(); err != nil {
+		t.Fatalf("sonny close: %v", err)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("sonny cancel not invoked")
+	}
+	_ = ctx2
+	_ = cli.Close()
+
+	// HBTimeoutMs 0 -> default heart beat inside checkSonnyClose scan.
+	hbCfg := DefaultHttpConfig()
+	hbCfg.HBTimeoutMs = 0
+	hbFac := &RhttpConn{}
+	hbFac.SetConfig(hbCfg)
+	ln3, err := hbFac.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln3.Close()
+	addr3 := ln3.(*RhttpConn).listener.listenerconn.Addr().String()
+	cli3, err := (&RhttpConn{}).Dial(addr3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli3.Close()
+	// checkSonnyClose scans once per second.
+	time.Sleep(1100 * time.Millisecond)
+}
+
+// ProtoCodeFull stuck longer than the heart-beat limit breaks the data loop.
+// With HBTimeoutMs<=0 the limit defaults to 10s, so this test takes ~10s;
+// it uniquely covers the defensive default and the timeout break.
+func TestHardenRhttpFullStuckBreaksLoop(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("type") {
+		case ProtoConnnect, ProtoClose:
+			w.WriteHeader(ProtoCodeOK)
+		default:
+			w.WriteHeader(ProtoCodeFull)
+		}
+	}))
+	defer ts.Close()
+	cfg := DefaultHttpConfig()
+	cfg.MaxRetryNum = 100000
+	cfg.HBTimeoutMs = 0
+	self := &RhttpConn{}
+	self.SetConfig(cfg)
+	conn, err := self.Dial(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := conn.(*RhttpConn)
+	start := time.Now()
+	deadline := start.Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if sc.dialer.wg.IsExit() {
+			if d := time.Since(start); d < 9500*time.Millisecond {
+				t.Fatalf("full-stuck broke after %v, want ~10s", d)
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("full-stuck loop did not break")
+}
+
+// ---------- rudp harden ----------
+
+// Bare/error branches: name/info, empty buffers, empty/listener/closed
+// Read+Write, resolve/listen failures, lazy config and Set/GetConfig.
+func TestHardenRudpEmptyAndErrors(t *testing.T) {
+	c := &RudpConn{}
+	if c.Name() != "rudp" {
+		t.Fatalf("Name=%q", c.Name())
+	}
+	if c.Info() != "empty rudp conn" {
+		t.Fatalf("Info=%q", c.Info())
+	}
+	if _, err := c.Read(nil); err == nil || !strings.Contains(err.Error(), "read empty buffer") {
+		t.Fatalf("nil Read err=%v", err)
+	}
+	if _, err := c.Write(nil); err == nil || !strings.Contains(err.Error(), "write empty data") {
+		t.Fatalf("nil Write err=%v", err)
+	}
+	if _, err := c.Read(make([]byte, 4)); err == nil || !strings.Contains(err.Error(), "empty conn") {
+		t.Fatalf("empty Read err=%v", err)
+	}
+	if _, err := c.Write([]byte("x")); err == nil || !strings.Contains(err.Error(), "empty conn") {
+		t.Fatalf("empty Write err=%v", err)
+	}
+	lsh := &RudpConn{listener: &rudpConnListener{}}
+	if _, err := lsh.Read(make([]byte, 4)); err == nil || !strings.Contains(err.Error(), "listener can not be read") {
+		t.Fatalf("listener Read err=%v", err)
+	}
+	if _, err := lsh.Write([]byte("x")); err == nil || !strings.Contains(err.Error(), "listener can not be write") {
+		t.Fatalf("listener Write err=%v", err)
+	}
+	if _, err := c.Dial("127.0.0.1:70000"); err == nil {
+		t.Fatal("dial with invalid port must fail")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Read(make([]byte, 4)); err == nil || !strings.Contains(err.Error(), "read closed conn") {
+		t.Fatalf("closed Read err=%v", err)
+	}
+	if _, err := c.Write([]byte("x")); err == nil || !strings.Contains(err.Error(), "write closed conn") {
+		t.Fatalf("closed Write err=%v", err)
+	}
+	if cfg := c.GetConfig(); cfg == nil || cfg.MaxPacketSize == 0 {
+		t.Fatalf("GetConfig lazy default %+v", cfg)
+	}
+	cfg2 := DefaultRudpConfig()
+	cfg2.MaxPacketSize = 4242
+	c.SetConfig(cfg2)
+	if c.GetConfig().MaxPacketSize != 4242 {
+		t.Fatal("SetConfig/GetConfig mismatch")
+	}
+
+	fac := &RudpConn{}
+	ln, err := fac.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lc := ln.(*RudpConn)
+	if !strings.HasPrefix(lc.Info(), "rudp--") {
+		t.Fatalf("listener Info=%q", lc.Info())
+	}
+	addr := lc.listener.listenerconn.LocalAddr().String()
+	if _, err := (&RudpConn{}).Listen(addr); err == nil {
+		t.Fatal("rebind must fail")
+	}
+	if _, err := (&RudpConn{}).Listen(":::::not-an-addr"); err == nil {
+		t.Fatal("bad resolve must fail")
+	}
+	accErr := make(chan error, 1)
+	go func() { _, e := lc.Accept(); accErr <- e }()
+	time.Sleep(100 * time.Millisecond)
+	if err := lc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-accErr:
+		if err == nil {
+			t.Fatal("Accept must fail after close")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Accept did not unblock")
+	}
+}
+
+// Whitebox FrameMgr backpressure against crafted dialer groups: stopped wg
+// returns partial/zero "closed conn" counts; Close landing during a blocked
+// Write (full or partly-full buffer) returns the closed-conn counts.
+func TestHardenRudpBufferLifecycle(t *testing.T) {
+	cfg := DefaultRudpConfig()
+	cfg.BufferSize = 256
+	newFM := func() *FrameMgr {
+		return NewFrameMgr(cfg.CutSize, cfg.MaxId, cfg.BufferSize, cfg.MaxWin,
+			cfg.ResendTimems, cfg.Compress, cfg.Stat)
+	}
+	stoppedGroup := func() *thread.Group {
+		wg := thread.NewGroup("harden rudp stopped", nil, nil)
+		wg.Stop()
+		return wg
+	}
+
+	u := &RudpConn{config: cfg, dialer: &rudpConnDialer{fm: newFM(), wg: stoppedGroup()}}
+	if _, err := u.Read(make([]byte, 4)); err == nil || !strings.Contains(err.Error(), "closed conn") {
+		t.Fatalf("empty read exited wg err=%v", err)
+	}
+	n, err := u.Write(make([]byte, 1024))
+	if n != 256 || err == nil {
+		t.Fatalf("partial blocked write n=%d err=%v", n, err)
+	}
+	n, err = u.Write(make([]byte, 8))
+	if n != 0 || err == nil {
+		t.Fatalf("full buffer write n=%d err=%v", n, err)
+	}
+
+	blockedClose := func(prefill int, p []byte) int {
+		wg := thread.NewGroup("harden rudp live", nil, nil)
+		live := &RudpConn{config: cfg, dialer: &rudpConnDialer{fm: newFM(), wg: wg}}
+		if prefill > 0 {
+			live.dialer.fm.WriteSendBuffer(make([]byte, prefill))
+		}
+		type res struct{ n int }
+		ch := make(chan res, 1)
+		go func() { wN, _ := live.Write(p); ch <- res{wN} }()
+		time.Sleep(250 * time.Millisecond)
+		if err := live.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		select {
+		case r := <-ch:
+			return r.n
+		case <-time.After(3 * time.Second):
+			t.Fatal("blocked write did not unblock")
+			return -1
+		}
+	}
+	// Empty buffer: writer fills 256, then Close -> partial count.
+	if n := blockedClose(0, make([]byte, 1024)); n != 256 {
+		t.Fatalf("partial close write n=%d", n)
+	}
+	// Pre-full buffer: Close before any byte -> zero.
+	if n := blockedClose(256, make([]byte, 16)); n != 0 {
+		t.Fatalf("zero close write n=%d", n)
+	}
+}
+
+// Deterministic locked double-close recheck (same hold-the-mutex technique):
+// contenders pass the first check while the test holds closelock, then the
+// waiters after the winner recheck under the lock.
+func TestHardenRudpCloseLockedRecheck(t *testing.T) {
+	fac := &RudpConn{}
+	ln, err := fac.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	addr := ln.(*RudpConn).listener.listenerconn.LocalAddr().String()
+	go func() {
+		for {
+			s, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			_ = s
+		}
+	}()
+	cli, err := (&RudpConn{}).Dial(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cli.(*RudpConn)
+	rc.closelock.Lock()
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = rc.Close()
+		}()
+	}
+	close(start)
+	time.Sleep(150 * time.Millisecond)
+	rc.closelock.Unlock()
+	wg.Wait()
+}
+
+// A Dial through a registered Control hook covers the non-nil controller
+// branch for the UDP dialer.
+func TestHardenRudpDialControlHook(t *testing.T) {
+	fac := &RudpConn{}
+	ln, err := fac.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	addr := ln.(*RudpConn).listener.listenerconn.LocalAddr().String()
+	go func() {
+		for {
+			if _, aerr := ln.Accept(); aerr != nil {
+				return
+			}
+		}
+	}()
+	old := gControlOnConnSetup
+	RegisterDialerController(func(network, address string, raw syscall.RawConn) error { return nil })
+	cli, err := (&RudpConn{}).Dial(addr)
+	if err != nil {
+		t.Fatalf("dial with control: %v", err)
+	}
+	gControlOnConnSetup = old
+	_ = cli.Close()
+
+	RegisterDialerController(func(network, address string, raw syscall.RawConn) error {
+		return errors.New("control denied")
+	})
+	if _, err := (&RudpConn{}).Dial(addr); err == nil {
+		t.Fatal("dial with failing control must fail")
+	}
+	gControlOnConnSetup = old
+}
+
+// Best-effort cancel-window hammer for the UDP DialContext: the Control hook
+// runs right before the kernel connect, so a scheduled Close lands around
+// socket setup (post-connect ctx check) or in the handshake loop (factory
+// closed). All outcomes are legal; the test asserts termination only.
+func TestHardenRudpDialCancelWindowHammer(t *testing.T) {
+	fac := &RudpConn{}
+	ln, err := fac.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	addr := ln.(*RudpConn).listener.listenerconn.LocalAddr().String()
+	go func() {
+		for {
+			if _, aerr := ln.Accept(); aerr != nil {
+				return
+			}
+		}
+	}()
+	old := gControlOnConnSetup
+	defer func() { gControlOnConnSetup = old }()
+	for attempt := 0; attempt < 1200; attempt++ {
+		c := &RudpConn{}
+		delay := time.Duration(attempt%1000) * time.Microsecond
+		RegisterDialerController(func(network, address string, raw syscall.RawConn) error {
+			go func() {
+				time.Sleep(delay)
+				_ = c.Close()
+			}()
+			return nil
+		})
+		if conn, derr := c.Dial(addr); derr == nil {
+			_ = conn.Close()
+		}
+	}
+	RegisterDialerController(func(network, address string, raw syscall.RawConn) error { return nil })
+}
+
+func hardenListenUDP(t *testing.T) *net.UDPConn {
+	t.Helper()
+	a, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	co, err := net.ListenUDP("udp", a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return co
+}
+
+// Dial-side failures: garbage handshake reply hits the protobuf failure
+// break; a silent peer hits the connect-timeout break. Listener-side: an
+// unsolicited datagram starts a sonny whose handshake times out and closes,
+// and stale map entries (packet from a closed sonny; closed entry swept
+// during another packet's scan) are evicted.
+func TestHardenRudpGarbageAndStale(t *testing.T) {
+	// Garbage reply during Dial connect loop.
+	garbageSrv := hardenListenUDP(t)
+	defer garbageSrv.Close()
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, sa, err := garbageSrv.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			_ = n
+			_, _ = garbageSrv.WriteToUDP([]byte("this-is-not-a-rudp-frame!!"), sa)
+		}
+	}()
+	gcfg := DefaultRudpConfig()
+	gcfg.ConnectTimeoutMs = 30000
+	gfac := &RudpConn{}
+	gfac.SetConfig(gcfg)
+	if _, err := gfac.Dial(garbageSrv.LocalAddr().String()); err == nil {
+		t.Fatal("dial with garbage reply must fail")
+	}
+
+	// Silent peer -> connect timeout.
+	silent := hardenListenUDP(t)
+	defer silent.Close()
+	scfg := DefaultRudpConfig()
+	scfg.ConnectTimeoutMs = 200
+	sfac := &RudpConn{}
+	sfac.SetConfig(scfg)
+	start := time.Now()
+	if _, err := sfac.Dial(silent.LocalAddr().String()); err == nil {
+		t.Fatal("dial to silent peer must time out")
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("connect timeout took too long")
+	}
+
+	// Listener: unsolicited datagram -> sonny handshake timeout self-close.
+	lcfg := DefaultRudpConfig()
+	lcfg.ConnectTimeoutMs = 200
+	lfac := &RudpConn{}
+	lfac.SetConfig(lcfg)
+	ln, err := lfac.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lc := ln.(*RudpConn)
+	sender := hardenListenUDP(t)
+	defer sender.Close()
+	dst, _ := net.ResolveUDPAddr("udp", lc.listener.listenerconn.LocalAddr().String())
+	if _, err := sender.WriteToUDP([]byte("unsolicited"), dst); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	// The sonny map is populated asynchronously by the recv loop; wait until
+	// the entry appears before waiting for the timeout self-close.
+	for time.Now().Before(deadline) && lenSyncMap(&lc.listener.sonny) == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	for time.Now().Before(deadline) && lenSyncMap(&lc.listener.sonny) != 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if lenSyncMap(&lc.listener.sonny) != 0 {
+		t.Fatal("timed-out sonny must remove itself")
+	}
+
+	// Closed sonny still keyed under the sender address: a packet from it is
+	// dropped via the load-closed branch.
+	closed := &RudpConn{
+		config:        lcfg,
+		listenersonny: &rudpConnListenerSonny{listener: lc.listener, dstaddr: sender.LocalAddr().(*net.UDPAddr)},
+	}
+	closed.isclose.Store(true)
+	lc.listener.sonny.Store(sender.LocalAddr().String(), closed)
+	if _, err := sender.WriteToUDP([]byte("from-closed"), dst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sender.WriteToUDP([]byte("from-closed-2"), dst); err != nil {
+		t.Fatal(err)
+	}
+
+	// A closed entry for a silent address is swept during the next packet's
+	// sonny Range (packet from a fresh sender creates its own sonny).
+	silentKey := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9999}
+	stale := &RudpConn{
+		config:        lcfg,
+		listenersonny: &rudpConnListenerSonny{listener: lc.listener, dstaddr: silentKey},
+	}
+	stale.isclose.Store(true)
+	lc.listener.sonny.Store(silentKey.String(), stale)
+	sender2 := hardenListenUDP(t)
+	defer sender2.Close()
+	if _, err := sender2.WriteToUDP([]byte("fresh"), dst); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := lc.listener.sonny.Load(silentKey.String()); !ok {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, ok := lc.listener.sonny.Load(silentKey.String()); ok {
+		t.Fatal("closed stale sonny must be swept")
+	}
+	if err := lc.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Accept skips queued closed/missing sonnies, and a full accept channel makes
+// a completed handshake self-close instead of being delivered.
+func TestHardenRudpAcceptStaleAndBacklog(t *testing.T) {
+	rudpCfg := DefaultRudpConfig()
+	rudpCfg.AcceptChanLen = 4
+	fac := &RudpConn{}
+	fac.SetConfig(rudpCfg)
+	ln, err := fac.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	lc := ln.(*RudpConn)
+	addr := lc.listener.listenerconn.LocalAddr().String()
+
+	deadAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1}
+	dead := &RudpConn{
+		config:        rudpCfg,
+		listenersonny: &rudpConnListenerSonny{listener: lc.listener, dstaddr: deadAddr},
+	}
+	dead.isclose.Store(true)
+	lc.listener.sonny.Store(deadAddr.String(), dead)
+	lc.listener.accept.WriteTimeout(dead, 100)
+	ghostAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 2}
+	ghost := &RudpConn{
+		config:        rudpCfg,
+		listenersonny: &rudpConnListenerSonny{listener: lc.listener, dstaddr: ghostAddr},
+	}
+	lc.listener.accept.WriteTimeout(ghost, 100)
+
+	got := make(chan Conn, 1)
+	go func() {
+		s, aerr := lc.Accept()
+		if aerr == nil {
+			got <- s
+		}
+	}()
+	time.Sleep(200 * time.Millisecond)
+	cli, err := (&RudpConn{}).Dial(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+	select {
+	case s := <-got:
+		if s == dead || s == ghost {
+			t.Fatal("accepted stale sonny")
+		}
+		_ = s.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("live sonny not accepted")
+	}
+
+	// Backlog: capacity-1 channel, no Accept consumer; the second completed
+	// handshake fails the 100ms push and self-closes server-side.
+	bcfg := DefaultRudpConfig()
+	bcfg.AcceptChanLen = 1
+	bfac := &RudpConn{}
+	bfac.SetConfig(bcfg)
+	bln, err := bfac.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bln.Close()
+	baddr := bln.(*RudpConn).listener.listenerconn.LocalAddr().String()
+	c1, err := (&RudpConn{}).Dial(baddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c1.Close()
+	time.Sleep(200 * time.Millisecond)
+	c2, err := (&RudpConn{}).Dial(baddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	// Give the accept goroutine time to hit push timeout and self-close c2.
+	time.Sleep(500 * time.Millisecond)
+}
+
+// Natural (non-Close) loop exits via the peer CLOSE frame. A CLOSE frame is
+// injected whitebox into the server FrameMgr (in-order id after handshake);
+// the server exits the main loop on IsRemoteClosed and runs its close stage
+// via WriteToUDP, and the outgoing CLOSE then drives the dialer down the same
+// path via conn.Write. A buffered-but-unread byte exercises the end-wait
+// timeout in the third pair.
+func TestHardenRudpRemoteCloseFlows(t *testing.T) {
+	cfg := DefaultRudpConfig()
+	cfg.CloseTimeoutMs = 300
+	cfg.CloseWaitTimeoutMs = 60
+
+	newPair := func(t *testing.T) (*RudpConn, *RudpConn) {
+		f := &RudpConn{}
+		f.SetConfig(cfg)
+		ln, err := f.Listen("127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		accepted := make(chan Conn, 1)
+		go func() {
+			s, aerr := ln.Accept()
+			if aerr == nil {
+				accepted <- s
+			}
+		}()
+		d := &RudpConn{}
+		d.SetConfig(cfg)
+		cli, err := d.Dial(ln.(*RudpConn).listener.listenerconn.LocalAddr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = cli.Close() })
+		srv := <-accepted
+		t.Cleanup(func() { _ = srv.Close() })
+		return cli.(*RudpConn), srv.(*RudpConn)
+	}
+	waitWg := func(ok func() bool, what string, d time.Duration) {
+		deadline := time.Now().Add(d)
+		for time.Now().Before(deadline) {
+			if ok() {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("%s did not exit on remote close", what)
+	}
+	injectClose := func(fm *FrameMgr, id int32) {
+		fm.OnRecvFrame(&Frame{
+			Type: int32(Frame_DATA),
+			Id:   id,
+			Data: &FrameData{Type: int32(FrameData_CLOSE)},
+		})
+	}
+
+	// Server observes injected CLOSE; dialer observes the server CLOSE.
+	cli, srv := newPair(t)
+	injectClose(srv.listenersonny.fm, 1)
+	waitWg(func() bool { return srv.listenersonny.wg.IsExit() }, "server sonny loop", 5*time.Second)
+	waitWg(func() bool { return cli.dialer.wg.IsExit() }, "dialer loop", 5*time.Second)
+
+	// Buffered recv data makes the server end-wait sleep until its timeout.
+	cli2, srv2 := newPair(t)
+	if _, err := cli2.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	waitWg(func() bool { return srv2.listenersonny.fm.GetRecvBufferSize() > 0 },
+		"data arrival", 5*time.Second)
+	injectClose(srv2.listenersonny.fm, 2)
+	start := time.Now()
+	waitWg(func() bool { return srv2.listenersonny.wg.IsExit() },
+		"buffered server sonny loop", 5*time.Second)
+	if d := time.Since(start); d < 50*time.Millisecond {
+		t.Fatalf("end-wait returned after %v, want >= CloseWaitTimeout", d)
+	}
+}
+
+// A peer that goes silent (its UDP socket is closed without the rudp CLOSE
+// handshake) makes the live side exit naturally on the heart-beat timeout,
+// then run its close stage. This takes ~10s (hardcoded hbTimeoutSecond).
+func TestHardenRudpHBTimeoutNaturalExit(t *testing.T) {
+	cfg := DefaultRudpConfig()
+	cfg.CloseTimeoutMs = 100
+	f := &RudpConn{}
+	f.SetConfig(cfg)
+	ln, err := f.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	accepted := make(chan Conn, 1)
+	go func() {
+		s, aerr := ln.Accept()
+		if aerr == nil {
+			accepted <- s
+		}
+	}()
+	d := &RudpConn{}
+	d.SetConfig(cfg)
+	cli, err := d.Dial(ln.(*RudpConn).listener.listenerconn.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := <-accepted
+	rsrv := srv.(*RudpConn)
+	// Abort the client socket directly: no CLOSE frame is sent; the server
+	// only sees silence and must time the heart beat out on its own.
+	if err := cli.(*RudpConn).dialer.conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	deadline := start.Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if rsrv.listenersonny.wg.IsExit() {
+			if elapsed := time.Since(start); elapsed < 9500*time.Millisecond {
+				t.Fatalf("hb timeout exit after %v, want ~10s", elapsed)
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("server sonny did not exit on heart-beat timeout")
+}
+
+// A garbled datagram arriving on a connected dialer socket is dropped by
+// the recv goroutine's Unmarshal error branch.
+func TestHardenRudpDialerGarbagePacket(t *testing.T) {
+	f := &RudpConn{}
+	ln, err := f.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	got := make(chan Conn, 1)
+	go func() {
+		s, aerr := ln.Accept()
+		if aerr == nil {
+			got <- s
+		}
+	}()
+	cli, err := (&RudpConn{}).Dial(ln.(*RudpConn).listener.listenerconn.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+	srv := <-got
+	defer srv.Close()
+
+	sender := hardenListenUDP(t)
+	defer sender.Close()
+	dst, _ := net.ResolveUDPAddr("udp", cli.(*RudpConn).dialer.conn.LocalAddr().String())
+	for i := 0; i < 3; i++ {
+		if _, err := sender.WriteToUDP([]byte("garbled-dialer-packet"), dst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Let the recv goroutine service the packets.
+	time.Sleep(250 * time.Millisecond)
+}
+
+// Race hammer for the listener-exit recheck right after the accept handshake
+// completes: a CONN datagram arrives, then the listener is stopped on a
+// microsecond sweep so shutdown occasionally lands between the connected
+// break and the wg recheck. All outcomes are legal; coverage is observed via
+// the cover profile.
+func TestHardenRudpAcceptExitRaceHammer(t *testing.T) {
+	sender := hardenListenUDP(t)
+	defer sender.Close()
+	cfg := DefaultRudpConfig()
+	cfg.ConnectTimeoutMs = 10000
+	fm := NewFrameMgr(cfg.CutSize, cfg.MaxId, cfg.BufferSize, cfg.MaxWin,
+		cfg.ResendTimems, cfg.Compress, cfg.Stat)
+	mb, err := fm.MarshalFrame(&Frame{
+		Type: int32(Frame_DATA),
+		Id:   0,
+		Data: &FrameData{Type: int32(FrameData_CONN)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 60; attempt++ {
+		ff := &RudpConn{}
+		ff.SetConfig(cfg)
+		l, lerr := ff.Listen("127.0.0.1:0")
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		lc := l.(*RudpConn)
+		dst, _ := net.ResolveUDPAddr("udp", lc.listener.listenerconn.LocalAddr().String())
+		if _, werr := sender.WriteToUDP(mb, dst); werr != nil {
+			t.Fatal(werr)
+		}
+		time.Sleep(time.Duration(attempt%40) * 50 * time.Microsecond)
+		_ = lc.Close()
+	}
+}
+
+// ---------- ricmp harden ----------
+
+// Pure state/error branches that need no raw socket: name/info, empty and
+// listener Read/Write rejects, closed rejects, lazy config, bad dial/listen
+// addresses and double Close.
+func TestHardenRicmpEmptyAndErrors(t *testing.T) {
+	c := &RicmpConn{}
+	if c.Name() != "ricmp" {
+		t.Fatalf("Name=%q", c.Name())
+	}
+	if c.Info() != "empty ricmp conn" {
+		t.Fatalf("Info=%q", c.Info())
+	}
+	if _, err := c.Read(nil); err == nil || !strings.Contains(err.Error(), "read empty buffer") {
+		t.Fatalf("nil Read err=%v", err)
+	}
+	if _, err := c.Write(nil); err == nil || !strings.Contains(err.Error(), "write empty data") {
+		t.Fatalf("nil Write err=%v", err)
+	}
+	if _, err := c.Read(make([]byte, 4)); err == nil || !strings.Contains(err.Error(), "empty conn") {
+		t.Fatalf("empty Read err=%v", err)
+	}
+	if _, err := c.Write([]byte("x")); err == nil || !strings.Contains(err.Error(), "empty conn") {
+		t.Fatalf("empty Write err=%v", err)
+	}
+	lsh := &RicmpConn{listener: &ricmpConnListener{}}
+	if _, err := lsh.Read(make([]byte, 4)); err == nil || !strings.Contains(err.Error(), "listener can not be read") {
+		t.Fatalf("listener Read err=%v", err)
+	}
+	if _, err := lsh.Write([]byte("x")); err == nil || !strings.Contains(err.Error(), "listener can not be write") {
+		t.Fatalf("listener Write err=%v", err)
+	}
+	// Listener Info with no open sockets must not dereference anything.
+	if s := lsh.Info(); !strings.Contains(s, "ricmp listener") {
+		t.Fatalf("listener Info=%q", s)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Read(make([]byte, 4)); err == nil || !strings.Contains(err.Error(), "read closed conn") {
+		t.Fatalf("closed Read err=%v", err)
+	}
+	if _, err := c.Write([]byte("x")); err == nil || !strings.Contains(err.Error(), "write closed conn") {
+		t.Fatalf("closed Write err=%v", err)
+	}
+	if cfg := c.GetConfig(); cfg == nil || cfg.MaxPacketSize == 0 {
+		t.Fatal("lazy GetConfig failed")
+	}
+	c.SetConfig(DefaultRicmpConfig())
+	if _, err := (&RicmpConn{}).Dial("127.0.0.1:70000"); err == nil {
+		t.Fatal("dial invalid address must fail")
+	}
+	if _, err := (&RicmpConn{}).Listen("host:1234"); err == nil {
+		t.Fatal("listen with host:port must fail")
+	}
+}
+
+// Locked recheck in Close: contenders pass the first isclose check and block
+// on closelock, so the second in-lock check is reached when they wake.
+func TestHardenRicmpCloseLockedRecheck(t *testing.T) {
+	cfg := DefaultRicmpConfig()
+	rc := &RicmpConn{id: "recheck", config: cfg,
+		listenersonny: &ricmpConnListenerSonny{listener: &ricmpConnListener{}}}
+	rc.closelock.Lock()
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = rc.Close()
+		}()
+	}
+	close(start)
+	time.Sleep(150 * time.Millisecond)
+	rc.closelock.Unlock()
+	wg.Wait()
+}
+
+// Whitebox FrameMgr Read/Write/Close behavior against in-memory FrameMgr
+// instances, mirroring the rudp lifecycle test without any ICMP socket.
+func TestHardenRicmpBufferLifecycle(t *testing.T) {
+	cfg := DefaultRicmpConfig()
+	cfg.BufferSize = 256
+	newFM := func() *FrameMgr {
+		return NewFrameMgr(cfg.CutSize, cfg.MaxId, cfg.BufferSize, cfg.MaxWin,
+			cfg.ResendTimems, cfg.Compress, cfg.Stat)
+	}
+	stoppedGroup := func() *thread.Group {
+		wg := thread.NewGroup("harden ricmp stopped", nil, nil)
+		wg.Stop()
+		return wg
+	}
+
+	u := &RicmpConn{config: cfg, dialer: &ricmpConnDialer{fm: newFM(), wg: stoppedGroup()}}
+	if _, err := u.Read(make([]byte, 4)); err == nil || !strings.Contains(err.Error(), "closed conn") {
+		t.Fatalf("empty read exited wg err=%v", err)
+	}
+	n, err := u.Write(make([]byte, 1024))
+	if n != 256 || err == nil {
+		t.Fatalf("partial blocked write n=%d err=%v", n, err)
+	}
+	n, err = u.Write(make([]byte, 8))
+	if n != 0 || err == nil {
+		t.Fatalf("full buffer write n=%d err=%v", n, err)
+	}
+
+	// Buffered data is copied out through Read, then the stopped group
+	// surfaces as "closed conn".
+	fm := newFM()
+	fm.OnRecvFrame(&Frame{
+		Type: int32(Frame_DATA),
+		Id:   0,
+		Data: &FrameData{Type: int32(FrameData_USER_DATA), Data: []byte("ping")},
+	})
+	fm.Update()
+	rd := &RicmpConn{config: cfg, dialer: &ricmpConnDialer{fm: fm, wg: stoppedGroup()}}
+	buf := make([]byte, 4)
+	if rn, rerr := rd.Read(buf); rerr != nil || string(buf[:rn]) != "ping" {
+		t.Fatalf("buffered read n=%d err=%v", rn, rerr)
+	}
+	if _, rerr := rd.Read(buf); rerr == nil {
+		t.Fatal("drained read must report closed wg")
+	}
+
+	blockedClose := func(prefill int, p []byte) int {
+		wg := thread.NewGroup("harden ricmp live", nil, nil)
+		live := &RicmpConn{config: cfg, dialer: &ricmpConnDialer{fm: newFM(), wg: wg}}
+		if prefill > 0 {
+			live.dialer.fm.WriteSendBuffer(make([]byte, prefill))
+		}
+		ch := make(chan int, 1)
+		go func() { wN, _ := live.Write(p); ch <- wN }()
+		time.Sleep(250 * time.Millisecond)
+		if err := live.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		select {
+		case wn := <-ch:
+			return wn
+		case <-time.After(3 * time.Second):
+			t.Fatal("blocked write did not unblock")
+			return -1
+		}
+	}
+	if n := blockedClose(0, make([]byte, 1024)); n != 256 {
+		t.Fatalf("partial close write n=%d", n)
+	}
+	if n := blockedClose(256, make([]byte, 16)); n != 0 {
+		t.Fatalf("zero close write n=%d", n)
+	}
+
+	// listenersonny-side Read/Write use the same FrameMgr plumbing.
+	sfm := newFM()
+	sfm.OnRecvFrame(&Frame{
+		Type: int32(Frame_DATA),
+		Id:   0,
+		Data: &FrameData{Type: int32(FrameData_USER_DATA), Data: []byte("pong")},
+	})
+	sfm.Update()
+	sonny := &RicmpConn{id: "sonny", config: cfg,
+		listenersonny: &ricmpConnListenerSonny{fm: sfm, wg: stoppedGroup()}}
+	sbuf := make([]byte, 4)
+	if rn, rerr := sonny.Read(sbuf); rerr != nil || string(sbuf[:rn]) != "pong" {
+		t.Fatalf("sonny buffered read n=%d err=%v", rn, rerr)
+	}
+	if wn, werr := sonny.Write([]byte("ab")); werr != nil || wn != 2 {
+		t.Fatalf("sonny small write n=%d err=%v", wn, werr)
+	}
+
+	// A live listenersonny Read sleeps on an empty recv buffer until Close.
+	efm := newFM()
+	ewg := thread.NewGroup("harden ricmp sonny live", nil, nil)
+	emptySonny := &RicmpConn{id: "esonny", config: cfg,
+		listenersonny: &ricmpConnListenerSonny{fm: efm, wg: ewg, listener: &ricmpConnListener{}}}
+	errc := make(chan error, 1)
+	go func() { _, e := emptySonny.Read(make([]byte, 4)); errc <- e }()
+	time.Sleep(250 * time.Millisecond)
+	if err := emptySonny.Close(); err != nil {
+		t.Fatalf("sonny close: %v", err)
+	}
+	select {
+	case e := <-errc:
+		if e == nil || !strings.Contains(e.Error(), "read closed conn") {
+			t.Fatalf("sonny read after close err=%v", e)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("sonny blocked read did not unblock")
+	}
+
+	// Listener-side Close closes the accept channel, all tracked sockets
+	// (none here) and every tracked sonny, then stops the group.
+	lwg := thread.NewGroup("harden ricmp listener", nil, nil)
+	lc := &RicmpConn{id: "lc", config: cfg, listener: &ricmpConnListener{
+		accept: common.NewChannel(2), wg: lwg,
+	}}
+	s1 := &RicmpConn{id: "s1", config: cfg, listenersonny: &ricmpConnListenerSonny{listener: lc.listener}}
+	lc.listener.sonny.Store("s1", s1)
+	if err := lc.Close(); err != nil {
+		t.Fatalf("listener close: %v", err)
+	}
+	if _, aerr := lc.Accept(); aerr == nil {
+		t.Fatal("Accept after listener close must fail")
+	}
+}
+
+// Accept pops closed/missing entries and finally surfaces the listener close.
+func TestHardenRicmpAcceptSkipsStale(t *testing.T) {
+	cfg := DefaultRicmpConfig()
+	wg := thread.NewGroup("harden ricmp accept", nil, nil)
+	lc := &RicmpConn{id: "lc", config: cfg, listener: &ricmpConnListener{
+		accept: common.NewChannel(4), wg: wg,
+	}}
+	closed := &RicmpConn{id: "s1", config: cfg,
+		listenersonny: &ricmpConnListenerSonny{listener: lc.listener}}
+	closed.isclose.Store(true)
+	lc.listener.sonny.Store("s1", closed)
+	lc.listener.accept.Write(closed)
+	lc.listener.accept.Write(&RicmpConn{id: "ghost", config: cfg,
+		listenersonny: &ricmpConnListenerSonny{listener: lc.listener}})
+	live := &RicmpConn{id: "s3", config: cfg,
+		listenersonny: &ricmpConnListenerSonny{listener: lc.listener}}
+	lc.listener.sonny.Store("s3", live)
+	lc.listener.accept.Write(live)
+
+	got := make(chan Conn, 1)
+	go func() {
+		s, err := lc.Accept()
+		if err == nil {
+			got <- s
+		}
+	}()
+	select {
+	case s := <-got:
+		if s != live {
+			t.Fatal("accepted stale sonny")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("live sonny not accepted")
+	}
+	if err := lc.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Unprivileged paths only: dgram ping socket (Darwin/Linux when permitted),
+// source-IP probe, packet-conn family detection and Info formatting from a
+// real socket. All failures to open the dgram socket are environment skips.
+func TestHardenRicmpDgramSocketsAndHelpers(t *testing.T) {
+	pc, mode, err := dialRicmpSocket(icmpFamilyV4, true)
+	if err != nil {
+		t.Skipf("unprivileged icmp dgram socket unavailable: %v", err)
+	}
+	defer pc.Close()
+	if mode != icmpModeDgram {
+		t.Fatalf("mode=%q want dgram", mode)
+	}
+	if fam := familyFromPacketConn(pc); fam != icmpFamilyV4 {
+		t.Fatalf("packet conn family=%d want v4", fam)
+	}
+	if id := datagramEchoID(pc); id < 0 {
+		t.Fatalf("datagram echo id %d", id)
+	}
+	addr := &net.IPAddr{IP: net.ParseIP("127.0.0.1")}
+	d := &RicmpConn{id: "dialer-info", config: DefaultRicmpConfig(),
+		dialer: &ricmpConnDialer{conn: pc, serveraddr: addr}}
+	if s := d.Info(); !strings.Contains(s, "ricmp dialer") {
+		t.Fatalf("dialer Info=%q", s)
+	}
+	s := &RicmpConn{id: "sonny-info", config: DefaultRicmpConfig(),
+		listenersonny: &ricmpConnListenerSonny{fatherconn: pc, dstaddr: addr}}
+	if si := s.Info(); !strings.Contains(si, "listenersonny") {
+		t.Fatalf("sonny Info=%q", si)
+	}
+
+	// Source-IP probe uses an unconnected UDP socket: loopback is always
+	// routable and the result is cached.
+	probe := &RicmpConn{}
+	if ip := probe.sourceIPTowards(net.ParseIP("127.0.0.1"), ""); ip == nil {
+		t.Fatal("source IP toward loopback is nil")
+	}
+	if ip := probe.sourceIPTowards(net.ParseIP("127.0.0.1"), ""); ip == nil {
+		t.Fatal("cached source IP is nil")
+	}
+
+	// IPv6 dgram is unsupported on Darwin; elsewhere it may or may not
+	// exist. Only assert that both code paths (error string / success)
+	// return consistently.
+	if pc6, m6, err6 := dialRicmpSocket(icmpFamilyV6, true); err6 == nil {
+		defer pc6.Close()
+		if m6 != icmpModeDgram {
+			t.Fatalf("v6 mode=%q", m6)
+		}
+		if fam := familyFromPacketConn(pc6); fam != icmpFamilyV6 {
+			t.Fatalf("v6 packet conn family=%d want v6", fam)
+		}
+	}
+}
+
+// Two unprivileged dgram ping sockets on loopback: a malformed ICMP echo
+// (valid echo header, garbage protobuf body) reaches recv_icmp and must take
+// the decode-error return. If the platform does not deliver dgram-to-dgram
+// echoes locally, the test skips.
+func TestHardenRicmpDgramRecvDecodeError(t *testing.T) {
+	a, _, err := dialRicmpSocket(icmpFamilyV4, true)
+	if err != nil {
+		t.Skipf("unprivileged icmp dgram socket unavailable: %v", err)
+	}
+	defer a.Close()
+	b, _, err := dialRicmpSocket(icmpFamilyV4, true)
+	if err != nil {
+		t.Skipf("second dgram socket unavailable: %v", err)
+	}
+	defer b.Close()
+	pb := b.LocalAddr().(*net.UDPAddr)
+	msg, merr := (&icmp.Message{
+		Type: ipv4.ICMPTypeEcho,
+		Code: 0,
+		Body: &icmp.Echo{
+			ID:   pb.Port,
+			Seq:  1,
+			Data: []byte("this-is-not-an-icmpmsg-protobuf!!"),
+		},
+	}).Marshal(nil)
+	if merr != nil {
+		t.Fatal(merr)
+	}
+	if _, werr := a.WriteTo(msg, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: pb.Port}); werr != nil {
+		t.Skipf("dgram write failed: %v", werr)
+	}
+	buf := make([]byte, 2048)
+	b.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
+	n, _, rerr, _, _, _, _ := (&RicmpConn{}).recv_icmp(b, buf)
+	if rerr != nil {
+		return // expected decode error
+	}
+	if n == 0 {
+		t.Skip("platform did not deliver dgram-to-dgram echo")
+	}
+	t.Fatalf("malformed payload decoded without error, n=%d", n)
+}
+
+// A forced dgram dial against loopback with no raw listener cannot complete
+// the FrameMgr handshake (the kernel may answer the echo itself, but that
+// reply carries the client flag, not the server flag), so the connect loop
+// must hit its timeout; closing the factory mid-handshake returns the closed
+// error. Everything stays on loopback.
+func TestHardenRicmpDgramDialFailures(t *testing.T) {
+	if _, _, err := dialRicmpSocket(icmpFamilyV4, true); err != nil {
+		t.Skipf("unprivileged icmp dgram socket unavailable: %v", err)
+	}
+	cfg := DefaultRicmpConfig()
+	cfg.ConnectTimeoutMs = 200
+	c1 := &RicmpConn{}
+	c1.SetConfig(cfg)
+	start := time.Now()
+	if _, err := c1.dial("127.0.0.1", true); err == nil {
+		t.Fatal("dgram dial with no server must fail")
+	} else if time.Since(start) > 5*time.Second {
+		t.Fatalf("connect timeout took too long: %v", err)
+	}
+
+	c2 := &RicmpConn{}
+	c2.SetConfig(cfg)
+	errc := make(chan error, 1)
+	go func() {
+		_, err := c2.dial("127.0.0.1", true)
+		errc <- err
+	}()
+	time.Sleep(80 * time.Millisecond)
+	if err := c2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errc:
+		if err == nil || !strings.Contains(err.Error(), "closed conn") {
+			t.Fatalf("mid-handshake close err=%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("mid-handshake dial did not return")
 	}
 }
