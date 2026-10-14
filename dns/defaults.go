@@ -8,8 +8,10 @@ var DefaultDirectTLDs = []string{
 	"xn--io0a7i", // .网络
 }
 
-// DefaultChinaMainDomains 常见的境内主流主干域名（开箱即用高频命中）
-var DefaultChinaMainDomains = []string{
+// defaultChinaMainDomainsSeed 高频主干域名（文档/可读种子列表）。
+// 完整直连表在 init 时由 embed 的 accelerated-domains.china.conf 合并进
+// DefaultChinaMainDomains，避免依赖外部文件也能正确分流。
+var defaultChinaMainDomainsSeed = []string{
 	"baidu.com", "baidupcs.com", "bdimg.com", "bdstatic.com",
 	"qq.com", "tencent.com", "weixin.com", "wechat.com", "qpic.cn", "gtimg.com",
 	"taobao.com", "alipay.com", "alibaba.com", "aliyun.com", "alicdn.com", "tmall.com",
@@ -24,9 +26,14 @@ var DefaultChinaMainDomains = []string{
 	"kuaishou.com", "yximgs.com",
 	"xiaomi.com", "mi.com", "miui.com",
 	"huawei.com", "vmall.com", "hicloud.com",
+	"xiaohongshu.com", "xiaohongshu.net", "xhscdn.com", "xhscdn.net",
 	"ipip.net", "3322.net",
 	"apple.com.cn", "apple.com", // apple 国内 CDN 优化直连可根据需要配置
 }
+
+// DefaultChinaMainDomains 内置境内直连域名（种子 + 完整 china-list）。
+// 由 init 填充；消费者（yellowsocks router、本包 Resolver）直接使用本变量即可。
+var DefaultChinaMainDomains []string
 
 // DefaultDomesticDNS 默认境内直连 DNS 列表 (UDP 及 DoH)
 var DefaultDomesticDNS = []string{
@@ -57,4 +64,8 @@ var DefaultReservedCIDRs = []string{
 	"fc00::/7",      // 唯一本地地址
 	"fe80::/10",     // 链路本地
 	"ff00::/8",      // IPv6 组播
+}
+
+func init() {
+	DefaultChinaMainDomains = buildDefaultChinaMainDomains()
 }
