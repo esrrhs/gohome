@@ -352,9 +352,9 @@ func Test0008TCP(t *testing.T) {
 			}
 			//fmt.Println("end Write")
 			speed += len(data)
-			if time.Now().Sub(start) > time.Second {
+			if time.Since(start) > time.Second {
 				speed = speed / 1024 / 1024
-				loggo.Info("write speed %v MB per second", float64(speed)/float64(time.Now().Sub(start)/time.Second))
+				loggo.Info("write speed %v MB per second", float64(speed)/float64(time.Since(start)/time.Second))
 				speed = 0
 				start = time.Now()
 			}
@@ -383,9 +383,9 @@ func Test0008TCP(t *testing.T) {
 				return
 			}
 			speed += n
-			if time.Now().Sub(start) > time.Second {
+			if time.Since(start) > time.Second {
 				speed = speed / 1024 / 1024
-				loggo.Info("read speed %v MB per second", float64(speed)/float64(time.Now().Sub(start)/time.Second))
+				loggo.Info("read speed %v MB per second", float64(speed)/float64(time.Since(start)/time.Second))
 				speed = 0
 				start = time.Now()
 			}

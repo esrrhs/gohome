@@ -189,11 +189,9 @@ func sock5SetRequestCmd(conn *net.TCPConn, cmd byte, host string, port int, time
 
 	rep := hdr[1]
 	if rep != 0 {
-		failure := "unknown error"
+		failure := fmt.Sprintf("reply code %d", rep)
 		if int(rep) < len(socks5Errors) && socks5Errors[rep] != "" {
 			failure = socks5Errors[rep]
-		} else {
-			failure = fmt.Sprintf("reply code %d", rep)
 		}
 		return "", errors.New("proxy: SOCKS5 proxy failed to " + cmdName + ": " + failure)
 	}

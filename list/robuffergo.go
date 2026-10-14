@@ -69,7 +69,7 @@ func NewROBuffer(len int, startid int, maxid int) *ROBuffergo {
 	buffer.id = make([]int, len)
 	buffer.len = len
 	buffer.maxid = maxid
-	for i, _ := range buffer.id {
+	for i := range buffer.id {
 		buffer.id[i] = startid + i
 	}
 	return buffer

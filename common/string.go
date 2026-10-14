@@ -248,7 +248,7 @@ func GzipString(data string) string {
 	w := gzip.NewWriter(&b)
 	w.Write([]byte(data))
 	w.Close()
-	return string(b.Bytes())
+	return b.String()
 }
 
 func GzipStringBestCompression(data string) string {
@@ -259,7 +259,7 @@ func GzipStringBestCompression(data string) string {
 	}
 	w.Write([]byte(data))
 	w.Close()
-	return string(b.Bytes())
+	return b.String()
 }
 
 func GzipStringBestSpeed(data string) string {
@@ -270,7 +270,7 @@ func GzipStringBestSpeed(data string) string {
 	}
 	w.Write([]byte(data))
 	w.Close()
-	return string(b.Bytes())
+	return b.String()
 }
 
 func GunzipString(data string) string {

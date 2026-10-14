@@ -149,7 +149,7 @@ func TestHardenDecayTTLDirect(t *testing.T) {
 	full.SetQuestion(dns.Fqdn("full.com"), dns.TypeA)
 	rrA, _ := dns.NewRR(fmt.Sprintf("%s 300 IN A 1.2.3.4", dns.Fqdn("full.com")))
 	rrNs, _ := dns.NewRR(fmt.Sprintf("%s 300 IN NS ns.full.com.", dns.Fqdn("full.com")))
-	rrSmall, _ := dns.NewRR(fmt.Sprintf("small.com. 5 IN A 2.3.4.5"))
+	rrSmall, _ := dns.NewRR("small.com. 5 IN A 2.3.4.5")
 	full.Answer = append(full.Answer, rrA)
 	full.Ns = append(full.Ns, rrNs)
 	full.Extra = append(full.Extra, rrSmall)

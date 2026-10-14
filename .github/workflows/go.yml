@@ -48,6 +48,16 @@ jobs:
         set -euo pipefail
         go vet $(go list ./... | grep -v '/crypto/cryptonight/inter/')
 
+    # 静态检查走 .golangci.yml 里收敛过的规则集（已排除 quickfix 风格改写、
+    # 会触碰公开 API 签名与既有日志文案的检查，以及 inter/ 上游移植目录）。
+    # 版本号与配置同步升级，避免 install.sh 取到不兼容的新默认规则。
+    - name: Lint
+      run: |
+        set -euo pipefail
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.14.0/install.sh \
+          | sh -s -- -b "$(go env GOPATH)/bin" v2.14.0
+        "$(go env GOPATH)/bin/golangci-lint" run --timeout 10m
+
     # network 包单包非 race 就要约 500s，逼近 go test 默认的 10m 上限，
     # 机器负载稍高就会被误判成超时失败，因此显式放宽。
     - name: Test

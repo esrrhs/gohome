@@ -45,7 +45,7 @@ func ShellRun(script string, silent bool, param ...string) (string, error) {
 	}
 
 	if !silent {
-		loggo.Info("shell Run ok %v %v", cmd.Args, time.Now().Sub(begin))
+		loggo.Info("shell Run ok %v %v", cmd.Args, time.Since(begin))
 		loggo.Info("%v", outstr)
 	}
 
@@ -80,7 +80,7 @@ func ShellRunTimeout(script string, silent bool, timeout int, param ...string) (
 	}
 
 	if !silent {
-		loggo.Info("shell Run ok %v %v", cmd.Args, time.Now().Sub(begin))
+		loggo.Info("shell Run ok %v %v", cmd.Args, time.Since(begin))
 		loggo.Info("%v", outstr)
 	}
 	return outstr, nil
@@ -102,7 +102,7 @@ func ShellRunCommand(command string, silent bool) (string, error) {
 	}
 
 	if !silent {
-		loggo.Info("shell RunCommand ok %v %v", cmd.Args, time.Now().Sub(begin))
+		loggo.Info("shell RunCommand ok %v %v", cmd.Args, time.Since(begin))
 		loggo.Info("%v", outstr)
 	}
 
@@ -128,7 +128,7 @@ func ShellRunExe(exe string, silent bool, param ...string) (string, error) {
 	}
 
 	if !silent {
-		loggo.Info("shell Run ok %v %v", cmd.Args, time.Now().Sub(begin))
+		loggo.Info("shell Run ok %v %v", cmd.Args, time.Since(begin))
 		loggo.Info("%v", outstr)
 	}
 
@@ -160,7 +160,7 @@ func ShellRunExeTimeout(exe string, silent bool, timeout int, param ...string) (
 	}
 
 	if !silent {
-		loggo.Info("shell Run ok %v %v", cmd.Args, time.Now().Sub(begin))
+		loggo.Info("shell Run ok %v %v", cmd.Args, time.Since(begin))
 		loggo.Info("%v", outstr)
 	}
 
@@ -182,7 +182,7 @@ func ShellRunExeRaw(exe string, silent bool, param ...string) string {
 	outstr := string(out)
 
 	if !silent {
-		loggo.Info("shell Run ok %v %v", cmd.Args, time.Now().Sub(begin))
+		loggo.Info("shell Run ok %v %v", cmd.Args, time.Since(begin))
 		loggo.Info("%v", outstr)
 	}
 

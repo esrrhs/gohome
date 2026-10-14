@@ -1,0 +1,67 @@
+# golangci-lint v2 配置。
+#
+# 原则：门禁要能挡住真实缺陷，而不是收集风格偏好。因此：
+#   - 上游移植目录（crypto/cryptonight/inter、arith_ref.go）沿用 gofmt/vet 的
+#     既定豁免，跟随上游同步，不纳入本仓库门禁。
+#   - quickfix（QF*）这类纯改写建议、以及会触碰公开 API 签名或既有日志文案的
+#     检查（ST1005/ST1008/SA1019），一律关闭。
+version: "2"
+
+linters:
+  # 不启用 errcheck：本仓库大量 best-effort 写入（日志输出、统计滑窗、压缩流）
+  # 刻意忽略返回值，逐处补 "_ =" 会产生 30+ 处无语义变化的改动，收益低于风险。
+  default: none
+  enable:
+    - govet
+    - ineffassign
+    - unused
+    - staticcheck
+  settings:
+    staticcheck:
+      checks:
+        - all
+        - -SA1004 # 极短 sleep：测试里用于推进时序，属刻意
+        - -SA1019 # 废弃 API：ioutil / x-net http2 / rand.Seed，替换属破坏性改动
+        - -SA9003 # 空分支：本仓库里多是注释掉的调试日志，属既定写法
+        - -ST1000 # 包注释：本仓库各包均无包级注释，属既定形态
+        - -ST1003 # 下划线命名：移植自 C/C++ 的标识符，改名触及面过大
+        - -ST1020 # 注释须以标识符开头：中英文注释混排，格式强制收益低
+        - -ST1021
+        - -ST1022
+        - -ST1005 # 错误消息首字母大写：改动会改变既有错误文案
+        - -ST1008 # error 作为最后一个返回值：Front() 等是公开 API，签名不可动
+        - -QF1001 # 德摩根律改写
+        - -QF1003 # 带标签 switch 改写
+        - -QF1004 # strings.ReplaceAll 改写
+        - -QF1006 # 循环条件提升
+        - -QF1007 # 合并声明与赋值
+        - -QF1010 # 参数转 string
+        - -QF1012 # fmt.Fprint 改写
+  exclusions:
+    generated: lax
+    presets:
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - crypto/cryptonight/inter
+      - crypto/cryptonight/arith_ref.go
+    rules:
+      # 测试里常出现"赋值后不再读取"的写法（如 err, d = x.Front()），
+      # 不影响断言，不纳入 ineffassign
+      - path: _test\.go
+        linters:
+          - ineffassign
+      # go.mod 声明 go 1.26 而本地工具链是 1.27 时 govet 会报
+      # "cannot inline call to ..."，属工具链版本错配噪音
+      - text: "cannot inline call to"
+        linters:
+          - govet
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    paths:
+      - crypto/cryptonight/inter
+      - crypto/cryptonight/arith_ref.go

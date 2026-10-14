@@ -38,7 +38,7 @@ func TestNew1(t *testing.T) {
 	fmt.Println(d)
 	rob.PopFront()
 
-	err, d = rob.Front()
+	err, _ = rob.Front()
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -64,7 +64,7 @@ func TestNew1(t *testing.T) {
 		fmt.Println(err)
 	}
 
-	err, d = rob.Front()
+	err, _ = rob.Front()
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -104,7 +104,7 @@ func TestNew2(t *testing.T) {
 		fmt.Println(err)
 	}
 	fmt.Println(d)
-	err, d = rob.Get(11)
+	err, _ = rob.Get(11)
 	if err != nil {
 		fmt.Println(err)
 	}
