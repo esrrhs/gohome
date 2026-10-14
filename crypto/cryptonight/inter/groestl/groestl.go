@@ -172,6 +172,13 @@ func (s *state) Write(data []byte) (n int, err error) {
 // Sum process remaining data (including padding), perform
 // output transformation.
 func (s *state) Sum(b []byte) []byte {
+	// hash.Hash 契约：Sum 不得改变底层哈希状态。原实现直接在 s 上补 0x80、
+	// 追加长度块并执行 transform/outputTransformation，导致连续两次 Sum
+	// 结果不同，且 Sum 后继续 Write 得到的摘要也是错的。这里在副本上完成
+	// 填充与收尾（state 全为值类型字段，浅拷贝即深拷贝）。
+	s0 := *s
+	s = &s0
+
 	s.buffer[s.bufPtr] = 0x80
 	s.bufPtr++
 
