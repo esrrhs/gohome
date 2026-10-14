@@ -15,7 +15,6 @@ type hashFunc struct {
 	tweak         [3]uint64
 	block         [threefish.BlockSize1024]byte
 	off           int
-	hasMsg        bool
 }
 
 func (s *hashFunc) BlockSize() int { return threefish.BlockSize1024 }
@@ -27,7 +26,6 @@ func (s *hashFunc) Reset() {
 		s.block[i] = 0
 	}
 	s.off = 0
-	s.hasMsg = false
 
 	s.hVal = s.hValCpy
 
@@ -36,9 +34,11 @@ func (s *hashFunc) Reset() {
 }
 
 func (s *hashFunc) Write(p []byte) (n int, err error) {
-	s.hasMsg = true
-
 	n = len(p)
+	if n == 0 {
+		return
+	}
+
 	var block [16]uint64
 
 	dif := threefish.BlockSize1024 - s.off
@@ -73,9 +73,10 @@ func (s *hashFunc) Write(p []byte) (n int, err error) {
 func (s *hashFunc) Sum(b []byte) []byte {
 	s0 := *s // copy
 
-	if s0.hasMsg {
-		s0.finalizeHash()
-	}
+	// 无条件收尾：Skein 的空消息摘要（上游 KAT 向量 0）本身就包含一个
+	// 全零填充的消息块，一旦跳过 finalizeHash 就会退化成 output(G)，
+	// 与从不写入任何字节的实例应有的结果不符。
+	s0.finalizeHash()
 
 	var out [threefish.BlockSize1024]byte
 	var ctr uint64
