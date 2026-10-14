@@ -12,7 +12,6 @@ type hashFunc struct {
 	tweak         [3]uint64
 	block         [BlockSize]byte
 	off           int
-	hasMsg        bool
 }
 
 func (s *hashFunc) BlockSize() int { return BlockSize }
@@ -24,7 +23,6 @@ func (s *hashFunc) Reset() {
 		s.block[i] = 0
 	}
 	s.off = 0
-	s.hasMsg = false
 
 	s.hVal = s.hValCpy
 
@@ -33,9 +31,11 @@ func (s *hashFunc) Reset() {
 }
 
 func (s *hashFunc) Write(p []byte) (n int, err error) {
-	s.hasMsg = true
-
 	n = len(p)
+	if n == 0 {
+		return
+	}
+
 	var block [8]uint64
 
 	dif := BlockSize - s.off
@@ -70,18 +70,23 @@ func (s *hashFunc) Write(p []byte) (n int, err error) {
 func (s *hashFunc) Sum(b []byte) []byte {
 	s0 := *s // copy
 
-	if s0.hasMsg {
-		s0.finalizeHash()
-	}
+	// 无条件收尾：Skein 的空消息摘要（上游 KAT 向量 0）本身就包含一个
+	// 全零填充的消息块，一旦跳过 finalizeHash 就会退化成 output(G)，
+	// 与从不写入任何字节的实例应有的结果不符。
+	s0.finalizeHash()
 
 	var out [BlockSize]byte
 	var ctr uint64
+	start := len(b)
 	for i := s0.hashsize; i > 0; i -= BlockSize {
 		s0.output(&out, ctr)
 		ctr++
 		b = append(b, out[:]...)
 	}
-	return b[:s0.hashsize]
+
+	// hash.Hash 契约：返回值必须保留调用方传入的前缀 b，因此末尾切片
+	// 起点是 start 而非 0（hashsize 不足整块时同时裁掉最后一个输出块的余尾）。
+	return b[:start+s0.hashsize]
 }
 
 func (s *hashFunc) update(block *[8]uint64) {
