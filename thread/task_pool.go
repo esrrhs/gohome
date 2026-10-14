@@ -76,7 +76,8 @@ func (tp *TaskPool) worker(id int) {
 				loggo.Debug("Worker %d got task %d", id, task.id)
 				tasks = append(tasks, task)
 			default:
-				break
+				// 队列已取空；break 只会跳出 select，真正退出靠下面的
+				// task.f == nil 判断（task 仍是零值）
 			}
 
 			if task.f == nil || len(tasks) >= batchCount {

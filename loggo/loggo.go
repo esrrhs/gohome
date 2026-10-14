@@ -309,7 +309,7 @@ func checkDate(config Config) {
 		}
 
 		strs := strings.Split(f.Name(), "_")
-		if strs == nil || len(strs) < 3 {
+		if len(strs) < 3 {
 			continue
 		}
 

@@ -26,10 +26,10 @@ func (ct *CongestionTest) RecvMsg() bool {
 		return false
 	}
 	t := v.(time.Time)
-	if time.Now().Sub(t) < time.Millisecond*time.Duration(ct.rtt_ms) {
+	if time.Since(t) < time.Millisecond*time.Duration(ct.rtt_ms) {
 		return false
 	}
-	if time.Now().Sub(ct.last) >= time.Millisecond*100 {
+	if time.Since(ct.last) >= time.Millisecond*100 {
 		ct.last = time.Now()
 		ct.send = 0
 	}
@@ -71,7 +71,7 @@ func TestBB1(t *testing.T) {
 			send_mbps += ct.packet_size
 		}
 
-		if time.Now().Sub(lastupdate) > time.Second {
+		if time.Since(lastupdate) > time.Second {
 			lastupdate = time.Now()
 			//fmt.Printf("begin maxfly %d flyeddata %d flyingdata %d status %d\n", bb.maxfly, bb.flyeddata, bb.flyingdata, bb.status)
 			bb.Update()
@@ -87,7 +87,7 @@ func TestBB1(t *testing.T) {
 			recv_mbps += ct.packet_size
 		}
 
-		if time.Now().Sub(last) >= time.Second {
+		if time.Since(last) >= time.Second {
 			last = time.Now()
 			fmt.Printf("send %d MB/s recv %d MB/s %d/%d \n", send_mbps/1024/1024, recv_mbps/1024/1024, ct.buf.Size(), ct.buf.Capacity())
 			recv_mbps = 0
@@ -96,13 +96,13 @@ func TestBB1(t *testing.T) {
 
 		time.Sleep(10)
 
-		if time.Now().Sub(begin) >= 30*time.Second {
+		if time.Since(begin) >= 30*time.Second {
 			begin = time.Now()
 			fmt.Printf("change from %d to %d \n", ct.bw_mbps, ct.bw_mbps*2)
 			ct.bw_mbps = ct.bw_mbps * 2
 		}
 
-		if time.Now().Sub(start) >= 60*time.Second {
+		if time.Since(start) >= 60*time.Second {
 			break
 		}
 	}
@@ -126,8 +126,8 @@ func TestBB2(t *testing.T) {
 	begin := time.Now()
 	start := time.Now()
 	for {
-		if time.Now().Sub(begin) >= 10*time.Second {
-			if time.Now().Sub(begin) >= 30*time.Second {
+		if time.Since(begin) >= 10*time.Second {
+			if time.Since(begin) >= 30*time.Second {
 				begin = time.Now()
 				fmt.Printf("pause sending \n")
 			}
@@ -141,7 +141,7 @@ func TestBB2(t *testing.T) {
 			}
 		}
 
-		if time.Now().Sub(lastupdate) > time.Second {
+		if time.Since(lastupdate) > time.Second {
 			lastupdate = time.Now()
 			//fmt.Printf("begin maxfly %d flyeddata %d flyingdata %d status %d\n", bb.maxfly, bb.flyeddata, bb.flyingdata, bb.status)
 			bb.Update()
@@ -157,7 +157,7 @@ func TestBB2(t *testing.T) {
 			recv_mbps += ct.packet_size
 		}
 
-		if time.Now().Sub(last) >= time.Second {
+		if time.Since(last) >= time.Second {
 			last = time.Now()
 			fmt.Printf("send %d MB/s recv %d MB/s %d/%d \n", send_mbps/1024/1024, recv_mbps/1024/1024, ct.buf.Size(), ct.buf.Capacity())
 			recv_mbps = 0
@@ -166,7 +166,7 @@ func TestBB2(t *testing.T) {
 
 		time.Sleep(10)
 
-		if time.Now().Sub(start) >= 60*time.Second {
+		if time.Since(start) >= 60*time.Second {
 			break
 		}
 	}

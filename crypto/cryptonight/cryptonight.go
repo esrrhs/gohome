@@ -55,45 +55,45 @@ func Algo() []string {
 // When variant is 1, data is required to have at least 43 bytes.
 // This is assumed and not checked by Sum. If this condition doesn't meet, Sum
 // will panic straightforward.
-func (cn *CryptoNight) Sum(data []byte, variant string, height uint64) []byte {
+func (cc *CryptoNight) Sum(data []byte, variant string, height uint64) []byte {
 	var sum []byte
 	switch variant {
 	case "cn/0":
-		sum = cn.sum0(data)
+		sum = cc.sum0(data)
 	case "cn/1":
-		sum = cn.sum1(data)
+		sum = cc.sum1(data)
 	case "cn/2":
-		sum = cn.sum2(data)
+		sum = cc.sum2(data)
 	case "cn/r":
-		sum = cn.sumr(data, height)
+		sum = cc.sumr(data, height)
 	case "cn/fast":
-		sum = cn.sum1fast(data)
+		sum = cc.sum1fast(data)
 	case "cn/half":
-		sum = cn.sum2half(data)
+		sum = cc.sum2half(data)
 	case "cn/xao":
-		sum = cn.sum0xao(data)
+		sum = cc.sum0xao(data)
 	case "cn/rto":
-		sum = cn.sum1rto(data)
+		sum = cc.sum1rto(data)
 	case "cn/rwz":
-		sum = cn.sum2rwz(data)
+		sum = cc.sum2rwz(data)
 	case "cn/zls":
-		sum = cn.sum2zls(data)
+		sum = cc.sum2zls(data)
 	case "cn/double":
-		sum = cn.sum2double(data)
+		sum = cc.sum2double(data)
 	case "cn-lite/0":
-		sum = cn.sum0lite(data)
+		sum = cc.sum0lite(data)
 	case "cn-lite/1":
-		sum = cn.sum1lite(data)
+		sum = cc.sum1lite(data)
 	case "cn-heavy/0":
-		sum = cn.sum0heavy(data)
+		sum = cc.sum0heavy(data)
 	case "cn-heavy/tube":
-		sum = cn.sum1heavy(data)
+		sum = cc.sum1heavy(data)
 	case "cn-heavy/xhv":
-		sum = cn.sum0heavyxhv(data)
+		sum = cc.sum0heavyxhv(data)
 	case "cn-pico":
-		sum = cn.sum2pico(data)
+		sum = cc.sum2pico(data)
 	case "cn-pico/tlo":
-		sum = cn.sum2picotlo(data)
+		sum = cc.sum2picotlo(data)
 	default:
 		return nil
 	}
@@ -843,7 +843,7 @@ func TestSum(variant string) bool {
 		var cn CryptoNight
 		for _, v := range hashSpecs {
 			result := cn.Sum(v.input[0:76], v.variant, v.height)
-			for j, _ := range result {
+			for j := range result {
 				if result[j] != v.output[j] {
 					loggo.Error("%v need %v get %v", v.variant, hex.EncodeToString(v.output[0:len(result)]), hex.EncodeToString(result))
 					return false
@@ -857,7 +857,7 @@ func TestSum(variant string) bool {
 		var cn CryptoNight
 		for _, v := range hashSpecs {
 			result := cn.Sum(v.input, v.variant, v.height)
-			for j, _ := range result {
+			for j := range result {
 				if result[j] != v.output[j] {
 					loggo.Error("%v need %v get %v", v.variant, hex.EncodeToString(v.output[0:len(result)]), hex.EncodeToString(result))
 					return false

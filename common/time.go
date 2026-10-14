@@ -37,7 +37,7 @@ func Elapsed(f func(d time.Duration)) func() {
 
 func Sleep(sec int) {
 	last := time.Now()
-	for time.Now().Sub(last) < time.Second*time.Duration(sec) {
+	for time.Since(last) < time.Second*time.Duration(sec) {
 		time.Sleep(time.Millisecond * 100)
 	}
 }

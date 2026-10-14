@@ -534,8 +534,6 @@ func (c *RudpConn) loopListenerRecv() error {
 			if err == nil {
 				u.listenersonny.fm.OnRecvFrame(f)
 				//loggo.Debug("%s recv frame %d", u.Info(), f.Id)
-			} else {
-				//loggo.Error("%s %s Unmarshal fail %s", c.Info(), u.Info(), err)
 			}
 		}
 

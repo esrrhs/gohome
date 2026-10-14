@@ -1,9 +1,5 @@
 package pool
 
-import (
-	"sync"
-)
-
 /*
 TokenPool 提供了一个简单的资源池实现，使用 Go 的 channel 功能来管理和复用资源。
 
@@ -18,9 +14,9 @@ TokenPool 结构体表示一个资源池，允许多个 goroutine 并发地从�
 */
 
 // TokenPool 定义一个结构体表示资源池
+// 并发安全由 indexes 这个 channel 本身提供，无需额外加锁
 type TokenPool struct {
-	mu      sync.Mutex // 用于保护池的访问
-	indexes chan int   // 使用一个 channel 作为资源池
+	indexes chan int // 使用一个 channel 作为资源池
 }
 
 // NewResourcePool 初始化一个资源池，最多容纳 N 个资源
@@ -36,8 +32,7 @@ func NewTokenPool(max int) *TokenPool {
 
 // Acquire 获取一个资源，如果没有资源，则会等待直到有可用资源
 func (rp *TokenPool) Acquire() int {
-	var index int
-	index = <-rp.indexes
+	index := <-rp.indexes
 	return index
 }
 

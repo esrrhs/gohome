@@ -76,8 +76,7 @@ func TestHardenRegisterDialerController(t *testing.T) {
 	if gControlOnConnSetup != nil {
 		t.Fatal("expect nil controller after register nil")
 	}
-	var ctrl func(network, address string, c syscall.RawConn) error
-	ctrl = func(network, address string, c syscall.RawConn) error { return nil }
+	ctrl := func(network, address string, c syscall.RawConn) error { return nil }
 	RegisterDialerController(ctrl)
 	if gControlOnConnSetup == nil {
 		t.Fatal("expect controller registered")
@@ -999,7 +998,7 @@ func TestHardenSock5GetRequestEdges(t *testing.T) {
 
 	// Domain happy path.
 	wire = []byte{5, 1, 0, 3, 3, 'f', 'o', 'o', 0x00, 0x50}
-	cmd, raw, host, err = Sock5GetRequest(bytes.NewBuffer(wire))
+	_, raw, host, err = Sock5GetRequest(bytes.NewBuffer(wire))
 	if err != nil || host != "foo:80" || string(raw[2:5]) != "foo" {
 		t.Fatalf("domain request host=%q raw=%v err=%v", host, raw, err)
 	}
@@ -3472,7 +3471,8 @@ func TestHardenRhttpClientEdgePaths(t *testing.T) {
 	cfg.RequestTimeoutMs = -1 // exercises the <=0 default branch
 	bare := &RhttpConn{}
 	bare.SetConfig(cfg)
-	code, body, err := bare.postData(nil, ts.URL, []byte("x"))
+	// 刻意传 nil：覆盖 postData 里 ctx == nil 回退到 Background 的分支
+	code, body, err := bare.postData(nil, ts.URL, []byte("x")) //nolint:staticcheck // nil ctx is intentional here
 	if err != nil || code != ProtoCodeOK || string(body) != "ok" {
 		t.Fatalf("one-off post code=%d body=%q err=%v", code, body, err)
 	}
