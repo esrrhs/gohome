@@ -46,6 +46,32 @@ func TestDomainTrieEdgeCases(t *testing.T) {
 	}
 }
 
+// TestDomainTrieEmptyLabel 是 FuzzDomainTrie 抓到缺陷的回归用例：Add / Reset 会
+// 跳过连续点产生的空段，而旧的 Has 不跳过、直接查 children[""]，于是 "a..b"
+// 这类域名插入成功却永远查不到——规则静默失效。三者必须采用相同的段规范化。
+func TestDomainTrieEmptyLabel(t *testing.T) {
+	trie := NewDomainTrie()
+	for _, d := range []string{"a..b", "0..0", ".x..y.", "c...d"} {
+		trie.Add(d)
+		if !trie.Has(d) {
+			t.Fatalf("Add(%q) then Has(%q) must be true", d, d)
+		}
+	}
+
+	trie.Reset([]string{"a..b"})
+	if !trie.Has("a..b") {
+		t.Fatalf("Reset(%q) then Has must be true", "a..b")
+	}
+	// 子域后缀匹配仍然成立
+	if !trie.Has("sub.a..b") {
+		t.Fatalf("suffix match must still work with empty labels")
+	}
+	// 空段被忽略后，"a..b" 与 "a.b" 落在同一条路径上
+	if !trie.Has("a.b") {
+		t.Fatalf("a..b and a.b normalize to the same trie path")
+	}
+}
+
 func TestDomainTrieLoadFromFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rules.txt")

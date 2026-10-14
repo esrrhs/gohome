@@ -72,6 +72,12 @@ func (t *DomainTrie) Has(domain string) bool {
 	node := t.root
 	for i := len(parts) - 1; i >= 0; i-- {
 		part := parts[i]
+		if part == "" {
+			// 必须与 Add / Reset 一致地跳过连续点造成的空段，否则 "a..b"
+			// 这类输入会插入成功却永远查不到（fuzz: Add("0..0") 后
+			// Has("0..0") 为 false），规则静默失效。
+			continue
+		}
 		child, ok := node.children[part]
 		if !ok {
 			return false
