@@ -1,3 +1,11 @@
+// 本文件调用 crypto/cryptonight/inter 下的上游移植实现，其中 sha3 在 amd64/
+// 386/ppc64le 上走 xor_unaligned.go 的 unsafe 非对齐指针转换，Go 1.26 的 -race
+// 内置 checkptr 会直接 fatal error。这与 CI 把 crypto/cryptonight/inter/ 排除在
+// race 门禁之外是同一个原因。契约检查本身与并发无关，故只在非 race 下编译：
+// 常规 Test 步骤（含 s390x Big Endian 工作流）仍会完整执行这些用例。
+
+//go:build !race
+
 package crypto
 
 import (
