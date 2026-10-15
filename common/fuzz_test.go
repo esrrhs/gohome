@@ -60,6 +60,48 @@ func FuzzCompressRoundTrip(f *testing.F) {
 	})
 }
 
+// FuzzRc4RoundTrip 检查 RC4 的对称性：Rc4 每次调用都从初始 S-box 重新起步
+// （见 alg.go 的 "each call starts keystream from 0"），因此对同一 key 连续两次
+// 异或必须还原原文。这条性质一旦被状态复用破坏，加解密就会静默失配。
+func FuzzRc4RoundTrip(f *testing.F) {
+	f.Add("key", []byte(""))
+	f.Add("key", []byte("hello"))
+	f.Add(strings.Repeat("k", 256), []byte("max length key"))
+	f.Add("k", []byte("min length key"))
+	f.Add("中文密钥", []byte("payload"))
+
+	f.Fuzz(func(t *testing.T, key string, src []byte) {
+		if len(key) < 1 || len(key) > 256 {
+			return
+		}
+
+		once, err := Rc4(key, src)
+		if err != nil {
+			t.Fatalf("Rc4 failed: %v", err)
+		}
+		if len(once) != len(src) {
+			t.Fatalf("Rc4 changed length: %d != %d", len(once), len(src))
+		}
+
+		twice, err := Rc4(key, once)
+		if err != nil {
+			t.Fatalf("Rc4 (second pass) failed: %v", err)
+		}
+		if !bytes.Equal(twice, src) {
+			t.Fatalf("Rc4 is not an involution: len=%d", len(src))
+		}
+
+		// 同 key 同明文必须得到同密文（keystream 每次从 0 起步）
+		again, err := Rc4(key, src)
+		if err != nil {
+			t.Fatalf("Rc4 (repeat) failed: %v", err)
+		}
+		if !bytes.Equal(again, once) {
+			t.Fatalf("Rc4 is not deterministic for the same key")
+		}
+	})
+}
+
 // FuzzGetRootDomain 对 eTLD+1 解析做 fuzzing。输入来自外部（DNS 查询名、HTTP
 // Host 头），任意字节都不得 panic，且解析必须是确定性的。
 func FuzzGetRootDomain(f *testing.F) {
