@@ -1004,6 +1004,41 @@ func TestHardenSock5GetRequestEdges(t *testing.T) {
 	}
 }
 
+// TestHardenSock5DomainHostMustBeDialable 是 fuzz 抓到的缺陷的回归用例：
+// 域名里含 ']' 时 net.JoinHostPort 会产出 "0]0:12336" 这种再也无法被
+// net.SplitHostPort 解析的串，调用方拿着它只会得到莫名的地址错误。
+func TestHardenSock5DomainHostMustBeDialable(t *testing.T) {
+	for _, bad := range []string{"0]0", "a:b", "a[b", "a\x00b"} {
+		wire := []byte{5, 1, 0, Socks5AtypDomain, byte(len(bad))}
+		wire = append(wire, bad...)
+		wire = append(wire, 0, 80)
+		if _, _, host, err := Sock5GetRequest(bytes.NewBuffer(wire)); err == nil {
+			t.Fatalf("domain %q accepted by request parser, host=%q", bad, host)
+		}
+		addr := []byte{Socks5AtypDomain, byte(len(bad))}
+		addr = append(addr, bad...)
+		addr = append(addr, 0, 80)
+		if h, _, _, err := decodeSocksAddr(addr); err == nil {
+			t.Fatalf("domain %q accepted by udp parser, host=%q", bad, h)
+		}
+	}
+
+	// 合法域名必须照常放行，且返回的 host 一定可再解析。
+	for _, good := range []string{"foo", "a.b.c", "xn--fiqs8s", "a-b.c", "a_b"} {
+		wire := []byte{5, 1, 0, Socks5AtypDomain, byte(len(good))}
+		wire = append(wire, good...)
+		wire = append(wire, 0, 80)
+		_, _, host, err := Sock5GetRequest(bytes.NewBuffer(wire))
+		if err != nil {
+			t.Fatalf("domain %q rejected: %v", good, err)
+		}
+		h, p, err := net.SplitHostPort(host)
+		if err != nil || h != good || p != "80" {
+			t.Fatalf("domain %q produced undialable host %q: h=%q p=%q err=%v", good, host, h, p, err)
+		}
+	}
+}
+
 func TestHardenSock5ReplyEdges(t *testing.T) {
 	if err := Sock5SendConnectReply(nil, 0, "1.2.3.4:80"); err == nil || !strings.Contains(err.Error(), "nil conn") {
 		t.Fatalf("nil writer err = %v", err)

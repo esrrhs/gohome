@@ -32,6 +32,24 @@ const (
 	authFailure           = uint8(1)
 )
 
+// socksDomainSafe 判断 SOCKS5 域名能否安全地拼成可拨号的 "host:port"。
+// ':' '[' ']' 和 NUL 会让 net.JoinHostPort 的产出无法再被 net.SplitHostPort
+// 解析——fuzz 给出的 "0]0" 就变成了 "0]0:12336"，下游只能收到一句莫名的
+// "unexpected ']' in address"。与其把畸形 host 丢给调用方，不如在解析阶段
+// 直接拒掉：这里拿到的是对端完全可控的字节。
+func socksDomainSafe(host string) bool {
+	if host == "" {
+		return false
+	}
+	for i := 0; i < len(host); i++ {
+		switch host[i] {
+		case ':', '[', ']', 0:
+			return false
+		}
+	}
+	return true
+}
+
 func methodOffered(methods []byte, want byte) bool {
 	for _, m := range methods {
 		if m == want {
@@ -175,6 +193,10 @@ func Sock5GetRequest(conn io.ReadWriter) (cmd byte, rawaddr []byte, host string,
 			return
 		}
 		host = string(addr)
+		if !socksDomainSafe(host) {
+			err = errors.New("socks invalid domain name")
+			return
+		}
 	default:
 		err = errAddrType
 		return
@@ -342,6 +364,9 @@ func decodeSocksAddr(b []byte) (host string, port int, rest []byte, err error) {
 			return "", 0, nil, errors.New("socks: truncated domain address")
 		}
 		host = string(b[off : off+n])
+		if !socksDomainSafe(host) {
+			return "", 0, nil, errors.New("socks: invalid domain name")
+		}
 		off += n
 	default:
 		return "", 0, nil, errAddrType
