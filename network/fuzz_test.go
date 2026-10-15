@@ -2,12 +2,16 @@ package network
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"net"
+	"reflect"
 	"strconv"
 	"testing"
 
 	"github.com/esrrhs/gohome/common"
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -362,10 +366,11 @@ func FuzzBBCongestion(f *testing.F) {
 
 // ---------- SOCKS5 字节流解析 ----------
 
-// fuzzSocksPktMax 是喂给 SOCKS5 解析器的报文上限：一个合法报文最长只有
-// 4+1+255+2 字节，留一点余量足够。别调大——Go 的 fuzzer 在最小化大 []byte
-// 输入时会耗掉整个 -fuzzminimizetime（默认 60s），吞吐会直接掉到 0。
-const fuzzSocksPktMax = 320
+// fuzzPktMax 是喂给线上报文解析器（SOCKS5 / ICMP）的输入上限。别调大——
+// Go 的 fuzzer 在最小化大 []byte 输入时会耗掉整个 -fuzzminimizetime
+// （默认 60s），吞吐会直接掉到 0。SOCKS5 一个合法报文最长 4+1+255+2 字节，
+// 320 对两边都够用。
+const fuzzPktMax = 320
 
 // fuzzSocksAddrLen 独立地按 ATYP 算出 ATYP+ADDR+PORT 的长度，
 // 用来验证 Sock5UnpackUDP 既没有多读也没有少读载荷。
@@ -401,8 +406,8 @@ func FuzzSock5UnpackUDP(f *testing.F) {
 	f.Add([]byte{})
 
 	f.Fuzz(func(t *testing.T, pkt []byte) {
-		if len(pkt) > fuzzSocksPktMax {
-			pkt = pkt[:fuzzSocksPktMax]
+		if len(pkt) > fuzzPktMax {
+			pkt = pkt[:fuzzPktMax]
 		}
 		host, port, data, err := Sock5UnpackUDP(pkt)
 		if err != nil {
@@ -459,8 +464,8 @@ func FuzzSock5GetRequest(f *testing.F) {
 	f.Add([]byte{})
 
 	f.Fuzz(func(t *testing.T, raw []byte) {
-		if len(raw) > fuzzSocksPktMax {
-			raw = raw[:fuzzSocksPktMax]
+		if len(raw) > fuzzPktMax {
+			raw = raw[:fuzzPktMax]
 		}
 		run := func() (byte, []byte, string, error) {
 			return Sock5GetRequest(newScriptedRW(append([]byte(nil), raw...)))
@@ -575,6 +580,142 @@ func FuzzSock5HandshakeAuth(f *testing.F) {
 			t.Fatal("handshake accepted a wrong username")
 		} else if !errors.Is(err, errAuth) {
 			t.Fatalf("want errAuth, got %v", err)
+		}
+	})
+}
+
+// ---------- ICMP 报文解析 ----------
+
+// fuzzIcmpEchoPacket 用真实的 icmp 编码器构造 echo 报文作种子，保证 fuzz
+// 起点就落在这条路径上（而不是全靠变异慢慢撞进去）。
+func fuzzIcmpEchoPacket(id string, data []byte, flag IcmpMsg_TYPE) []byte {
+	mb, err := proto.Marshal(&IcmpMsg{Id: id, Data: data, Magic: IcmpMsg_MAGIC, Flag: flag})
+	if err != nil {
+		return nil
+	}
+	msg := &icmp.Message{
+		Type: ipv4.ICMPTypeEcho,
+		Code: 0,
+		Body: &icmp.Echo{ID: 0x1234, Seq: 0x5678, Data: mb},
+	}
+	b, err := msg.Marshal(nil)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// FuzzIcmpPacketPayload 针对 decodeIcmpPacketPayload：这是 ricmp 收到每一个
+// 报文都要跑一遍的解析路径，输入完全来自网络。断言：
+//   - 失败必须是干净的失败（不返回半成品）；
+//   - 成功时 echo id/seq 必须就是报文头里那两个大端 u16；
+//   - 用解出的三元组重新编码再解一遍必须完全一致（幂等）。
+func FuzzIcmpPacketPayload(f *testing.F) {
+	f.Add(fuzzIcmpEchoPacket("abc", []byte("hello"), IcmpMsg_CLIENT_SEND_FLAG))
+	f.Add(fuzzIcmpEchoPacket("", nil, IcmpMsg_PONG_PROTO))
+	f.Add(fuzzIcmpEchoPacket("x", bytes.Repeat([]byte{7}, 300), IcmpMsg_SERVER_SEND_FLAG))
+	f.Add([]byte{})
+	f.Add([]byte{8, 0, 0, 0, 0, 0, 0, 0})
+	f.Add([]byte{8, 0, 0, 0, 1, 0, 2, 0, 0xff, 0xff})
+
+	f.Fuzz(func(t *testing.T, packet []byte) {
+		if len(packet) > fuzzPktMax {
+			packet = packet[:fuzzPktMax]
+		}
+		payload, id, echoID, echoSeq, flag, err := decodeIcmpPacketPayload(packet)
+		if err != nil {
+			if payload != nil || id != "" || echoID != 0 || echoSeq != 0 || flag != 0 {
+				t.Fatalf("error path returned partial result: %q %q %d %d %d", payload, id, echoID, echoSeq, flag)
+			}
+			return
+		}
+		if len(packet) < 8 {
+			t.Fatalf("accepted packet shorter than the echo header: %d", len(packet))
+		}
+		if want := int(binary.BigEndian.Uint16(packet[4:6])); echoID != want {
+			t.Fatalf("echo id = %d, want %d", echoID, want)
+		}
+		if want := int(binary.BigEndian.Uint16(packet[6:8])); echoSeq != want {
+			t.Fatalf("echo seq = %d, want %d", echoSeq, want)
+		}
+
+		mb, err := proto.Marshal(&IcmpMsg{Id: id, Data: payload, Magic: IcmpMsg_MAGIC, Flag: IcmpMsg_TYPE(flag)})
+		if err != nil {
+			t.Fatalf("re-encode failed: %v", err)
+		}
+		again := make([]byte, 8+len(mb))
+		copy(again, packet[:8])
+		copy(again[8:], mb)
+		payload2, id2, echoID2, echoSeq2, flag2, err := decodeIcmpPacketPayload(again)
+		if err != nil {
+			t.Fatalf("re-encoded packet rejected: %v", err)
+		}
+		if id2 != id || echoID2 != echoID || echoSeq2 != echoSeq || flag2 != flag || !bytes.Equal(payload2, payload) {
+			t.Fatalf("round trip mismatch: %q %d %d %d %q vs %q %d %d %d %q",
+				id2, echoID2, echoSeq2, flag2, payload2, id, echoID, echoSeq, flag, payload)
+		}
+	})
+}
+
+// FuzzRicmpListenAddr 针对 parseRicmpListenAddr：它决定监听时开哪些族的
+// socket，输入是配置字符串。断言解析确定性、失败干净、以及"通配绑定必须
+// 同时覆盖 v4+v6、显式 IP 只能绑定自己那一族"这两条语义。
+func FuzzRicmpListenAddr(f *testing.F) {
+	f.Add("")
+	f.Add("0.0.0.0")
+	f.Add("::")
+	f.Add("1.2.3.4")
+	f.Add("2001:db8::1")
+	f.Add("example.com")
+	f.Add("1.2.3.4:53")
+	f.Add("  1.2.3.4  ")
+
+	f.Fuzz(func(t *testing.T, dst string) {
+		if len(dst) > 128 {
+			dst = dst[:128]
+		}
+		fam1, bind1, err1 := parseRicmpListenAddr(dst)
+		fam2, bind2, err2 := parseRicmpListenAddr(dst)
+		if (err1 == nil) != (err2 == nil) {
+			t.Fatalf("non-deterministic error: %v vs %v", err1, err2)
+		}
+		if !reflect.DeepEqual(fam1, fam2) || bind1 != bind2 {
+			t.Fatalf("non-deterministic result: %v/%q vs %v/%q", fam1, bind1, fam2, bind2)
+		}
+		if err1 != nil {
+			if fam1 != nil || bind1 != "" {
+				t.Fatalf("error path returned partial result: %v %q", fam1, bind1)
+			}
+			return
+		}
+		if len(fam1) == 0 {
+			t.Fatal("accepted but no family")
+		}
+		seen := make(map[int]bool)
+		for _, fm := range fam1 {
+			if fm != icmpFamilyV4 && fm != icmpFamilyV6 {
+				t.Fatalf("unknown family %d for %q", fm, dst)
+			}
+			if seen[fm] {
+				t.Fatalf("duplicate family %d for %q", fm, dst)
+			}
+			seen[fm] = true
+		}
+		if bind1 == "" {
+			if len(fam1) != 2 {
+				t.Fatalf("wildcard bind should cover both families, got %v", fam1)
+			}
+			return
+		}
+		ip := net.ParseIP(bind1)
+		if ip == nil {
+			t.Fatalf("bind %q is not an IP literal", bind1)
+		}
+		if ip.IsUnspecified() {
+			t.Fatalf("unspecified bind should have been normalized to empty: %q", bind1)
+		}
+		if familyFromIP(ip) != fam1[0] {
+			t.Fatalf("family mismatch: %d vs bind %q", fam1[0], bind1)
 		}
 	})
 }
