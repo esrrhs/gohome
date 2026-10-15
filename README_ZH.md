@@ -3,7 +3,9 @@
 [<img src="https://img.shields.io/github/license/esrrhs/gohome">](https://github.com/esrrhs/gohome)
 [<img src="https://img.shields.io/github/languages/top/esrrhs/gohome">](https://github.com/esrrhs/gohome)
 [<img src="https://img.shields.io/github/actions/workflow/status/esrrhs/gohome/go.yml?branch=master">](https://github.com/esrrhs/gohome/actions)
-[<img src="https://img.shields.io/badge/go-%3E%3D1.24-blue">](https://golang.org/)
+[<img src="https://img.shields.io/github/actions/workflow/status/esrrhs/gohome/go_bigendian.yml?branch=master&label=big-endian">](https://github.com/esrrhs/gohome/actions)
+[<img src="https://img.shields.io/badge/go-%3E%3D1.26-blue">](https://golang.org/)
+[<img src="https://img.shields.io/badge/fuzzing-26%20targets-blue">](https://go.dev/doc/fuzz/)
 
 [English](README.md)
 
@@ -28,6 +30,48 @@ GoHome 是一个功能完备、开箱即用的 Go 语言通用基础设施与核
 | **[`platform`](platform/)** | 跨平台命令执行与进程管理：Shell 命令执行（`ShellRunCommand`）、带硬超时控制的脚本执行（`ShellRunTimeout`）与独立二进制程序调度（`ShellRunExe`）。 | [中文](platform/README_ZH.md) \| [English](platform/README.md) |
 | **[`dns`](dns/)** | 现代化智能 DNS 解析与分流组件：开箱即用默认配置、国内外并发竞速解析、可选 Fake-IP 模式（RFC 198.18.0.0/15）与双向反查、支持代理隧道 DoH/DoT、TTL 与 Singleflight 防击穿缓存，以及全动态无锁热更新接口。 | [中文](dns/README_ZH.md) \| [English](dns/README.md) |
 | **[`thirdparty`](thirdparty/)** | 第三方库适配器：基于 MaxMind GeoLite2 的离线 IP 所属国家查询，以及带自动过期淘汰策略的 MySQL 数据表封装。 | [中文](thirdparty/README_ZH.md) \| [English](thirdparty/README.md) |
+
+---
+
+## 测试与质量门禁
+
+凡是解析不可信字节、或维护非平凡状态的代码，都在常规单测与加固测试之外，额外用 Go 原生 fuzzing 兜底。
+
+| 门禁 | 约束内容 |
+|---|---|
+| `go test ./...` | 单测、加固测试，以及全部 fuzz **种子语料**（含已入库的崩溃样本） |
+| Go 原生 fuzzing | 9 个包共 26 个 target，见下表 |
+| `golangci-lint`（v2） | `govet`、`ineffassign`、`unused`、`staticcheck`；配置见 [`.golangci.yml`](.golangci.yml)，CI 要求 0 issues |
+| CI `Go`（linux/amd64） | build → gofmt → vet → lint → test → `-race` → `-race`（network & crypto）→ 特权 raw ICMP |
+| CI `Big Endian Test`（s390x） | 在大端机器上跑完整套件，含全部 fuzz 种子语料 |
+
+### Fuzz target 一览
+
+| 包 | 数量 | 覆盖内容 |
+|---|---|---|
+| [`network`](network/) | 9 | `FrameMgr` 重组 / 切帧 / 帧编解码、`BBCongestion` 状态机、SOCKS5 请求 / UDP / 握手解析、ICMP 报文解析、监听地址解析 |
+| [`dns`](dns/) | 6 | 域名后缀 Trie、IP 网段列表、Fake-IP 映射、域名归一化、DNS 缓存与报文 key |
+| [`common`](common/) | 3 | 压缩往返、RC4 对合性、eTLD+1 根域名解析 |
+| [`crypto`](crypto/) | 2 | 13 个哈希原语的 `hash.Hash` 契约（流式与一次性一致、`Sum` 幂等、保留前缀）、Skein 摘要长度 |
+| [`list`](list/) | 2 | 环形字节缓冲对照 FIFO 参考模型、环形队列 |
+| [`lru`](lru/) | 2 | 容量不变量与"写入即可读"，单分片与多分片 |
+| [`pool`](pool/) | 2 | 对象复用（同一个对象不得重复发放）、令牌池索引范围 |
+
+fuzz 抓到的崩溃样本会提交到 `testdata/fuzz/<Target>/`，之后每次运行都作为回归种子重放。它已经抓出过两个真实缺陷：域名后缀 Trie 能插入 `a..b` 却永远匹配不到；SOCKS5 域名里带 `]` 时会拼出无法拨号的 `host:port`。
+
+跑单个 target（Go 一次只能 fuzz 一个）：
+
+```bash
+# 对单个 target 跑 60s；'^Name$' 这种锚定正则可以保证只命中它
+go test ./network/ -run '^FuzzFrameMgrCut$' -fuzz '^FuzzFrameMgrCut$' -fuzztime 60s
+
+# 或者把同一个包里的 target 循环跑一遍
+for t in FuzzFrameMgrCut FuzzFrameMgrRecvReassembly FuzzIcmpPacketPayload; do
+    go test ./network/ -run "^$t\$" -fuzz "^$t\$" -fuzztime 30s
+done
+```
+
+target 内部会把输入截断到几百字节：Go 的 minimizer 在缩小大 `[]byte` 时会吃掉整个 `-fuzzminimizetime`，表现为 execs 冻结在 `0/sec`。
 
 ---
 

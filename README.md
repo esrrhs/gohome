@@ -3,7 +3,9 @@
 [<img src="https://img.shields.io/github/license/esrrhs/gohome">](https://github.com/esrrhs/gohome)
 [<img src="https://img.shields.io/github/languages/top/esrrhs/gohome">](https://github.com/esrrhs/gohome)
 [<img src="https://img.shields.io/github/actions/workflow/status/esrrhs/gohome/go.yml?branch=master">](https://github.com/esrrhs/gohome/actions)
-[<img src="https://img.shields.io/badge/go-%3E%3D1.24-blue">](https://golang.org/)
+[<img src="https://img.shields.io/github/actions/workflow/status/esrrhs/gohome/go_bigendian.yml?branch=master&label=big-endian">](https://github.com/esrrhs/gohome/actions)
+[<img src="https://img.shields.io/badge/go-%3E%3D1.26-blue">](https://golang.org/)
+[<img src="https://img.shields.io/badge/fuzzing-26%20targets-blue">](https://go.dev/doc/fuzz/)
 
 [中文文档](README_ZH.md)
 
@@ -28,6 +30,53 @@ Each module contains its own dedicated, detailed documentation. Click any module
 | **[`platform`](platform/)** | Cross-platform shell command execution (`ShellRunCommand`), script execution with timeout contexts (`ShellRunTimeout`), and binary process execution (`ShellRunExe`). | [English](platform/README.md) \| [中文](platform/README_ZH.md) |
 | **[`dns`](dns/)** | Modern smart DNS resolution and routing: zero-config defaults, parallel dual-stack queries, optional Fake-IP mode (RFC 198.18.0.0/15) with reverse lookup, DoH/DoT over proxy, TTL cache with singleflight, and atomic hot-reloadable rules. | [English](dns/README.md) \| [中文](dns/README_ZH.md) |
 | **[`thirdparty`](thirdparty/)** | Third-party adapters: offline MaxMind GeoIP2 country resolution and MySQL key-value table with automated rolling retention. | [English](thirdparty/README.md) \| [中文](thirdparty/README_ZH.md) |
+
+---
+
+## Testing & Quality Gates
+
+Everything that parses untrusted bytes or maintains non-trivial state is covered by Go's native
+fuzzing, on top of the usual unit and hardening tests.
+
+| Gate | What it enforces |
+|---|---|
+| `go test ./...` | Unit tests, hardening tests, and every fuzz **seed corpus** (including committed crashers) |
+| Go native fuzzing | 26 targets across 9 packages — see the table below |
+| `golangci-lint` (v2) | `govet`, `ineffassign`, `unused`, `staticcheck`; the config is in [`.golangci.yml`](.golangci.yml) and CI requires 0 issues |
+| CI `Go` (linux/amd64) | build → gofmt → vet → lint → test → `-race` → `-race` (network & crypto) → privileged raw ICMP |
+| CI `Big Endian Test` (s390x) | Runs the whole suite on a big-endian target, including all fuzz seed corpora |
+
+### Fuzz targets
+
+| Package | # | What is fuzzed |
+|---|---|---|
+| [`network`](network/) | 9 | `FrameMgr` reassembly / cut / frame wire format, `BBCongestion` state machine, SOCKS5 request / UDP / handshake parsing, ICMP payload decoding, listen-address parsing |
+| [`dns`](dns/) | 6 | Domain-suffix trie, IP-network list, Fake-IP mapping, domain normalization, DNS cache and message key |
+| [`common`](common/) | 3 | Compression round-trip, RC4 involution, eTLD+1 root-domain parsing |
+| [`crypto`](crypto/) | 2 | `hash.Hash` contract across 13 primitives (streaming ≡ one-shot, `Sum` idempotence, prefix preservation), Skein hash sizes |
+| [`list`](list/) | 2 | Byte ring buffer against a FIFO reference model, ring queue |
+| [`lru`](lru/) | 2 | Capacity invariants and write-then-read, single-shard and multi-shard |
+| [`pool`](pool/) | 2 | Object reuse (no double hand-out), token pool index range |
+
+Crashers found by fuzzing are committed under `testdata/fuzz/<Target>/` and replayed as regression
+seeds on every run. Two examples of real defects it caught: a domain-suffix trie that accepted
+`a..b` but could never match it, and a SOCKS5 domain name whose `]` produced an undialable
+`host:port` pair.
+
+To explore one target (Go fuzzes a single target at a time):
+
+```bash
+# 60s of fuzzing on one target; use '^Name$' so the regex matches exclusively
+go test ./network/ -run '^FuzzFrameMgrCut$' -fuzz '^FuzzFrameMgrCut$' -fuzztime 60s
+
+# or loop over all of them in one package
+for t in FuzzFrameMgrCut FuzzFrameMgrRecvReassembly FuzzIcmpPacketPayload; do
+    go test ./network/ -run "^$t\$" -fuzz "^$t\$" -fuzztime 30s
+done
+```
+
+Inputs are capped (a few hundred bytes) inside the targets: Go's minimizer can spend the whole
+`-fuzzminimizetime` shrinking a large `[]byte`, which shows up as execs frozen at `0/sec`.
 
 ---
 
