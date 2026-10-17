@@ -27,6 +27,8 @@ type Config struct {
 	DirectUpstreams []string
 	// 远程海外上游（支持 DoH，例如 "https://1.1.1.1/dns-query"）
 	RemoteUpstreams []string
+	// 显式禁用远程海外上游（关闭 DoH，所有域名回落国内直连上游，避免无代理时明文直连海外 DoH 超时）
+	DisableRemoteUpstreams bool
 	// 访问远程上游的代理地址（支持 socks5://127.0.0.1:1080 或 http://...）
 	ProxyAddr string
 
@@ -147,10 +149,13 @@ type StandardResolver struct {
 // NewResolver 创建并初始化一个 Resolver 实例
 func NewResolver(cfg Config) (*StandardResolver, error) {
 	// 补全默认项
-	if len(cfg.DirectUpstreams) == 0 {
+	isZeroDirect := len(cfg.DirectUpstreams) == 0
+	if isZeroDirect {
 		cfg.DirectUpstreams = DefaultDomesticDNS
 	}
-	if len(cfg.RemoteUpstreams) == 0 {
+	if cfg.DisableRemoteUpstreams {
+		cfg.RemoteUpstreams = nil
+	} else if cfg.RemoteUpstreams == nil && isZeroDirect {
 		cfg.RemoteUpstreams = DefaultRemoteDoH
 	}
 	if cfg.Timeout <= 0 {

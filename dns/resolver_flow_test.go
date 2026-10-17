@@ -501,6 +501,50 @@ func TestNewResolver_DefaultsAndUnreadableGeoIP(t *testing.T) {
 	}
 }
 
+// 显式禁用远程上游（DisableRemoteUpstreams 或自定义 DirectUpstreams 搭配空 RemoteUpstreams）
+// 时不得强制回填 DefaultRemoteDoH，且查询应正常回退到国内直连。
+func TestNewResolver_DisableRemoteUpstreams(t *testing.T) {
+	addr, _, stop := startUDPHandlerStub(t, func(req *dns.Msg) *dns.Msg {
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		resp.Answer = append(resp.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP("1.2.3.4"),
+		})
+		return resp
+	})
+	defer stop()
+
+	// 方式 1: 显式 DisableRemoteUpstreams
+	r1, err := NewResolver(Config{
+		DirectUpstreams:        []string{addr},
+		DisableRemoteUpstreams: true,
+	})
+	if err != nil {
+		t.Fatalf("NewResolver failed: %v", err)
+	}
+	defer r1.Close()
+	if len(r1.cfg.RemoteUpstreams) != 0 || len(r1.remoteUpstreams) != 0 {
+		t.Fatalf("expected 0 remote upstreams, got: %v", r1.cfg.RemoteUpstreams)
+	}
+	ips, err := r1.Resolve(context.Background(), "any.domain.test")
+	if err != nil || len(ips) == 0 || !ips[0].Equal(net.ParseIP("1.2.3.4")) {
+		t.Fatalf("resolve failed: ips=%v err=%v", ips, err)
+	}
+
+	// 方式 2: 自定义 DirectUpstreams，未配 RemoteUpstreams（不被注入默认 DoH）
+	r2, err := NewResolver(Config{
+		DirectUpstreams: []string{addr},
+	})
+	if err != nil {
+		t.Fatalf("NewResolver failed: %v", err)
+	}
+	defer r2.Close()
+	if len(r2.cfg.RemoteUpstreams) != 0 || len(r2.remoteUpstreams) != 0 {
+		t.Fatalf("expected 0 remote upstreams when custom direct is specified, got: %v", r2.cfg.RemoteUpstreams)
+	}
+}
+
 // ResolveAll 的失败路径：A 查询失败直接返回错误。
 func TestResolver_ResolveAll_AFailure(t *testing.T) {
 	addr, _, stop := startUDPHandlerStub(t, func(*dns.Msg) *dns.Msg { return nil })
