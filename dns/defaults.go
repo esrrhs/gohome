@@ -29,6 +29,13 @@ var defaultChinaMainDomainsSeed = []string{
 	"xiaohongshu.com", "xiaohongshu.net", "xhscdn.com", "xhscdn.net",
 	"ipip.net", "3322.net",
 	"apple.com.cn", "apple.com", // apple 国内 CDN 优化直连可根据需要配置
+
+	// 来自线上 yellowsocks 分流历史：解析结果落在境内、但此前误走海外的域名
+	// （felixonmars china-list 未收录）。
+	"tripcdn.com", // 携程 CDN，境内节点
+	"bag-china.itunes-apple.com.akadns.net", "init-china.itunes-apple.com.akadns.net",
+	"mesu-china.apple.com.akadns.net", "fpinit-apac-cn.edge-itunes-apple.com.akadns.net",
+	"gspe79-cn-ssl-ls-apple-com.v.aaplimg.com", // Apple 中国区专用域名
 }
 
 // DefaultChinaMainDomains 内置境内直连域名（种子 + 完整 china-list）。
