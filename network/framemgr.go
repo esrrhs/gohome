@@ -612,15 +612,21 @@ func (fm *FrameMgr) combineWindowToRecvBuffer(cur int64) {
 	}
 	reqtmp := make(map[int32]int)
 	id := fm.recvid
-	for e := fm.recvwin.FrontInterFromBegin(); e != nil && len(reqtmp) < maxReq; e = e.Next() {
+	// Slot scans are O(window) and recvwin is mostly empty: skip the walk when
+	// nothing arrived out of order, and stop once every arrived frame has been
+	// visited instead of scanning the empty tail of the ring.
+	remaining := fm.recvwin.Size()
+	var e *glist.ROBuffergoInter
+	if remaining > 0 {
+		e = fm.recvwin.FrontInterFromBegin()
+	}
+	for e != nil && len(reqtmp) < maxReq {
 		fid := int32(e.Id())
-		//loggo.Debug("debugid %v start add req id %v %v %v", fm.debugid, fm.recvid, fid, id)
 		for id != fid && len(reqtmp) < maxReq {
 			oldReq := fm.reqmap[id]
 			if cur-oldReq > fm.rttns {
 				reqtmp[id]++
 				fm.reqmap[id] = cur
-				//loggo.Debug("debugid %v add req id %v ", fm.debugid, id)
 			}
 			id++
 			if id >= fm.frame_max_id {
@@ -636,6 +642,11 @@ func (fm *FrameMgr) combineWindowToRecvBuffer(cur int64) {
 		if id >= fm.frame_max_id {
 			id = 0
 		}
+		remaining--
+		if remaining <= 0 {
+			break
+		}
+		e = e.Next()
 	}
 
 	if len(reqtmp) > 0 {
