@@ -85,9 +85,12 @@ type FrameMgr struct {
 	recvlist *list.List
 	recvid   int32
 
-	close        bool
-	remoteclosed bool
-	closesend    bool
+	close            bool
+	remoteclosed     bool
+	closesend        bool
+	closesendreq     bool
+	halfclosesend    bool
+	remotesendclosed bool
 
 	lastPingTime int64
 	lastPongTime int64
@@ -279,6 +282,25 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 		}
 		fm.closesend = true
 		//loggo.Debug("debugid %v close frame push to send win %v %v", fm.debugid, f.Id, fm.sendwin.Size())
+	}
+
+	if fm.sendb.Empty() && fm.closesendreq && !fm.halfclosesend && fm.sendwin.Size() < int(fm.windowsize) {
+		fd := &FrameData{Type: (int32)(FrameData_HALFCLOSE)}
+
+		f := &Frame{Type: (int32)(Frame_DATA),
+			Id:   fm.sendid,
+			Data: fd}
+
+		fm.sendid++
+		if fm.sendid >= fm.frame_max_id {
+			fm.sendid = 0
+		}
+
+		err := fm.sendwin.Set(int(f.Id), f)
+		if err != nil {
+			loggo.Error("sendwin Set halfclose fail %v", err)
+		}
+		fm.halfclosesend = true
 	}
 }
 
@@ -564,6 +586,10 @@ func (fm *FrameMgr) processRecvFrame(f *Frame) bool {
 		fm.lastRecvHBTime = time.Now().UnixNano()
 		//loggo.Debug("debugid %v recv remote hb frame %v", fm.debugid, f.Id)
 		return true
+	} else if f.Data.Type == (int32)(FrameData_HALFCLOSE) {
+		fm.remotesendclosed = true
+		//loggo.Debug("debugid %v recv remote halfclose frame %v", fm.debugid, f.Id)
+		return true
 	} else {
 		loggo.Error("recv frame type error %v", f.Data.Type)
 		return false
@@ -697,6 +723,25 @@ func (fm *FrameMgr) Close() {
 
 func (fm *FrameMgr) IsRemoteClosed() bool {
 	return fm.remoteclosed
+}
+
+// CloseSend half-closes the send side: after the send buffer drains, a
+// HALFCLOSE frame is delivered and the recv direction stays usable.
+func (fm *FrameMgr) CloseSend() {
+	fm.closesendreq = true
+}
+
+func (fm *FrameMgr) IsRemoteSendClosed() bool {
+	return fm.remotesendclosed
+}
+
+// CloseFlushed reports that every frame this side sent — including its own
+// close/halfclose marker — has been acknowledged by the peer.
+func (fm *FrameMgr) CloseFlushed() bool {
+	if !fm.closesend && !fm.halfclosesend {
+		return false
+	}
+	return fm.sendb.Empty() && fm.sendwin.Size() == 0
 }
 
 func (fm *FrameMgr) ping() {
