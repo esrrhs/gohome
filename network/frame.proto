@@ -8,6 +8,7 @@ message FrameData {
         CONNRSP = 2;
         CLOSE = 3;
         HB = 4;
+        HALFCLOSE = 5;
     }
     int32 type = 1;
     bytes data = 2;
