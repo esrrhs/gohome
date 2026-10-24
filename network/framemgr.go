@@ -167,6 +167,13 @@ func (fm *FrameMgr) GetSendBufferLeft() int {
 	return left
 }
 
+// GetSendWinSize returns the number of unacknowledged frames in flight.
+func (fm *FrameMgr) GetSendWinSize() int {
+	fm.sendblock.Lock()
+	defer fm.sendblock.Unlock()
+	return fm.sendwin.Size()
+}
+
 func (fm *FrameMgr) WriteSendBuffer(data []byte) {
 	fm.sendblock.Lock()
 	defer fm.sendblock.Unlock()
