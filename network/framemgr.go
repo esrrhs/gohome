@@ -406,6 +406,13 @@ func (fm *FrameMgr) preProcessRecvList() (map[int32]int, map[int32]int, map[int3
 				//loggo.Debug("debugid %v recv ack %v %v", fm.debugid, f.Id, common.Int32ArrayToString(f.Dataid, ","))
 			}
 		} else if f.Type == (int32)(Frame_DATA) {
+			if f.Data != nil && f.Data.Type == (int32)(FrameData_HB) {
+				// Out-of-band heartbeat: record liveness here so it stays
+				// visible even while recvid is stalled on backpressure; no
+				// window slot, no ACK.
+				fm.lastRecvHBTime = time.Now().UnixNano()
+				continue
+			}
 			tmpackto[f.Id] = f
 			if fm.openstat > 0 {
 				fm.fs.recvDataNum++
@@ -775,22 +782,17 @@ func (fm *FrameMgr) hb() {
 	if cur-fm.lastSendHBTime > (int64)(time.Second) {
 		fm.lastSendHBTime = cur
 
+		// Out-of-band heartbeat: Id stays 0 and the frame never enters the
+		// send/recv windows, so it keeps flowing (and stays observable on the
+		// peer) even when the in-order stream is stalled on backpressure.
 		fd := &FrameData{Type: (int32)(FrameData_HB)}
 
 		f := &Frame{Type: (int32)(Frame_DATA),
-			Id:   fm.sendid,
+			Id:   0,
 			Data: fd}
 
-		fm.sendid++
-		if fm.sendid >= fm.frame_max_id {
-			fm.sendid = 0
-		}
-
-		err := fm.sendwin.Set(int(f.Id), f)
-		if err != nil {
-			loggo.Error("sendwin Set fail %v", err)
-		}
-		//loggo.Debug("debugid %v send hb %v", fm.debugid, f.Id)
+		fm.sendFrame(f)
+		//loggo.Debug("debugid %v send hb", fm.debugid)
 	}
 }
 
