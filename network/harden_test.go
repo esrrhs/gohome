@@ -593,8 +593,10 @@ func TestHardenFrameMgrWindowFullAndWrap(t *testing.T) {
 	fw.sendid = 7
 	fw.lastSendHBTime = 0
 	fw.hb()
-	if fw.sendid != 0 {
-		t.Fatalf("hb wrap sendid = %d, want 0", fw.sendid)
+	// hb is out-of-band since the heartbeat fix: it must NOT consume a
+	// sendid, so a stalled in-order stream cannot stall liveness too.
+	if fw.sendid != 7 {
+		t.Fatalf("hb must not consume sendid, got %d", fw.sendid)
 	}
 
 	// ping() with stale timestamp emits a PING and counts it under openstat.
