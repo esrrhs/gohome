@@ -179,11 +179,6 @@ func (fm *FrameMgr) GetLastRecvHBTime() int64 {
 	return fm.lastRecvHBTime
 }
 
-// DBGGetRecvid returns the current in-order receive cursor.
-func (fm *FrameMgr) DBGGetRecvid() int32 {
-	return fm.recvid
-}
-
 func (fm *FrameMgr) WriteSendBuffer(data []byte) {
 	fm.sendblock.Lock()
 	defer fm.sendblock.Unlock()
