@@ -174,6 +174,11 @@ func (fm *FrameMgr) GetSendWinSize() int {
 	return fm.sendwin.Size()
 }
 
+// GetLastRecvHBTime returns when the last heartbeat from the peer arrived.
+func (fm *FrameMgr) GetLastRecvHBTime() int64 {
+	return fm.lastRecvHBTime
+}
+
 func (fm *FrameMgr) WriteSendBuffer(data []byte) {
 	fm.sendblock.Lock()
 	defer fm.sendblock.Unlock()
@@ -767,7 +772,7 @@ func (fm *FrameMgr) ping() {
 
 func (fm *FrameMgr) hb() {
 	cur := time.Now().UnixNano()
-	if cur-fm.lastSendHBTime > (int64)(time.Second) && fm.sendwin.Size() < int(fm.windowsize) {
+	if cur-fm.lastSendHBTime > (int64)(time.Second) {
 		fm.lastSendHBTime = cur
 
 		fd := &FrameData{Type: (int32)(FrameData_HB)}
