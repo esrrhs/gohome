@@ -89,6 +89,11 @@ func (bb *BBCongestion) CanSend(id int, size int) bool {
 func (bb *BBCongestion) Update() {
 
 	if bb.flyeddata <= 0 {
+		// No acks arrived this window — e.g. a loss burst took out every
+		// in-flight packet. Still roll the send budget forward: leaving
+		// flyingdata above maxfly here deadlocks the sender (it stops
+		// sending, so no acks can ever arrive to reset the budget again).
+		bb.flyingdata = 0
 		return
 	}
 
