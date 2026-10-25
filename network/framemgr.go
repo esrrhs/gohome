@@ -167,11 +167,19 @@ func (fm *FrameMgr) GetSendBufferLeft() int {
 	return left
 }
 
-// GetSendWinSize returns the number of unacknowledged frames in flight.
+// GetSendWinSize returns the number of unacknowledged user data frames in flight.
 func (fm *FrameMgr) GetSendWinSize() int {
 	fm.sendblock.Lock()
 	defer fm.sendblock.Unlock()
-	return fm.sendwin.Size()
+	count := 0
+	for e := fm.sendwin.FrontInter(); e != nil; e = e.Next() {
+		if f, ok := e.Value.(*Frame); ok && f != nil && f.Data != nil {
+			if f.Data.Type == int32(FrameData_USER_DATA) && len(f.Data.Data) > 0 {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 // GetLastRecvHBTime returns when the last heartbeat from the peer arrived.
@@ -772,7 +780,7 @@ func (fm *FrameMgr) ping() {
 
 func (fm *FrameMgr) hb() {
 	cur := time.Now().UnixNano()
-	if cur-fm.lastSendHBTime > (int64)(time.Second) {
+	if cur-fm.lastSendHBTime > (int64)(time.Second) && fm.sendwin.Size() < int(fm.windowsize) {
 		fm.lastSendHBTime = cur
 
 		fd := &FrameData{Type: (int32)(FrameData_HB)}
