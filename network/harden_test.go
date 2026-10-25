@@ -4786,3 +4786,56 @@ func TestHardenRicmpDgramDialFailures(t *testing.T) {
 		t.Fatal("mid-handshake dial did not return")
 	}
 }
+
+func TestHardenFrameMgrInBandHeartbeatBackwardsCompatibility(t *testing.T) {
+	fm := NewFrameMgr(64, 100, 4096, 16, 50, 0, 1)
+
+	// Step 1: Remote connects
+	fm.OnRecvFrame(&Frame{
+		Type: int32(Frame_DATA),
+		Id:   0,
+		Data: &FrameData{Type: int32(FrameData_CONN)},
+	})
+	fm.Update()
+	if !fm.IsConnected() {
+		t.Fatal("expected connected after FrameData_CONN")
+	}
+	if fm.recvid != 1 {
+		t.Fatalf("expected recvid=1, got %d", fm.recvid)
+	}
+
+	// Step 2: Remote peer is an older version and sends an in-band heartbeat
+	// with a stream sequence ID (Id: 1)
+	hbFrame := &Frame{
+		Type: int32(Frame_DATA),
+		Id:   1,
+		Data: &FrameData{Type: int32(FrameData_HB)},
+	}
+	fm.OnRecvFrame(hbFrame)
+	fm.Update()
+
+	if fm.recvid != 2 {
+		t.Fatalf("in-band heartbeat must advance recvid to 2 to avoid stream hole, got %d", fm.recvid)
+	}
+	if fm.GetLastRecvHBTime() == 0 {
+		t.Fatal("in-band heartbeat must record lastRecvHBTime")
+	}
+
+	// Step 3: Remote sends user data at Id: 2
+	dataPayload := []byte("stream-data-after-hb")
+	fm.OnRecvFrame(recvDataFrame(2, dataPayload))
+	fm.Update()
+
+	if fm.recvid != 3 {
+		t.Fatalf("stream data after in-band heartbeat must advance recvid to 3, got %d", fm.recvid)
+	}
+
+	// Verify data is deliverable to application
+	if fm.GetRecvBufferSize() != len(dataPayload) {
+		t.Fatalf("recv buffer size = %d, want %d", fm.GetRecvBufferSize(), len(dataPayload))
+	}
+	buf := fm.GetRecvReadLineBuffer()
+	if string(buf) != string(dataPayload) {
+		t.Fatalf("read %s, want %s", string(buf), string(dataPayload))
+	}
+}
