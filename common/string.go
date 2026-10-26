@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"reflect"
 	"strconv"
 	"strings"
@@ -280,7 +280,7 @@ func GunzipString(data string) string {
 	if err != nil {
 		return ""
 	}
-	ret, _ := ioutil.ReadAll(r)
+	ret, _ := io.ReadAll(r)
 	r.Close()
 	return string(ret)
 }

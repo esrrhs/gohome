@@ -52,7 +52,7 @@ linters:
       - path: _test\.go
         linters:
           - ineffassign
-      # go.mod 声明 go 1.26 而本地工具链是 1.27 时 govet 会报
+      # go.mod 声明的 go 版本低于本地工具链时 govet 会报
       # "cannot inline call to ..."，属工具链版本错配噪音
       - text: "cannot inline call to"
         linters:
