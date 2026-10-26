@@ -61,7 +61,13 @@ jobs:
     # network 包单包非 race 就要约 500s，逼近 go test 默认的 10m 上限，
     # 机器负载稍高就会被误判成超时失败，因此显式放宽。
     - name: Test
-      run: go test -v -timeout 20m ./...
+      run: go test -v -timeout 20m -coverprofile=coverage.txt -covermode=atomic ./...
+
+    - name: Upload coverage reports to Codecov
+      uses: codecov/codecov-action@v5
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        files: ./coverage.txt
 
     # 竞态检测分两步：先跑并发原语密集的快包，快速拿到反馈；
     # network / crypto 全量带 -race 需要十几分钟，单独一步便于定位。
