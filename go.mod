@@ -1,23 +1,23 @@
 module github.com/esrrhs/gohome
 
-go 1.26.0
+go 1.27.3
 
 require (
 	github.com/OneOfOne/xxhash v1.2.8
 	github.com/google/uuid v1.6.0
-	github.com/klauspost/compress v1.18.0
-	github.com/miekg/dns v1.1.63
+	github.com/klauspost/compress v1.20.3
+	github.com/miekg/dns v1.1.73
 	github.com/oschwald/geoip2-golang v1.13.0
-	github.com/quic-go/quic-go v0.62.0
+	github.com/quic-go/quic-go v0.64.1
 	github.com/xtaci/kcp-go v5.4.20+incompatible
-	golang.org/x/net v0.59.0
-	golang.org/x/sync v0.23.0
-	golang.org/x/sys v0.48.0
+	golang.org/x/net v0.61.0
+	golang.org/x/sync v0.24.0
+	golang.org/x/sys v0.49.0
 	google.golang.org/protobuf v1.36.12
 )
 
 require (
-	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
+	github.com/klauspost/cpuid/v2 v2.4.1 // indirect
 	github.com/klauspost/reedsolomon v1.14.2 // indirect
 	github.com/oschwald/maxminddb-golang v1.13.1 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
@@ -26,8 +26,6 @@ require (
 	github.com/tjfoc/gmsm v1.4.1 // indirect
 	github.com/xtaci/lossyconn v0.0.0-20200209145036-adba10fffc37 // indirect
 	go.uber.org/mock v0.6.0 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/mod v0.41.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
-	golang.org/x/tools v0.49.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 )

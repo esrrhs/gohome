@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,7 +93,7 @@ func FileExists(filename string) bool {
 
 func FileMd5(filename string) (string, error) {
 
-	data, err := ioutil.ReadFile(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return "", err
 	}
@@ -104,7 +103,7 @@ func FileMd5(filename string) (string, error) {
 
 func FileReplace(filename string, from string, to string) error {
 
-	data, err := ioutil.ReadFile(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return err
 	}
@@ -125,7 +124,7 @@ func FileReplace(filename string, from string, to string) error {
 
 func FileFind(filename string, dst string) int {
 
-	data, err := ioutil.ReadFile(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return 0
 	}
@@ -142,7 +141,7 @@ func FileFind(filename string, dst string) int {
 
 func FileLineCount(filename string) int {
 
-	data, err := ioutil.ReadFile(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return 0
 	}

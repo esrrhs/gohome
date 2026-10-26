@@ -7,11 +7,11 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
-	"io/ioutil"
+	"os"
 )
 
 func LoadProtobuf(filename string) (error, []protoreflect.FileDescriptor) {
-	b, err := ioutil.ReadFile(filename)
+	b, err := os.ReadFile(filename)
 	if err != nil {
 		return err, nil
 	}
