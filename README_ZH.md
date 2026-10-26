@@ -4,7 +4,7 @@
 [<img src="https://img.shields.io/github/languages/top/esrrhs/gohome">](https://github.com/esrrhs/gohome)
 [<img src="https://img.shields.io/github/actions/workflow/status/esrrhs/gohome/go.yml?branch=master">](https://github.com/esrrhs/gohome/actions)
 [<img src="https://img.shields.io/github/actions/workflow/status/esrrhs/gohome/go_bigendian.yml?branch=master&label=big-endian">](https://github.com/esrrhs/gohome/actions)
-[<img src="https://img.shields.io/badge/go-%3E%3D1.26-blue">](https://golang.org/)
+[<img src="https://img.shields.io/badge/go-%3E%3D1.27.3-blue">](https://golang.org/)
 [<img src="https://img.shields.io/badge/fuzzing-26%20targets-blue">](https://go.dev/doc/fuzz/)
 
 [English](README.md)

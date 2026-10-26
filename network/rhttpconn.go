@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -427,7 +426,7 @@ func (c *RhttpConn) postData(ctx context.Context, url string, d []byte) (int, []
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -821,7 +820,7 @@ func (c *RhttpConn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if maxBody <= 0 {
 				maxBody = 1024 * 100
 			}
-			body, err := ioutil.ReadAll(io.LimitReader(r.Body, maxBody+1))
+			body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 			if err != nil {
 				//loggo.Error("read body fail %v", r.RequestURI)
 				w.WriteHeader(ProtoCodeFail)
