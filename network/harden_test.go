@@ -571,7 +571,7 @@ func TestHardenFrameMgrWindowFullAndWrap(t *testing.T) {
 		m := NewFrameMgr(10, 8, 4096, 4, 50, 0, 0)
 		m.WriteSendBuffer(make([]byte, 40))
 		m.cutSendBufferToWindow(time.Now().UnixNano())
-		m.processRecvList(nil, map[int32]int{0: 1, 1: 1, 2: 1, 3: 1}, nil)
+		m.processRecvList(&recvMaps{req: nil, ack: map[int32]int{0: 1, 1: 1, 2: 1, 3: 1}, ackto: nil})
 		if m.sendwin.Size() != 0 {
 			t.Fatalf("setup: sendwin not drained, size %d", m.sendwin.Size())
 		}
@@ -623,7 +623,7 @@ func TestHardenFrameMgrCongestionSendList(t *testing.T) {
 	}
 
 	// Frame gets ACKed out of the window: parked cursor resets.
-	fm.processRecvList(nil, map[int32]int{0: 1}, nil)
+	fm.processRecvList(&recvMaps{ack: map[int32]int{0: 1}})
 	fm.calSendList(cur + int64(2*time.Second))
 	if fm.ctLastSendId != -1 {
 		t.Fatalf("ctLastSendId = %d, want reset -1", fm.ctLastSendId)
@@ -725,7 +725,7 @@ func TestHardenFrameMgrCutWrapAndCloseFrame(t *testing.T) {
 	fm := NewFrameMgr(10, 8, 4096, 4, 50, 0, 0)
 	fm.WriteSendBuffer(make([]byte, 40))
 	fm.cutSendBufferToWindow(cur) // ids 0..3
-	fm.processRecvList(nil, map[int32]int{0: 1, 1: 1, 2: 1, 3: 1}, nil)
+	fm.processRecvList(&recvMaps{ack: map[int32]int{0: 1, 1: 1, 2: 1, 3: 1}})
 	if fm.sendwin.Size() != 0 || fm.sendid != 4 {
 		t.Fatalf("setup size=%d sendid=%d", fm.sendwin.Size(), fm.sendid)
 	}
@@ -741,7 +741,7 @@ func TestHardenFrameMgrCutWrapAndCloseFrame(t *testing.T) {
 	fc := NewFrameMgr(10, 8, 4096, 4, 50, 0, 0)
 	fc.WriteSendBuffer(make([]byte, 40))
 	fc.cutSendBufferToWindow(cur)
-	fc.processRecvList(nil, map[int32]int{0: 1, 1: 1, 2: 1, 3: 1}, nil)
+	fc.processRecvList(&recvMaps{ack: map[int32]int{0: 1, 1: 1, 2: 1, 3: 1}})
 	fc.sendid = 7
 	fc.Close()
 	fc.cutSendBufferToWindow(cur)
