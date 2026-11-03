@@ -104,10 +104,11 @@ type rdnsConnDialer struct {
 
 type rdnsConnListenerSonny struct {
 	session    string
-	remote     *net.UDPAddr
+	remote     atomic.Pointer[net.UDPAddr]
 	fatherconn *net.UDPConn
 	listener   *rdnsConnListener
 	fm         *FrameMgr
+	fmMu       sync.Mutex // serializes FrameMgr across recv/accept/update/R/W
 	wg         *thread.Group
 	pending    [][]byte // downlink frames waiting to be carried in next responses
 	pendMu     sync.Mutex
@@ -143,15 +144,30 @@ func (c *RdnsConn) Read(p []byte) (n int, err error) {
 	}
 
 	for !c.isclose.Load() {
-		if fm.GetRecvBufferSize() <= 0 {
+		var size int
+		var empty bool
+		if c.listenersonny != nil {
+			c.listenersonny.fmMu.Lock()
+			empty = fm.GetRecvBufferSize() <= 0
+			if !empty {
+				size = copy(p, fm.GetRecvReadLineBuffer())
+				fm.SkipRecvBuffer(size)
+			}
+			c.listenersonny.fmMu.Unlock()
+		} else {
+			empty = fm.GetRecvBufferSize() <= 0
+			if !empty {
+				size = copy(p, fm.GetRecvReadLineBuffer())
+				fm.SkipRecvBuffer(size)
+			}
+		}
+		if empty {
 			if wg != nil && wg.IsExit() {
 				return 0, errors.New("closed conn")
 			}
 			time.Sleep(time.Millisecond * 100)
 			continue
 		}
-		size := copy(p, fm.GetRecvReadLineBuffer())
-		fm.SkipRecvBuffer(size)
 		return size, nil
 	}
 	return 0, errors.New("read closed conn")
@@ -179,9 +195,25 @@ func (c *RdnsConn) Write(p []byte) (n int, err error) {
 	cur := 0
 	for !c.isclose.Load() {
 		size := totalsize - cur
-		svleft := fm.GetSendBufferLeft()
-		if size > svleft {
-			size = svleft
+		var svleft int
+		if c.listenersonny != nil {
+			c.listenersonny.fmMu.Lock()
+			svleft = fm.GetSendBufferLeft()
+			if size > svleft {
+				size = svleft
+			}
+			if size > 0 {
+				fm.WriteSendBuffer(p[cur : cur+size])
+			}
+			c.listenersonny.fmMu.Unlock()
+		} else {
+			svleft = fm.GetSendBufferLeft()
+			if size > svleft {
+				size = svleft
+			}
+			if size > 0 {
+				fm.WriteSendBuffer(p[cur : cur+size])
+			}
 		}
 		if size <= 0 {
 			if wg != nil && wg.IsExit() {
@@ -193,7 +225,6 @@ func (c *RdnsConn) Write(p []byte) (n int, err error) {
 			time.Sleep(time.Millisecond * 100)
 			continue
 		}
-		fm.WriteSendBuffer(p[cur : cur+size])
 		cur += size
 		if cur >= totalsize {
 			return totalsize, nil
@@ -278,8 +309,8 @@ func (c *RdnsConn) Info() string {
 	}
 	if c.listenersonny != nil {
 		remote := ""
-		if c.listenersonny.remote != nil {
-			remote = c.listenersonny.remote.String()
+		if ra := c.listenersonny.remote.Load(); ra != nil {
+			remote = ra.String()
 		}
 		return c.listenersonny.fatherconn.LocalAddr().String() + "<--rdns " + c.session + "-->" + remote
 	}
@@ -689,11 +720,11 @@ func (c *RdnsConn) loopListenerRecv() error {
 			}
 			sonny := &rdnsConnListenerSonny{
 				session:    session,
-				remote:     srcaddr,
 				fatherconn: c.listener.listenerconn,
 				listener:   c.listener,
 				fm:         fm,
 			}
+			sonny.remote.Store(srcaddr)
 			u = &RdnsConn{id: id, session: session, config: c.config, listenersonny: sonny}
 			c.listener.sonny.Store(session, u)
 
@@ -710,7 +741,7 @@ func (c *RdnsConn) loopListenerRecv() error {
 				c.writeDNSError(req, srcaddr, dns.RcodeServerFailure)
 				continue
 			}
-			u.listenersonny.remote = srcaddr
+			u.listenersonny.remote.Store(srcaddr)
 			if len(uplink) > 0 {
 				c.feedUplink(u, uplink)
 			}
@@ -746,6 +777,8 @@ func (c *RdnsConn) feedUplink(u *RdnsConn, sealed []byte) {
 	if err != nil {
 		return
 	}
+	u.listenersonny.fmMu.Lock()
+	defer u.listenersonny.fmMu.Unlock()
 	for _, p := range parts {
 		f := &Frame{}
 		if err := proto.Unmarshal(p, f); err == nil {
@@ -756,7 +789,6 @@ func (c *RdnsConn) feedUplink(u *RdnsConn, sealed []byte) {
 
 func (c *RdnsConn) collectDownlink(u *RdnsConn) []byte {
 	fm := u.listenersonny.fm
-	fm.Update()
 
 	var frames [][]byte
 	u.listenersonny.pendMu.Lock()
@@ -766,6 +798,8 @@ func (c *RdnsConn) collectDownlink(u *RdnsConn) []byte {
 	}
 	u.listenersonny.pendMu.Unlock()
 
+	u.listenersonny.fmMu.Lock()
+	fm.Update()
 	sendlist := fm.GetSendList()
 	for e := sendlist.Front(); e != nil; e = e.Next() {
 		f := e.Value.(*Frame)
@@ -778,6 +812,8 @@ func (c *RdnsConn) collectDownlink(u *RdnsConn) []byte {
 			break
 		}
 	}
+	u.listenersonny.fmMu.Unlock()
+
 	blob := rdnsPackFrames(frames)
 	sealed, err := rdnsSeal(c.config.PSK, blob)
 	if err != nil {
@@ -856,13 +892,18 @@ func (c *RdnsConn) accept(u *RdnsConn) error {
 	startConnectTime := time.Now()
 	done := false
 	for !c.listener.wg.IsExit() {
-		if u.listenersonny.fm.IsConnected() {
+		u.listenersonny.fmMu.Lock()
+		connected := u.listenersonny.fm.IsConnected()
+		if !connected {
+			// Downlink frames produced here wait in GetSendList until the next
+			// client poll picks them up via collectDownlink.
+			u.listenersonny.fm.Update()
+		}
+		u.listenersonny.fmMu.Unlock()
+		if connected {
 			done = true
 			break
 		}
-		u.listenersonny.fm.Update()
-		// Downlink frames produced here wait in GetSendList until the next
-		// client poll picks them up via collectDownlink.
 		if time.Since(startConnectTime) > time.Millisecond*time.Duration(c.config.ConnectTimeoutMs) {
 			break
 		}
@@ -896,12 +937,16 @@ func (c *RdnsConn) updateListenerSonny() error {
 	wg := c.listenersonny.wg
 	reason := ""
 	for !wg.IsExit() {
+		c.listenersonny.fmMu.Lock()
 		active := fm.Update()
-		if fm.IsHBTimeout() {
+		hb := fm.IsHBTimeout()
+		remoteClosed := fm.IsRemoteClosed()
+		c.listenersonny.fmMu.Unlock()
+		if hb {
 			reason = "HBTimeout"
 			break
 		}
-		if fm.IsRemoteClosed() {
+		if remoteClosed {
 			reason = "RemoteClose"
 			break
 		}
@@ -911,14 +956,19 @@ func (c *RdnsConn) updateListenerSonny() error {
 			time.Sleep(time.Millisecond * 10)
 		}
 	}
+	c.listenersonny.fmMu.Lock()
 	fm.Close()
+	c.listenersonny.fmMu.Unlock()
 	startCloseTime := time.Now()
 	for !wg.IsExit() {
+		c.listenersonny.fmMu.Lock()
 		fm.Update()
+		remoteClosed := fm.IsRemoteClosed()
+		c.listenersonny.fmMu.Unlock()
 		if time.Since(startCloseTime) > time.Millisecond*time.Duration(c.config.CloseTimeoutMs) {
 			break
 		}
-		if fm.IsRemoteClosed() {
+		if remoteClosed {
 			break
 		}
 		time.Sleep(time.Millisecond * 20)
@@ -928,7 +978,10 @@ func (c *RdnsConn) updateListenerSonny() error {
 		if time.Since(startEndTime) > time.Millisecond*time.Duration(c.config.CloseWaitTimeoutMs) {
 			break
 		}
-		if fm.GetRecvBufferSize() <= 0 {
+		c.listenersonny.fmMu.Lock()
+		empty := fm.GetRecvBufferSize() <= 0
+		c.listenersonny.fmMu.Unlock()
+		if empty {
 			break
 		}
 		time.Sleep(time.Millisecond * 10)
