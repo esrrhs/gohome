@@ -77,13 +77,13 @@ type FrameMgr struct {
 	resend_timems int
 	compress      int
 
-	sendwin  *glist.ROBuffergo
-	sendlist *list.List
-	sendid   int32
+	sendwin *glist.ROBuffergo
+	sendq   []*Frame // staged outbound frames awaiting GetSendFrames; guarded by sendlock
+	sendid  int32
 
-	recvwin  *glist.ROBuffergo
-	recvlist *list.List
-	recvid   int32
+	recvwin *glist.ROBuffergo
+	recvq   []*Frame // staged inbound frames awaiting Update; guarded by recvlock
+	recvid  int32
 
 	close            bool
 	remoteclosed     bool
@@ -141,10 +141,8 @@ func NewFrameMgr(frame_max_size int, frame_max_id int, buffersize int, windowsiz
 		sendblock: &sync.Mutex{}, recvblock: &sync.Mutex{},
 		recvlock: &sync.Mutex{}, sendlock: &sync.Mutex{},
 		windowsize: int32(windowsize), resend_timems: resend_timems, compress: compress,
-		sendwin:  glist.NewROBuffer(windowsize, 0, frame_max_id),
-		sendlist: list.New(), sendid: 0,
-		recvwin:  glist.NewROBuffer(windowsize, 0, frame_max_id),
-		recvlist: list.New(), recvid: 0,
+		sendwin: glist.NewROBuffer(windowsize, 0, frame_max_id), sendid: 0,
+		recvwin: glist.NewROBuffer(windowsize, 0, frame_max_id), recvid: 0,
 		close: false, remoteclosed: false, closesend: false,
 		lastPingTime: time.Now().UnixNano(), lastPongTime: time.Now().UnixNano(),
 		lastSendHBTime: time.Now().UnixNano(), lastRecvHBTime: time.Now().UnixNano(), lastRecvDataTime: time.Now().UnixNano(),
@@ -199,9 +197,10 @@ func (fm *FrameMgr) Update() bool {
 
 	fm.cutSendBufferToWindow(cur)
 
-	tmpreq, tmpack, tmpackto := fm.preProcessRecvList()
-	avtive := len(tmpreq) + len(tmpack) + len(tmpackto)
-	fm.processRecvList(tmpreq, tmpack, tmpackto)
+	rm := fm.preProcessRecvList()
+	avtive := len(rm.req) + len(rm.ack) + len(rm.ackto)
+	fm.processRecvList(rm)
+	recvMapsPool.Put(rm)
 
 	fm.combineWindowToRecvBuffer(cur)
 
@@ -227,8 +226,7 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 	}
 
 	for fm.sendb.Size() >= fm.frame_max_size && fm.sendwin.Size() < int(fm.windowsize) {
-		fd := &FrameData{Type: (int32)(FrameData_USER_DATA),
-			Data: make([]byte, fm.frame_max_size)}
+		fd := getSendFrame(fm.frame_max_size).Data
 		fm.sendb.Read(fd.Data)
 
 		if fm.compress > 0 && len(fd.Data) > fm.compress {
@@ -256,8 +254,7 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 	}
 
 	if sendall && fm.sendb.Size() > 0 && fm.sendwin.Size() < int(fm.windowsize) {
-		fd := &FrameData{Type: (int32)(FrameData_USER_DATA),
-			Data: make([]byte, fm.sendb.Size())}
+		fd := getSendFrame(fm.sendb.Size()).Data
 		fm.sendb.Read(fd.Data)
 
 		if fm.compress > 0 && len(fd.Data) > fm.compress {
@@ -285,7 +282,8 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 	}
 
 	if fm.sendb.Empty() && fm.close && !fm.closesend && fm.sendwin.Size() < int(fm.windowsize) {
-		fd := &FrameData{Type: (int32)(FrameData_CLOSE)}
+		fd := getSendFrame(0).Data
+		fd.Type = (int32)(FrameData_CLOSE)
 
 		f := &Frame{Type: (int32)(Frame_DATA),
 			Id:   fm.sendid,
@@ -305,7 +303,8 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 	}
 
 	if fm.sendb.Empty() && fm.closesendreq && !fm.halfclosesend && fm.sendwin.Size() < int(fm.windowsize) {
-		fd := &FrameData{Type: (int32)(FrameData_HALFCLOSE)}
+		fd := getSendFrame(0).Data
+		fd.Type = (int32)(FrameData_HALFCLOSE)
 
 		f := &Frame{Type: (int32)(Frame_DATA),
 			Id:   fm.sendid,
@@ -370,51 +369,138 @@ func (fm *FrameMgr) calSendList(cur int64) {
 	fm.ctLastSendId = -1
 }
 
+// GetSendFrames returns the outbound frames staged by sendFrame and empties
+// the staging area. The caller must not retain the slice past its emit loop;
+// handing it back via PutFrames recycles it, otherwise it is garbage
+// collected. Prefer this over GetSendList — it allocates no per-frame list
+// nodes.
+func (fm *FrameMgr) GetSendFrames() []*Frame {
+	fm.sendlock.Lock()
+	defer fm.sendlock.Unlock()
+	ret := fm.sendq
+	fm.sendq = (*frameSlicePool.Get().(*[]*Frame))[:0]
+	return ret
+}
+
+// PutFrames recycles a slice handed out by GetSendFrames. Optional —
+// unreturned slices are simply garbage collected. The frames themselves are
+// NOT freed here; only the slice storage is reused.
+func PutFrames(fs []*Frame) {
+	if cap(fs) == 0 || cap(fs) > 8192 {
+		return
+	}
+	fs = fs[:0]
+	frameSlicePool.Put(&fs)
+}
+
+var frameSlicePool = sync.Pool{
+	New: func() interface{} {
+		s := make([]*Frame, 0, 64)
+		return &s
+	},
+}
+
+// recvMaps bundles the per-Update dedup/count scratch maps. Pooled because
+// preProcessRecvList runs on every Update and three fresh maps per call
+// dominated the allocator profile.
+type recvMaps struct {
+	req   map[int32]int
+	ack   map[int32]int
+	ackto map[int32]*Frame
+}
+
+var recvMapsPool = sync.Pool{
+	New: func() interface{} {
+		return &recvMaps{
+			req:   make(map[int32]int),
+			ack:   make(map[int32]int),
+			ackto: make(map[int32]*Frame),
+		}
+	},
+}
+
+// sendFramePool recycles DATA frames popped from sendwin: each carries a
+// payload buffer sized for a full frame, and cutting fresh Frame+FrameData
+// per chunk dominated the send-side allocator profile. Frames are consumed
+// synchronously by the emit side (marshal runs on the same goroutine that
+// will next call Update), so recycling on the single ACK-pop path is safe.
+var sendFramePool = sync.Pool{
+	New: func() interface{} {
+		return &Frame{Data: &FrameData{}}
+	},
+}
+
+func getSendFrame(maxSize int) *Frame {
+	f := sendFramePool.Get().(*Frame)
+	fd := f.Data
+	if cap(fd.Data) < maxSize {
+		fd.Data = make([]byte, maxSize)
+	}
+	fd.Data = fd.Data[:maxSize]
+	fd.Type = (int32)(FrameData_USER_DATA)
+	fd.Compress = false
+	f.Type = (int32)(Frame_DATA)
+	f.Resend = false
+	f.Sendtime = 0
+	f.Dataid = nil
+	f.Acked = false
+	return f
+}
+
+func putSendFrame(f *Frame) {
+	if f == nil {
+		return
+	}
+	f.Dataid = nil
+	sendFramePool.Put(f)
+}
+
+// GetSendList is the container/list flavor of GetSendFrames, kept for
+// existing callers. New code should use GetSendFrames.
 func (fm *FrameMgr) GetSendList() *list.List {
 	fm.sendlock.Lock()
 	defer fm.sendlock.Unlock()
 	ret := list.New()
-	for e := fm.sendlist.Front(); e != nil; e = e.Next() {
-		f := e.Value.(*Frame)
+	for _, f := range fm.sendq {
 		ret.PushBack(f)
 	}
-	fm.sendlist.Init()
+	fm.sendq = fm.sendq[:0]
 	return ret
 }
 
 func (fm *FrameMgr) sendFrame(f *Frame) {
 	fm.sendlock.Lock()
 	defer fm.sendlock.Unlock()
-	fm.sendlist.PushBack(f)
+	fm.sendq = append(fm.sendq, f)
 }
 
 func (fm *FrameMgr) OnRecvFrame(f *Frame) {
 	fm.recvlock.Lock()
 	defer fm.recvlock.Unlock()
-	fm.recvlist.PushBack(f)
+	fm.recvq = append(fm.recvq, f)
 }
 
-func (fm *FrameMgr) preProcessRecvList() (map[int32]int, map[int32]int, map[int32]*Frame) {
+func (fm *FrameMgr) preProcessRecvList() *recvMaps {
 	fm.recvlock.Lock()
 	defer fm.recvlock.Unlock()
 
-	tmpreq := make(map[int32]int)
-	tmpack := make(map[int32]int)
-	tmpackto := make(map[int32]*Frame)
-	for e := fm.recvlist.Front(); e != nil; e = e.Next() {
-		f := e.Value.(*Frame)
+	rm := recvMapsPool.Get().(*recvMaps)
+	clear(rm.req)
+	clear(rm.ack)
+	clear(rm.ackto)
+	for _, f := range fm.recvq {
 		if f.Type == (int32)(Frame_REQ) {
 			for _, id := range f.Dataid {
-				tmpreq[id]++
+				rm.req[id]++
 				//loggo.Debug("debugid %v recv req %v %v", fm.debugid, f.Id, common.Int32ArrayToString(f.Dataid, ","))
 			}
 		} else if f.Type == (int32)(Frame_ACK) {
 			for _, id := range f.Dataid {
-				tmpack[id]++
+				rm.ack[id]++
 				//loggo.Debug("debugid %v recv ack %v %v", fm.debugid, f.Id, common.Int32ArrayToString(f.Dataid, ","))
 			}
 		} else if f.Type == (int32)(Frame_DATA) {
-			tmpackto[f.Id] = f
+			rm.ackto[f.Id] = f
 			if fm.openstat > 0 {
 				fm.fs.recvDataNum++
 				fm.fs.recvDataNumsMap[f.Id]++
@@ -428,13 +514,13 @@ func (fm *FrameMgr) preProcessRecvList() (map[int32]int, map[int32]int, map[int3
 			loggo.Error("error frame type %v", f.Type)
 		}
 	}
-	fm.recvlist.Init()
-	return tmpreq, tmpack, tmpackto
+	fm.recvq = fm.recvq[:0]
+	return rm
 }
 
-func (fm *FrameMgr) processRecvList(tmpreq map[int32]int, tmpack map[int32]int, tmpackto map[int32]*Frame) {
+func (fm *FrameMgr) processRecvList(rm *recvMaps) {
 
-	for id, num := range tmpreq {
+	for id, num := range rm.req {
 		err, value := fm.sendwin.Get(int(id))
 		if err != nil {
 			loggo.Error("sendwin get id fail %v %v", id, err)
@@ -457,7 +543,7 @@ func (fm *FrameMgr) processRecvList(tmpreq map[int32]int, tmpack map[int32]int, 
 		}
 	}
 
-	for id, num := range tmpack {
+	for id, num := range rm.ack {
 		err, value := fm.sendwin.Get(int(id))
 		if err != nil {
 			continue
@@ -493,6 +579,7 @@ func (fm *FrameMgr) processRecvList(tmpreq map[int32]int, tmpack map[int32]int, 
 		}
 		f := value.(*Frame)
 		if f.Acked {
+			putSendFrame(f)
 			err := fm.sendwin.PopFront()
 			if err != nil {
 				loggo.Error("sendwin PopFront fail ")
@@ -503,11 +590,11 @@ func (fm *FrameMgr) processRecvList(tmpreq map[int32]int, tmpack map[int32]int, 
 		}
 	}
 
-	if len(tmpackto) > 0 {
-		tmpsize := common.MinOfInt(len(tmpackto), fm.frame_max_size/2/4)
-		tmp := make([]int32, len(tmpackto))
+	if len(rm.ackto) > 0 {
+		tmpsize := common.MinOfInt(len(rm.ackto), fm.frame_max_size/2/4)
+		tmp := make([]int32, len(rm.ackto)) // bounded by window; not worth pooling
 		index := 0
-		for id, rf := range tmpackto {
+		for id, rf := range rm.ackto {
 			if fm.addToRecvWin(rf) {
 				tmp[index] = id
 				index++
@@ -521,7 +608,7 @@ func (fm *FrameMgr) processRecvList(tmpreq map[int32]int, tmpack map[int32]int, 
 						Dataid: tmp[0:index]}
 					fm.sendFrame(f)
 					index = 0
-					tmp = make([]int32, len(tmpackto))
+					tmp = make([]int32, len(rm.ackto))
 					//loggo.Debug("debugid %v send ack %v %v", fm.debugid, f.Id, common.Int32ArrayToString(f.Dataid, ","))
 				}
 				//loggo.Debug("debugid %v add data to win %v %v", fm.debugid, rf.Id, len(rf.Data.Data))
