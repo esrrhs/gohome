@@ -44,8 +44,9 @@ fuzzing, on top of the usual unit and hardening tests.
 | `go test ./...` | Unit tests, hardening tests, and every fuzz **seed corpus** (including committed crashers) |
 | Go native fuzzing | 26 targets across 9 packages — see the table below |
 | `golangci-lint` (v2) | `govet`, `ineffassign`, `unused`, `staticcheck`; the config is in [`.golangci.yml`](.golangci.yml) and CI requires 0 issues |
-| CI `Go` (linux/amd64) | build → gofmt → vet → lint → test → `-race` → `-race` (network & crypto) → privileged raw ICMP |
+| CI `Go` (linux/amd64) | parallel jobs: lint (build/gofmt/vet/golangci) ‖ test+Codecov ‖ race-fast ‖ race-slow (network & crypto) ‖ privileged raw ICMP |
 | CI `Big Endian Test` (s390x) | Runs the whole suite on a big-endian target, including all fuzz seed corpora |
+| CI `Nightly Fuzz` | Scheduled daily: all 26 fuzz targets at `-fuzztime 30s` each (package-parallel matrix); uploads new crashers as artifacts |
 
 ### Fuzz targets
 

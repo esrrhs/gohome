@@ -220,6 +220,19 @@ go test ./network/ -run='^$' -bench=BenchmarkReliableThroughput/ricmp -benchtime
 go test ./network/ -run='^$' -bench=BenchmarkReliableThroughput/rhttp -benchtime=1x -timeout 30m
 ```
 
+### FrameMgr / BBCongestion 微基准
+
+分配热点相关的 bench 在 `framemgr_bench_test.go`，适合对比 cut/stage/`GetSendFrames`
+与拥塞控制的回归：
+
+```bash
+go test ./network/ -run='^$' -bench='BenchmarkFrameMgr|BenchmarkBBCongestion' -benchmem -count=6 -timeout 10m | tee new.txt
+# 与之前保存的 old.txt 对比：
+benchstat old.txt new.txt
+```
+
+`benchstat` 安装：`go install golang.org/x/perf/cmd/benchstat@latest`。
+
 ### 测试环境配置
 
 | 项 | 值 |

@@ -43,8 +43,9 @@ GoHome 是一个功能完备、开箱即用的 Go 语言通用基础设施与核
 | `go test ./...` | 单测、加固测试，以及全部 fuzz **种子语料**（含已入库的崩溃样本） |
 | Go 原生 fuzzing | 9 个包共 26 个 target，见下表 |
 | `golangci-lint`（v2） | `govet`、`ineffassign`、`unused`、`staticcheck`；配置见 [`.golangci.yml`](.golangci.yml)，CI 要求 0 issues |
-| CI `Go`（linux/amd64） | build → gofmt → vet → lint → test → `-race` → `-race`（network & crypto）→ 特权 raw ICMP |
+| CI `Go`（linux/amd64） | 并行任务：lint（build/gofmt/vet/golangci）‖ test+Codecov ‖ race-fast ‖ race-slow（network & crypto）‖ 特权 raw ICMP |
 | CI `Big Endian Test`（s390x） | 在大端机器上跑完整套件，含全部 fuzz 种子语料 |
+| CI `Nightly Fuzz` | 每日定时：全部 26 个 fuzz target，各 `-fuzztime 30s`（按包并行矩阵）；新 crasher 作为 artifact 上传 |
 
 ### Fuzz target 一览
 

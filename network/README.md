@@ -220,6 +220,19 @@ go test ./network/ -run='^$' -bench=BenchmarkReliableThroughput/ricmp -benchtime
 go test ./network/ -run='^$' -bench=BenchmarkReliableThroughput/rhttp -benchtime=1x -timeout 30m
 ```
 
+### FrameMgr / BBCongestion microbenchmarks
+
+Allocation-focused hot-path benches live in `framemgr_bench_test.go`. Useful for
+regressions around cut/stage/`GetSendFrames` and the congestion controller:
+
+```bash
+go test ./network/ -run='^$' -bench='BenchmarkFrameMgr|BenchmarkBBCongestion' -benchmem -count=6 -timeout 10m | tee new.txt
+# compare against a previous run saved as old.txt:
+benchstat old.txt new.txt
+```
+
+`benchstat` is `go install golang.org/x/perf/cmd/benchstat@latest`.
+
 ### Test Environment
 
 | Item | Value |

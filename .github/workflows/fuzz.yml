@@ -1,0 +1,63 @@
+# Nightly fuzz pass over all 26 native fuzz targets.
+# Each target gets a short -fuzztime so the whole matrix stays under ~45m wall.
+name: Nightly Fuzz
+
+on:
+  schedule:
+    # 16:00 UTC ≈ 00:00 Asia/Shanghai
+    - cron: '0 16 * * *'
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pkg: ./network/
+            targets: "FuzzFrameMgrRecvReassembly FuzzFrameMgrCut FuzzFrameMgrMarshal FuzzBBCongestion FuzzSock5UnpackUDP FuzzSock5GetRequest FuzzSock5HandshakeAuth FuzzIcmpPacketPayload FuzzRicmpListenAddr"
+          - pkg: ./dns/fakeip/
+            targets: "FuzzFakeIPRoundTrip FuzzNormalizeDomain"
+          - pkg: ./dns/cache/
+            targets: "FuzzKeyForMsg FuzzDNSCache"
+          - pkg: ./dns/matcher/
+            targets: "FuzzDomainTrie FuzzIPNetList"
+          - pkg: ./common/
+            targets: "FuzzCompressRoundTrip FuzzRc4RoundTrip FuzzGetRootDomain"
+          - pkg: ./crypto/
+            targets: "FuzzHashContract FuzzSkeinHashSize"
+          - pkg: ./list/
+            targets: "FuzzRBuffergo FuzzRlistgo"
+          - pkg: ./lru/
+            targets: "FuzzLRUCache FuzzLRUMultiCache"
+          - pkg: ./pool/
+            targets: "FuzzPoolAllocFree FuzzTokenPoolAcquireRelease"
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.27.3'
+
+    - name: Fuzz package targets
+      run: |
+        set -euo pipefail
+        # 30s per target × 26 ≈ 13m CPU; matrix parallelizes packages.
+        for t in ${{ matrix.targets }}; do
+          echo "::group::Fuzz $t in ${{ matrix.pkg }}"
+          go test ${{ matrix.pkg }} -run "^${t}$" -fuzz "^${t}$" -fuzztime 30s -timeout 10m
+          echo "::endgroup::"
+        done
+
+    - name: Upload new crashers on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: fuzz-crashers-${{ strategy.job-index }}
+        path: |
+          **/testdata/fuzz/
+        if-no-files-found: ignore
+        retention-days: 14
