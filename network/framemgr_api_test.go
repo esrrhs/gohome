@@ -25,7 +25,7 @@ func TestFrameMgrGetSendFramesAndPut(t *testing.T) {
 	}
 	PutFrames(frames)
 	PutFrames(nil)                     // no-op path
-	PutFrames(make([]*Frame, 0, 0))    // cap==0 early return
+	PutFrames(make([]*Frame, 0))       // cap==0 early return
 	PutFrames(make([]*Frame, 0, 8193)) // cap>8192 early return
 }
 
