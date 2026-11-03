@@ -6,7 +6,7 @@
 [<img src="https://img.shields.io/github/actions/workflow/status/esrrhs/gohome/go_bigendian.yml?branch=master&label=big-endian">](https://github.com/esrrhs/gohome/actions)
 [![codecov](https://codecov.io/gh/esrrhs/gohome/graph/badge.svg)](https://codecov.io/gh/esrrhs/gohome)
 [<img src="https://img.shields.io/badge/go-%3E%3D1.27.3-blue">](https://golang.org/)
-[<img src="https://img.shields.io/badge/fuzzing-26%20targets-blue">](https://go.dev/doc/fuzz/)
+[<img src="https://img.shields.io/badge/fuzzing-27%20targets-blue">](https://go.dev/doc/fuzz/)
 
 [中文文档](README_ZH.md)
 
@@ -42,17 +42,17 @@ fuzzing, on top of the usual unit and hardening tests.
 | Gate | What it enforces |
 |---|---|
 | `go test ./...` | Unit tests, hardening tests, and every fuzz **seed corpus** (including committed crashers) |
-| Go native fuzzing | 26 targets across 9 packages — see the table below |
+| Go native fuzzing | 27 targets across 9 packages — see the table below |
 | `golangci-lint` (v2) | `govet`, `ineffassign`, `unused`, `staticcheck`; the config is in [`.golangci.yml`](.golangci.yml) and CI requires 0 issues |
 | CI `Go` (linux/amd64) | parallel jobs: lint (build/gofmt/vet/golangci) ‖ test+Codecov ‖ race-fast ‖ race-slow (network & crypto) ‖ privileged raw ICMP |
 | CI `Big Endian Test` (s390x) | Runs the whole suite on a big-endian target, including all fuzz seed corpora |
-| CI `Nightly Fuzz` | Scheduled daily: all 26 fuzz targets at `-fuzztime 30s` each (package-parallel matrix); uploads new crashers as artifacts |
+| CI `Nightly Fuzz` | Scheduled daily: all 27 fuzz targets at `-fuzztime 30s` each (package-parallel matrix); uploads new crashers as artifacts |
 
 ### Fuzz targets
 
 | Package | # | What is fuzzed |
 |---|---|---|
-| [`network`](network/) | 9 | `FrameMgr` reassembly / cut / frame wire format, `BBCongestion` state machine, SOCKS5 request / UDP / handshake parsing, ICMP payload decoding, listen-address parsing |
+| [`network`](network/) | 10 | `FrameMgr` reassembly / cut / frame wire format, `BBCongestion` state machine, SOCKS5 request / UDP / handshake parsing, ICMP payload decoding, listen-address parsing, DNS-tunnel QNAME codec |
 | [`dns`](dns/) | 6 | Domain-suffix trie, IP-network list, Fake-IP mapping, domain normalization, DNS cache and message key |
 | [`common`](common/) | 3 | Compression round-trip, RC4 involution, eTLD+1 root-domain parsing |
 | [`crypto`](crypto/) | 2 | `hash.Hash` contract across 13 primitives (streaming ≡ one-shot, `Sum` idempotence, prefix preservation), Skein hash sizes |
@@ -101,7 +101,7 @@ import (
 )
 
 func main() {
-	// Easily switch protocols: "tcp", "udp", "kcp", "quic", "rudp", "ricmp", "rhttp"
+	// Easily switch protocols: "tcp", "udp", "kcp", "quic", "rudp", "ricmp", "rhttp", "rdns"
 	proto := "kcp"
 
 	// 1. Server listens

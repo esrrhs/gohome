@@ -5,7 +5,7 @@ import (
 )
 
 func TestNewConn(t *testing.T) {
-	validProtos := []string{"tcp", "udp", "rudp", "ricmp", "kcp", "quic", "rhttp"}
+	validProtos := []string{"tcp", "udp", "rudp", "ricmp", "kcp", "quic", "rhttp", "rdns"}
 
 	for _, proto := range validProtos {
 		conn, err := NewConn(proto)
@@ -49,6 +49,7 @@ func TestSupportReliableProtos(t *testing.T) {
 		"kcp":   true,
 		"quic":  true,
 		"rhttp": true,
+		"rdns":  true,
 	}
 
 	protos := SupportReliableProtos()

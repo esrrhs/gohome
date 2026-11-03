@@ -50,7 +50,7 @@ type Conn interface {
 
 ### 2. Reliable Frame Manager (`FrameMgr`)
 
-`FrameMgr` is the underlying engine for custom reliable protocols (`rudp` and `ricmp`). It implements:
+`FrameMgr` is the underlying engine for custom reliable protocols (`rudp`, `ricmp`, and `rdns`). It implements:
 - **Sliding Window ARQ**: Packet sequencing with wrap-around-aware ring indexing (`sendIdRank`), selective ACKs, and hole-targeted retransmission requests (`reqmap`).
 - **Dynamic Compression**: Automatic inline payload compression using **Zstd** when payload size exceeds configurable thresholds.
 - **Keep-Alive & RTT Tracking**: Periodic ping/pong and heartbeat messages to track latency and detect stale connections.
@@ -82,6 +82,7 @@ Standard-compliant implementation of **RFC 1928** and **RFC 1929**:
 | **`rudp`** | Reliable | Lightweight custom reliable UDP powered by `FrameMgr` and `BBCongestion` (uses `sendmmsg` batching on Linux). | UDP Datagram |
 | **`ricmp`** | Reliable | Covert reliable transport over ICMP Echo packets (requires `CAP_NET_RAW` privileges). | Raw ICMP Socket |
 | **`rhttp`** | Reliable | Reliable bi-directional data tunnel layered over repeated HTTP requests with connection pooling and server timeouts. | HTTP / TCP |
+| **`rdns`** | Reliable | FrameMgr ARQ tunnel over DNS queries/responses (TXT or NULL). Tiny CutSize; optional AES-GCM PSK. DNS metadata stays visible. | UDP DNS |
 
 ---
 

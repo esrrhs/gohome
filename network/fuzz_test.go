@@ -719,3 +719,59 @@ func FuzzRicmpListenAddr(f *testing.F) {
 		}
 	})
 }
+
+// FuzzRdnsQName exercises the DNS-tunnel QNAME codec: seal → build → parse → open
+// must round-trip, and garbage names must not panic.
+func FuzzRdnsQName(f *testing.F) {
+	f.Add("tunnel.example.com", "abcd1234", []byte("hello"), "psk")
+	f.Add("t.example.com", "sess01", []byte{}, "")
+	f.Add("a.b.c", "x", bytes.Repeat([]byte{1}, 50), "k")
+	f.Add("", "s", []byte("x"), "")
+	f.Add("tunnel.example.com", "", []byte("x"), "")
+
+	f.Fuzz(func(t *testing.T, domain, session string, payload []byte, psk string) {
+		if len(domain) > 80 {
+			domain = domain[:80]
+		}
+		if len(session) > 32 {
+			session = session[:32]
+		}
+		if len(payload) > 120 {
+			payload = payload[:120]
+		}
+		if len(psk) > 64 {
+			psk = psk[:64]
+		}
+		domain = rdnsNormalizeDomain(domain)
+		session = rdnsSessionID(session + "pad")
+		if domain == "" {
+			return
+		}
+		sealed, err := rdnsSeal(psk, payload)
+		if err != nil {
+			t.Fatalf("seal: %v", err)
+		}
+		qname, err := rdnsBuildQName(domain, session, sealed)
+		if err != nil {
+			// Oversized QNAME is a clean failure.
+			return
+		}
+		gotSess, gotSealed, ok, err := rdnsParseQName(qname, domain)
+		if err != nil {
+			t.Fatalf("parse error on self-built qname: %v", err)
+		}
+		if !ok {
+			t.Fatalf("self-built qname not recognized: %q", qname)
+		}
+		if gotSess != session {
+			t.Fatalf("session %q != %q", gotSess, session)
+		}
+		plain, err := rdnsOpen(psk, gotSealed)
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		if !bytes.Equal(plain, payload) && !(len(plain) == 0 && len(payload) == 0) {
+			t.Fatalf("payload mismatch")
+		}
+	})
+}

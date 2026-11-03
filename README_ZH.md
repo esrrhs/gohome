@@ -6,7 +6,7 @@
 [<img src="https://img.shields.io/github/actions/workflow/status/esrrhs/gohome/go_bigendian.yml?branch=master&label=big-endian">](https://github.com/esrrhs/gohome/actions)
 [![codecov](https://codecov.io/gh/esrrhs/gohome/graph/badge.svg)](https://codecov.io/gh/esrrhs/gohome)
 [<img src="https://img.shields.io/badge/go-%3E%3D1.27.3-blue">](https://golang.org/)
-[<img src="https://img.shields.io/badge/fuzzing-26%20targets-blue">](https://go.dev/doc/fuzz/)
+[<img src="https://img.shields.io/badge/fuzzing-27%20targets-blue">](https://go.dev/doc/fuzz/)
 
 [English](README.md)
 
@@ -41,17 +41,17 @@ GoHome 是一个功能完备、开箱即用的 Go 语言通用基础设施与核
 | 门禁 | 约束内容 |
 |---|---|
 | `go test ./...` | 单测、加固测试，以及全部 fuzz **种子语料**（含已入库的崩溃样本） |
-| Go 原生 fuzzing | 9 个包共 26 个 target，见下表 |
+| Go 原生 fuzzing | 9 个包共 27 个 target，见下表 |
 | `golangci-lint`（v2） | `govet`、`ineffassign`、`unused`、`staticcheck`；配置见 [`.golangci.yml`](.golangci.yml)，CI 要求 0 issues |
 | CI `Go`（linux/amd64） | 并行任务：lint（build/gofmt/vet/golangci）‖ test+Codecov ‖ race-fast ‖ race-slow（network & crypto）‖ 特权 raw ICMP |
 | CI `Big Endian Test`（s390x） | 在大端机器上跑完整套件，含全部 fuzz 种子语料 |
-| CI `Nightly Fuzz` | 每日定时：全部 26 个 fuzz target，各 `-fuzztime 30s`（按包并行矩阵）；新 crasher 作为 artifact 上传 |
+| CI `Nightly Fuzz` | 每日定时：全部 27 个 fuzz target，各 `-fuzztime 30s`（按包并行矩阵）；新 crasher 作为 artifact 上传 |
 
 ### Fuzz target 一览
 
 | 包 | 数量 | 覆盖内容 |
 |---|---|---|
-| [`network`](network/) | 9 | `FrameMgr` 重组 / 切帧 / 帧编解码、`BBCongestion` 状态机、SOCKS5 请求 / UDP / 握手解析、ICMP 报文解析、监听地址解析 |
+| [`network`](network/) | 10 | `FrameMgr` 重组 / 切帧 / 帧编解码、`BBCongestion` 状态机、SOCKS5 请求 / UDP / 握手解析、ICMP 报文解析、监听地址解析、DNS 隧道 QNAME 编解码 |
 | [`dns`](dns/) | 6 | 域名后缀 Trie、IP 网段列表、Fake-IP 映射、域名归一化、DNS 缓存与报文 key |
 | [`common`](common/) | 3 | 压缩往返、RC4 对合性、eTLD+1 根域名解析 |
 | [`crypto`](crypto/) | 2 | 13 个哈希原语的 `hash.Hash` 契约（流式与一次性一致、`Sum` 幂等、保留前缀）、Skein 摘要长度 |
@@ -96,7 +96,7 @@ import (
 )
 
 func main() {
-	// 可随时切换任意协议: "tcp", "udp", "kcp", "quic", "rudp", "ricmp", "rhttp"
+	// 可随时切换任意协议: "tcp", "udp", "kcp", "quic", "rudp", "ricmp", "rhttp", "rdns"
 	proto := "kcp"
 
 	// 1. 服务端监听

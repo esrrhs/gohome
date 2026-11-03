@@ -1,4 +1,4 @@
-# Nightly fuzz pass over all 26 native fuzz targets.
+# Nightly fuzz pass over all 27 native fuzz targets.
 # Each target gets a short -fuzztime so the whole matrix stays under ~45m wall.
 name: Nightly Fuzz
 
@@ -17,7 +17,7 @@ jobs:
       matrix:
         include:
           - pkg: ./network/
-            targets: "FuzzFrameMgrRecvReassembly FuzzFrameMgrCut FuzzFrameMgrMarshal FuzzBBCongestion FuzzSock5UnpackUDP FuzzSock5GetRequest FuzzSock5HandshakeAuth FuzzIcmpPacketPayload FuzzRicmpListenAddr"
+            targets: "FuzzFrameMgrRecvReassembly FuzzFrameMgrCut FuzzFrameMgrMarshal FuzzBBCongestion FuzzSock5UnpackUDP FuzzSock5GetRequest FuzzSock5HandshakeAuth FuzzIcmpPacketPayload FuzzRicmpListenAddr FuzzRdnsQName"
           - pkg: ./dns/fakeip/
             targets: "FuzzFakeIPRoundTrip FuzzNormalizeDomain"
           - pkg: ./dns/cache/
@@ -45,7 +45,7 @@ jobs:
     - name: Fuzz package targets
       run: |
         set -euo pipefail
-        # 30s per target × 26 ≈ 13m CPU; matrix parallelizes packages.
+        # 30s per target × 27 ≈ 14m CPU; matrix parallelizes packages.
         for t in ${{ matrix.targets }}; do
           echo "::group::Fuzz $t in ${{ matrix.pkg }}"
           go test ${{ matrix.pkg }} -run "^${t}$" -fuzz "^${t}$" -fuzztime 30s -timeout 10m

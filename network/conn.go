@@ -22,6 +22,7 @@ Conn 提供网络连接的抽象和具体实现，支持多种网络协议的连
 - KCP
 - QUIC
 - RHTTP
+- RDNS
 */
 
 // Conn 接口定义了网络连接的基本操作。
@@ -38,7 +39,7 @@ type Conn interface {
 	Accept() (Conn, error)
 }
 
-// NewConn 创建一个新的网络连接，支持的协议包括 TCP, UDP, RUDP, RICMP, KCP, QUIC 及 RHTTP。
+// NewConn 创建一个新的网络连接，支持的协议包括 TCP, UDP, RUDP, RICMP, KCP, QUIC, RHTTP 及 RDNS。
 func NewConn(proto string) (Conn, error) {
 	proto = strings.ToLower(proto)
 	if proto == "tcp" {
@@ -55,6 +56,8 @@ func NewConn(proto string) (Conn, error) {
 		return &QuicConn{}, nil
 	} else if proto == "rhttp" {
 		return &RhttpConn{config: DefaultHttpConfig()}, nil
+	} else if proto == "rdns" {
+		return &RdnsConn{config: DefaultRdnsConfig()}, nil
 	}
 	return nil, errors.New("undefined proto " + proto)
 }
@@ -68,6 +71,7 @@ func SupportReliableProtos() []string {
 	ret = append(ret, "kcp")
 	ret = append(ret, "quic")
 	ret = append(ret, "rhttp")
+	ret = append(ret, "rdns")
 	return ret
 }
 

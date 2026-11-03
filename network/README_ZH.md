@@ -50,7 +50,7 @@ type Conn interface {
 
 ### 2. 可靠分帧管理器 (`FrameMgr`)
 
-`FrameMgr` 是自研可靠协议（`rudp` 与 `ricmp`）的底层传输引擎，核心特性包括：
+`FrameMgr` 是自研可靠协议（`rudp`、`ricmp` 与 `rdns`）的底层传输引擎，核心特性包括：
 - **滑动窗口 ARQ**：支持序列号环形回绕距离计算（`sendIdRank`）、选择性确认（ACK）与空洞重传请求节流（`reqmap`）。
 - **动态内联压缩**：当载荷大小超过阈值时，自动采用 **Zstd** 算法进行动态压缩与解压。
 - **保活探活与 RTT 跟踪**：内置周期性 Ping/Pong 及心跳检测包，准确测量链路延迟并及时识别僵尸连接。
@@ -82,6 +82,7 @@ type Conn interface {
 | **`rudp`** | 可靠 | 基于 `FrameMgr` 与 `BBCongestion` 的轻量可靠 UDP，在 Linux 下支持 `sendmmsg` 批量发送。 | UDP Datagram |
 | **`ricmp`** | 可靠 | 基于 ICMP Echo 报文构建的隐蔽可靠通信信道（需 `CAP_NET_RAW` 特权）。 | Raw ICMP Socket |
 | **`rhttp`** | 可靠 | 基于 HTTP 请求轮询与推送的可靠穿透通道，连接池复用并带超时硬限制。 | HTTP / TCP |
+| **`rdns`** | 可靠 | 基于 FrameMgr ARQ 的 DNS 隧道（TXT/NULL 查询响应）。CutSize 很小；可选 AES-GCM PSK。DNS 元数据仍可见。 | UDP DNS |
 
 ---
 
