@@ -508,6 +508,11 @@ func (c *RudpConn) loopListenerRecv() error {
 			}
 
 			u := &RudpConn{config: c.config, listenersonny: sonny}
+			// Wire the sonny's group BEFORE publishing: Close() iterates the
+			// sonny map and reads listenersonny.wg, so a publish-then-wire
+			// ordering raced that read under teardown (surfaced by spp's
+			// Server close during a rudp login flood).
+			u.listenersonny.wg = thread.NewGroup("RudpConn ListenerSonny"+" "+u.Info(), c.listener.wg, nil)
 			c.listener.sonny.Store(srcaddrstr, u)
 
 			// Feed the first packet (often CONNECT) into FrameMgr immediately;
@@ -599,8 +604,14 @@ func (c *RudpConn) accept(u *RudpConn) error {
 
 	//loggo.Debug("server accept rudp ok %s", u.Info())
 
-	wg := thread.NewGroup("RudpConn ListenerSonny"+" "+u.Info(), c.listener.wg, nil)
-	u.listenersonny.wg = wg
+	// The sonny's group was created and wired by the recv loop before the
+	// sonny was published into the sonny map; only the update worker is
+	// started here.
+	wg := u.listenersonny.wg
+	if wg == nil {
+		u.Close()
+		return nil
+	}
 
 	wg.Go("RudpConn updateListenerSonny"+" "+u.Info(), func() error {
 		return u.updateListenerSonny()
