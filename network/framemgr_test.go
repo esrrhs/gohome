@@ -576,3 +576,117 @@ func cloneFrame(f *Frame) *Frame {
 	}
 	return cp
 }
+
+// TestGetSendFramesStaging pins the staging contract callers rely on: an
+// empty staging area yields nil (the per-Update idle case), a staged frame is
+// handed out exactly once, and a recycled slice is safe to hand out again.
+func TestGetSendFramesStaging(t *testing.T) {
+	fm := NewFrameMgr(888, 1000, 64*1024, 64, 200, 0, 0)
+
+	if got := fm.GetSendFrames(); got != nil {
+		t.Fatalf("empty staging returned %d frames, want nil", len(got))
+	}
+	fm.PutSendFrames(nil) // recycling an empty result must be a no-op
+	PutFrames(nil)        // and so must the legacy package-level helper
+
+	fm.Connect()
+	fm.Update()
+	frames := fm.GetSendFrames()
+	if len(frames) == 0 {
+		t.Fatal("Connect staged no frame")
+	}
+	if again := fm.GetSendFrames(); again != nil {
+		t.Fatalf("staging area not emptied: got %d frames", len(again))
+	}
+
+	// Make the staged frame due again, then confirm the FrameMgr stages into a
+	// fresh slice while the previous one is still held by the caller.
+	due := fm.sendwin.FrontInter()
+	if due == nil {
+		t.Fatal("sendwin front missing after Connect")
+	}
+	due.Value.(*Frame).Resend = true
+	due.Value.(*Frame).Sendtime = 0 // defeat the rtt gate so it is due now
+	fm.Update()
+	next := fm.GetSendFrames()
+	if len(next) == 0 {
+		t.Fatal("resend staged no frame")
+	}
+	if &next[0] == &frames[0] {
+		t.Fatal("GetSendFrames handed out the same slice twice")
+	}
+	fm.PutSendFrames(next)
+	fm.PutSendFrames(frames)
+
+	// GetSendList leaves an empty-but-capped staging slice behind. GetSendFrames
+	// must still report "no work" as nil and park that storage for reuse.
+	fm.Connect()
+	fm.Update()
+	if sl := fm.GetSendList(); sl.Len() == 0 {
+		t.Fatal("GetSendList saw no staged frame")
+	}
+	if got := fm.GetSendFrames(); got != nil {
+		t.Fatalf("GetSendFrames after GetSendList returned cap=%d, want nil", cap(got))
+	}
+	due = fm.sendwin.FrontInter()
+	if due == nil {
+		t.Fatal("sendwin front missing after GetSendList")
+	}
+	due.Value.(*Frame).Resend = true
+	due.Value.(*Frame).Sendtime = 0
+	fm.Update()
+	if again := fm.GetSendFrames(); len(again) == 0 {
+		t.Fatal("re-stage after GetSendList yielded nothing (parked storage lost?)")
+	} else {
+		fm.PutSendFrames(again)
+	}
+
+	// Regression: an empty GetSendFrames must not discard the parked spare. It
+	// used to overwrite the spare with the (nil) empty staging slice, forcing a
+	// fresh 512B staging slice on the next stage.
+	fm.Connect()
+	fm.Update()
+	spare := fm.GetSendFrames()
+	if len(spare) == 0 {
+		t.Fatal("Connect staged no frame")
+	}
+	fm.PutSendFrames(spare)
+	backing := &spare[0]
+	for i := 0; i < 3; i++ {
+		if got := fm.GetSendFrames(); got != nil {
+			t.Fatalf("empty staging returned cap=%d, want nil", cap(got))
+		}
+	}
+	due = fm.sendwin.FrontInter()
+	if due == nil {
+		t.Fatal("sendwin front missing before re-stage")
+	}
+	due.Value.(*Frame).Resend = true
+	due.Value.(*Frame).Sendtime = 0
+	fm.Update()
+	again2 := fm.GetSendFrames()
+	if len(again2) == 0 {
+		t.Fatal("re-stage yielded nothing")
+	}
+	if &again2[0] != backing {
+		t.Fatal("empty GetSendFrames dropped the parked spare slice")
+	}
+	fm.PutSendFrames(again2)
+}
+
+// BenchmarkFrameMgrUpdateIdle measures one Update + staging round trip on an
+// otherwise idle conn, the shape every pingtunnel conn loop runs at its
+// minimum sleep. The idle path must not allocate: GetSendFrames returns nil
+// without touching the slice pool, and PutSendFrames keeps the storage local.
+func BenchmarkFrameMgrUpdateIdle(b *testing.B) {
+	fm := NewFrameMgr(888, 1000000, 1024*1024, 20000, 400, 0, 0)
+	fm.Connect()
+	fm.Update()
+	fm.PutSendFrames(fm.GetSendFrames())
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		fm.Update()
+		fm.PutSendFrames(fm.GetSendFrames())
+	}
+}
