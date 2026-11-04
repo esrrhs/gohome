@@ -648,6 +648,9 @@ func (c *RudpConn) updateDialerSonny() error {
 	return c.update_rudp(c.dialer.wg, c.dialer.fm, c.dialer.conn, nil, true)
 }
 
+// recvBatchMsgs is how many datagrams one recvmmsg-style read drains.
+const recvBatchMsgs = 64
+
 func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn, dstaddr *net.UDPAddr, readconn bool) error {
 
 	//loggo.Debug("start rudp conn %s", c.Info())
@@ -662,19 +665,47 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 
 	if readconn {
 		wg.Go("RudpConn update_rudp recv"+" "+c.Info(), func() error {
+			// Batch reads on Linux: one recvmmsg drains up to
+			// recvBatchMsgs datagrams. x/net's ReadBatch fallback on other
+			// platforms consumes a datagram and delivers it empty (NN=0),
+			// so those keep the plain per-datagram read.
+			batchRead := runtime.GOOS == "linux"
+			var pconn *ipv4.PacketConn
+			var msgs []ipv4.Message
+			if batchRead {
+				pconn = ipv4.NewPacketConn(conn)
+				msgs = make([]ipv4.Message, recvBatchMsgs)
+				for i := range msgs {
+					msgs[i].Buffers = [][]byte{make([]byte, c.config.MaxPacketSize)}
+				}
+			} else {
+				pconn = nil
+			}
 			bytes := make([]byte, c.config.MaxPacketSize)
 			for !wg.IsExit() && stage.Load() != stageCloseWait {
 				// recv udp
 				conn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
-				n, _ := conn.Read(bytes)
-				if n > 0 {
-					f := &Frame{}
-					err := proto.Unmarshal(bytes[0:n], f)
-					if err == nil {
-						fm.OnRecvFrame(f)
-						//loggo.Debug("%s recv frame %d", c.Info(), f.Id)
-					} else {
-						//loggo.Error("Unmarshal fail from %s %s", c.Info(), err)
+				if batchRead {
+					n, _ := pconn.ReadBatch(msgs, 0)
+					for i := 0; i < n; i++ {
+						f := &Frame{}
+						err := proto.Unmarshal(msgs[i].Buffers[0][:msgs[i].NN], f)
+						if err == nil {
+							fm.OnRecvFrame(f)
+						} else {
+							//loggo.Error("Unmarshal fail from %s %s", c.Info(), err)
+						}
+					}
+				} else {
+					n, _ := conn.Read(bytes)
+					if n > 0 {
+						f := &Frame{}
+						err := proto.Unmarshal(bytes[0:n], f)
+						if err == nil {
+							fm.OnRecvFrame(f)
+						} else {
+							//loggo.Error("Unmarshal fail from %s %s", c.Info(), err)
+						}
 					}
 				}
 			}
