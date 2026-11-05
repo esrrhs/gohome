@@ -978,7 +978,7 @@ func (fm *FrameMgr) CloseFlushed() bool {
 
 func (fm *FrameMgr) ping() {
 	cur := time.Now().UnixNano()
-	if cur-fm.lastPingTime > (int64)(time.Millisecond * 200) {
+	if cur-fm.lastPingTime > (int64)(time.Millisecond*200) {
 		fm.lastPingTime = cur
 		f := &Frame{Type: (int32)(Frame_PING), Resend: false, Sendtime: cur,
 			Id: 0}
