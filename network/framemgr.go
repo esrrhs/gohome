@@ -79,7 +79,10 @@ type FrameMgr struct {
 
 	sendwin *glist.ROBuffergo
 	sendq   []*Frame // staged outbound frames awaiting GetSendFrames; guarded by sendlock
-	sendid  int32
+	// sendspare is the recycled storage handed back by PutSendFrames; the next
+	// sendFrame stages into it. Guarded by sendlock.
+	sendspare []*Frame
+	sendid    int32
 
 	recvwin *glist.ROBuffergo
 	recvq   []*Frame // staged inbound frames awaiting Update; guarded by recvlock
@@ -166,16 +169,30 @@ func (fm *FrameMgr) GetSendBufferLeft() int {
 }
 
 // GetSendWinSize returns the number of unacknowledged user data frames in flight.
+// It must be called from the same goroutine that drives Update: it only takes
+// sendblock (the send-buffer lock), while processRecvList mutates sendwin
+// without it.
 func (fm *FrameMgr) GetSendWinSize() int {
 	fm.sendblock.Lock()
 	defer fm.sendblock.Unlock()
 	count := 0
-	for e := fm.sendwin.FrontInter(); e != nil; e = e.Next() {
+	// Bounded by the number of filled slots. Next() walks the ring one slot at
+	// a time, so the walk must stop before requesting the element after the
+	// last filled one — otherwise every call pays an O(windowsize) tail scan.
+	// This runs on every conn loop iteration.
+	e := fm.sendwin.FrontInter()
+	remaining := fm.sendwin.Size()
+	for e != nil && remaining > 0 {
+		remaining--
 		if f, ok := e.Value.(*Frame); ok && f != nil && f.Data != nil {
 			if f.Data.Type == int32(FrameData_USER_DATA) && len(f.Data.Data) > 0 {
 				count++
 			}
 		}
+		if remaining <= 0 {
+			break
+		}
+		e = e.Next()
 	}
 	return count
 }
@@ -345,52 +362,90 @@ func (fm *FrameMgr) calSendList(cur int64) {
 		}
 	}
 
-	for e := fm.sendwin.FrontInter(); e != nil; e = e.Next() {
+	// Same bound as GetSendWinSize: visit only the filled slots so the idle
+	// tail of the ring is never scanned. This is the per-Update send walk.
+	e := fm.sendwin.FrontInter()
+	remaining := fm.sendwin.Size()
+	for e != nil && remaining > 0 {
+		remaining--
 		f := e.Value.(*Frame)
-		if cursorRank >= 0 && fm.sendIdRank(origin, f.Id) < cursorRank {
-			continue
-		}
-		if !f.Acked && (f.Resend || cur-f.Sendtime > int64(fm.resend_timems*(int)(time.Millisecond))) &&
-			cur-f.Sendtime > fm.rttns {
-			if fm.ct != nil && f.Data != nil && len(f.Data.Data) > 0 && !fm.ct.CanSend(int(f.Id), len(f.Data.Data)) {
-				fm.ctLastSendId = f.Id
-				return
+		if cursorRank < 0 || fm.sendIdRank(origin, f.Id) >= cursorRank {
+			if !f.Acked && (f.Resend || cur-f.Sendtime > int64(fm.resend_timems*(int)(time.Millisecond))) &&
+				cur-f.Sendtime > fm.rttns {
+				if fm.ct != nil && f.Data != nil && len(f.Data.Data) > 0 && !fm.ct.CanSend(int(f.Id), len(f.Data.Data)) {
+					fm.ctLastSendId = f.Id
+					return
+				}
+				f.Sendtime = cur
+				fm.sendFrame(f)
+				f.Resend = false
+				if fm.openstat > 0 {
+					fm.fs.sendDataNum++
+					fm.fs.sendDataNumsMap[f.Id]++
+				}
+				//loggo.Debug("debugid %v push frame to sendlist %v %v", fm.debugid, f.Id, len(f.Data.Data))
 			}
-			f.Sendtime = cur
-			fm.sendFrame(f)
-			f.Resend = false
-			if fm.openstat > 0 {
-				fm.fs.sendDataNum++
-				fm.fs.sendDataNumsMap[f.Id]++
-			}
-			//loggo.Debug("debugid %v push frame to sendlist %v %v", fm.debugid, f.Id, len(f.Data.Data))
 		}
+		if remaining <= 0 {
+			break
+		}
+		e = e.Next()
 	}
 	fm.ctLastSendId = -1
 }
 
 // GetSendFrames returns the outbound frames staged by sendFrame and empties
-// the staging area. The caller must not retain the slice past its emit loop;
-// handing it back via PutFrames recycles it, otherwise it is garbage
-// collected. Prefer this over GetSendList — it allocates no per-frame list
-// nodes.
+// the staging area. It returns nil whenever nothing is staged — including the
+// empty-but-capped slice GetSendList leaves behind — so callers may treat a
+// nil result as "no work this Update". The caller owns the slice until it
+// hands it back once (PutSendFrames on this FrameMgr, or PutFrames for the
+// shared pool) and must not read or append to it afterwards. Prefer this over
+// GetSendList — it allocates no per-frame list nodes.
 func (fm *FrameMgr) GetSendFrames() []*Frame {
 	fm.sendlock.Lock()
 	defer fm.sendlock.Unlock()
+	if len(fm.sendq) == 0 {
+		// Empty staging: report "no work" and keep any empty-but-capped slice
+		// (GetSendList leaves one behind) as the spare. Never overwrite a spare
+		// that is already parked here — doing so on every idle iteration throws
+		// away the recycled storage and forces a fresh 512B slice next time.
+		if fm.sendspare == nil {
+			fm.sendspare = fm.sendq
+		}
+		fm.sendq = nil
+		return nil
+	}
 	ret := fm.sendq
-	fm.sendq = (*frameSlicePool.Get().(*[]*Frame))[:0]
+	fm.sendq = nil
 	return ret
 }
 
 // PutFrames recycles a slice handed out by GetSendFrames. Optional —
 // unreturned slices are simply garbage collected. The frames themselves are
-// NOT freed here; only the slice storage is reused.
+// NOT freed here; only the slice storage is reused. Hot loops should prefer
+// the FrameMgr method PutSendFrames, which reuses the storage locally instead
+// of boxing a slice header into the shared pool on every call.
 func PutFrames(fs []*Frame) {
 	if cap(fs) == 0 || cap(fs) > 8192 {
 		return
 	}
 	fs = fs[:0]
 	frameSlicePool.Put(&fs)
+}
+
+// PutSendFrames recycles the slice handed out by GetSendFrames on this
+// FrameMgr. The storage stays with the FrameMgr, so the staging round trip —
+// which runs once per Update — neither touches the shared pool nor
+// heap-allocates a slice header. Hand a slice back exactly once and only to
+// one owner: returning it here and to PutFrames would leave two writers
+// appending into the same array.
+func (fm *FrameMgr) PutSendFrames(fs []*Frame) {
+	if cap(fs) == 0 || cap(fs) > 8192 {
+		return
+	}
+	fm.sendlock.Lock()
+	fm.sendspare = fs[:0]
+	fm.sendlock.Unlock()
 }
 
 var frameSlicePool = sync.Pool{
@@ -471,6 +526,13 @@ func (fm *FrameMgr) GetSendList() *list.List {
 func (fm *FrameMgr) sendFrame(f *Frame) {
 	fm.sendlock.Lock()
 	defer fm.sendlock.Unlock()
+	if fm.sendq == nil {
+		fm.sendq = fm.sendspare
+		fm.sendspare = nil
+		if fm.sendq == nil {
+			fm.sendq = make([]*Frame, 0, 64)
+		}
+	}
 	fm.sendq = append(fm.sendq, f)
 }
 
@@ -743,7 +805,9 @@ func (fm *FrameMgr) combineWindowToRecvBuffer(cur int64) {
 	if n := fm.frame_max_size / 2 / 4; n < maxReq {
 		maxReq = n
 	}
-	reqtmp := make(map[int32]int)
+	// Created on the first hole only: in-order delivery (the steady state)
+	// never REQs anything, and this walk runs on every Update.
+	var reqtmp map[int32]int
 	id := fm.recvid
 	// Slot scans are O(window) and recvwin is mostly empty: skip the walk when
 	// nothing arrived out of order, and stop once every arrived frame has been
@@ -758,6 +822,9 @@ func (fm *FrameMgr) combineWindowToRecvBuffer(cur int64) {
 		for id != fid && len(reqtmp) < maxReq {
 			oldReq := fm.reqmap[id]
 			if cur-oldReq > fm.rttns {
+				if reqtmp == nil {
+					reqtmp = make(map[int32]int)
+				}
 				reqtmp[id]++
 				fm.reqmap[id] = cur
 			}
