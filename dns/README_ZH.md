@@ -6,9 +6,10 @@
 
 ## 核心特性
 
-1. **开箱即用（Zero-Config Defaults）**：
-   - 内置国内权威 DNS（阿里、腾讯 UDP 与 DoH）及境外安全 DNS（Cloudflare、Google DoH）。
-   - 内置国内常见顶级域名（`.cn`、`.中国`、`.公司`、`.网络`）以及主流国内骨干域名。
+1. **开箱即用（多国家直连预设 Zero-Config Presets）**：
+   - 默认开箱即用支持中国（`CN`），并扩展内置了**多国家直连跳过预设**（`Config.RegionPreset`，支持 `CN`、`IR`（伊朗）、`RU`（俄罗斯）、`TR`（土耳其）、`MM`（缅甸）、`PK`（巴基斯坦）、`VN`（越南）、`EG`（埃及）、`AE`（阿联酋）、`SA`（沙特阿拉伯）、`IN`（印度），以及 `NONE` / `GLOBAL` 纯净模式）。
+   - 自动装配各国的官方顶级域（`.cn`、`.ir`、`.ru` 等）、国际化国家代码顶级域（IDN TLD 如 `.ایران`、`.рф`）、本国直连低延迟公共 DNS，以及本土核心关键域名（政务、银行、支付网关、本土出行与电商等，避免因挂海外代理访问本土网站触发 403 阻断）。
+   - 支持通过 `ListRegionPresets()` 列出全部预设，或通过 `RegisterRegionPreset()` 动态注册自定义国家预设。
    - 内置 RFC 局域网私有保留网段（`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、CGNAT `100.64.0.0/10` 等）。
 2. **可选 Fake-IP 模式（RFC 198.18.0.0/15）**：
    - 默认关闭（`EnableFakeIP: false`），满足通用真实 DNS 查询场景；
@@ -34,7 +35,7 @@
 
 - **`Timeout` 对全部查询路径生效**：命中直连/代理白名单的域名同样受 `Config.Timeout` 约束，不会退化成上游自身的默认超时。
 - **`FakeIPRange` 会真正生效**：`IsFakeIP()` / `ShouldProxy()` 按地址池实际配置的网段判定。若自定义了 `FakeIPRange`（例如 `10.66.0.0/16`），不要用包级函数 `fakeip.IsFakeIP()`——它只认默认的 `198.18.0.0/15`。
-- **热更新只覆盖用户自定义部分**：`UpdateDirectIPs()` 与 `UpdateDirectDomains()` 始终保留内置默认值（保留网段 / `.cn` 等顶级域与国内骨干域名），不会把内置规则整段冲掉。
+- **热更新保留当前区域预设**：`UpdateDirectIPs()` 与 `UpdateDirectDomains()` 始终保留内置默认保留网段及当前国家预设的顶级域与骨干域名，不会把预设规则整段冲掉（使用 `NONE` 预设或开启 `DisableBuiltinDirectDomains` 时则全由用户规则定义）。
 - **缓存 TTL 会递减**：命中缓存时返回的记录 TTL 是剩余存活时间，而非上游原始 TTL，避免下游拿到过期时间戳。
 - **`Resolve()` 只查 A 记录**（IPv4）；需要同时拿到 A/AAAA 时用 `ResolveAll()`，结果里 IPv4 排在前面。
 - **分流走向会被记录**：每次实际发生分流（命中直连/代理规则、竞速采纳、Fake-IP 分配）都会按域名去重落盘，`RoutedDomains()` 可取最近判定在前的快照，`RoutedDomain(name)` 单查，`ClearRouteRecords()` 清空。`Reason` 取值固定为 `direct_domain` / `proxy_domain` / `parallel_direct` / `parallel_remote` / `fakeip`；解析失败不形成记录，缓存命中不重复记录。容量由 `Config.RouteRecordCapacity` 控制（默认 1000，LRU 淘汰；设为负数关闭）。

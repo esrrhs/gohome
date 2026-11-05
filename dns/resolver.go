@@ -39,6 +39,15 @@ type Config struct {
 	// Fake-IP 保留 TTL，默认 2 小时
 	FakeIPTTL time.Duration
 
+	// 国家/地区直连预设（支持 "CN", "IR", "RU", "TR", "MM", "PK", "VN", "EG", "AE", "SA", "IN"，或 "NONE" / "GLOBAL"）。
+	// 默认为空。当为空时：
+	// 1. 若显式设置了 RegionCode 且该国家在预设表中存在（如 RegionCode: "IR"），则自动采用该预设；
+	// 2. 否则默认回退采用 "CN" 预设（向后兼容旧版本行为）。
+	// 若指定为 "NONE" 或 "GLOBAL"，则不加载任何内置国家的直连域名与顶级域。
+	RegionPreset string
+	// 显式禁用任何内置国家的直连域名与顶级域名，仅保留 DefaultReservedCIDRs 和用户自定义规则。
+	DisableBuiltinDirectDomains bool
+
 	// 规则文件与列表
 	DirectDomainFiles []string // 额外的国内直连域名文件（如 dnsmasq 格式或逐行域名）
 	ProxyDomainFiles  []string // 额外的代理域名文件
@@ -138,6 +147,10 @@ type StandardResolver struct {
 	directIPs     *matcher.IPNetList
 	geodb         *matcher.GeoDB
 
+	// 当前生效的预设直连 TLD 与种子域名（供 UpdateDirectDomains 始终保留）
+	presetTLDs    []string
+	presetDomains []string
+
 	fakeIPPool *fakeip.FakeIPPool
 	cache      *cache.DNSCache
 
@@ -148,10 +161,43 @@ type StandardResolver struct {
 
 // NewResolver 创建并初始化一个 Resolver 实例
 func NewResolver(cfg Config) (*StandardResolver, error) {
+	// 解析预设与区域配置
+	presetName := strings.ToUpper(strings.TrimSpace(cfg.RegionPreset))
+	if cfg.DisableBuiltinDirectDomains || presetName == "NONE" || presetName == "GLOBAL" {
+		presetName = "NONE"
+	} else if presetName == "" {
+		upperCode := strings.ToUpper(strings.TrimSpace(cfg.RegionCode))
+		if upperCode != "" {
+			if _, ok := GetRegionPreset(upperCode); ok {
+				presetName = upperCode
+			} else {
+				presetName = "NONE" // 用户显式指定了未在预设表的国家（如 US），避免强加 CN 规则
+			}
+		} else {
+			presetName = "CN"
+		}
+	}
+
+	preset, hasPreset := GetRegionPreset(presetName)
+	if cfg.RegionCode == "" {
+		if hasPreset && preset.Code != "NONE" {
+			cfg.RegionCode = preset.Code
+		} else {
+			cfg.RegionCode = "CN"
+		}
+	} else {
+		cfg.RegionCode = strings.ToUpper(strings.TrimSpace(cfg.RegionCode))
+	}
+	cfg.RegionPreset = presetName
+
 	// 补全默认项
 	isZeroDirect := len(cfg.DirectUpstreams) == 0
 	if isZeroDirect {
-		cfg.DirectUpstreams = DefaultDomesticDNS
+		if hasPreset && len(preset.DirectUpstreams) > 0 {
+			cfg.DirectUpstreams = preset.DirectUpstreams
+		} else {
+			cfg.DirectUpstreams = DefaultDomesticDNS
+		}
 	}
 	if cfg.DisableRemoteUpstreams {
 		cfg.RemoteUpstreams = nil
@@ -166,9 +212,6 @@ func NewResolver(cfg Config) (*StandardResolver, error) {
 	}
 	if cfg.RouteRecordCapacity == 0 {
 		cfg.RouteRecordCapacity = DefaultRouteRecordCapacity
-	}
-	if cfg.RegionCode == "" {
-		cfg.RegionCode = "CN"
 	}
 
 	r := &StandardResolver{
@@ -195,11 +238,15 @@ func NewResolver(cfg Config) (*StandardResolver, error) {
 	r.directIPs.Reset(cidrs)
 
 	// 3. 初始化默认顶级域与主干域名
-	for _, tld := range DefaultDirectTLDs {
-		r.directDomains.Add(tld)
-	}
-	for _, d := range DefaultChinaMainDomains {
-		r.directDomains.Add(d)
+	if hasPreset && preset.Code != "NONE" && !cfg.DisableBuiltinDirectDomains {
+		r.presetTLDs = preset.DirectTLDs
+		r.presetDomains = preset.DirectDomains
+		for _, tld := range r.presetTLDs {
+			r.directDomains.Add(tld)
+		}
+		for _, d := range r.presetDomains {
+			r.directDomains.Add(d)
+		}
 	}
 	for _, d := range cfg.DirectDomains {
 		r.directDomains.Add(d)
@@ -747,14 +794,14 @@ func (r *StandardResolver) UpdateDirectIPs(cidrs []string) int {
 }
 
 // UpdateDirectDomains 全量替换直连域名。与构造函数保持一致：
-// 内置默认直连域名（DefaultDirectTLDs 与 DefaultChinaMainDomains）始终保留，
+// 当前预设的直连顶级域（presetTLDs）与主干域名（presetDomains）始终保留，
 // 传入的 domains 只覆盖用户自定义部分。
 func (r *StandardResolver) UpdateDirectDomains(domains []string) {
 	r.directDomains.Reset(domains)
-	for _, tld := range DefaultDirectTLDs {
+	for _, tld := range r.presetTLDs {
 		r.directDomains.Add(tld)
 	}
-	for _, d := range DefaultChinaMainDomains {
+	for _, d := range r.presetDomains {
 		r.directDomains.Add(d)
 	}
 }

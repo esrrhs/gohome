@@ -6,9 +6,10 @@
 
 ## Key Features
 
-1. **Zero-Configuration Defaults**:
-   - Built-in public domestic resolvers (AliDNS, DNSPod UDP & DoH) and remote secure resolvers (Cloudflare, Google DoH).
-   - Built-in domestic TLDs (`.cn`, `.中国`, etc.) and popular China main domains.
+1. **Zero-Configuration Defaults & Multi-Region Presets**:
+   - Built-in multi-region bypass presets (`Config.RegionPreset`, supporting `CN`, `IR`, `RU`, `TR`, `MM`, `PK`, `VN`, `EG`, `AE`, `SA`, `IN`, and `NONE`/`GLOBAL`).
+   - Automatically adapts country-code TLDs (e.g. `.cn`, `.ir`, `.ru`, IDN TLDs like `.ایران`, `.рф`), low-latency local direct DNS upstreams, and essential local domestic domains (government, banking, payment gateways, local delivery/e-commerce) to prevent foreign proxy IP blocks (HTTP 403).
+   - Dynamic query with `ListRegionPresets()` and custom extension with `RegisterRegionPreset()`.
    - Built-in RFC private/LAN CIDR blocks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, CGNAT `100.64.0.0/10`).
 2. **Optional Pluggable Fake-IP Mode (RFC 198.18.0.0/15)**:
    - Off by default (`EnableFakeIP: false`).
@@ -34,7 +35,7 @@
 
 - **`Timeout` applies to every query path**, including domains that hit the direct/proxy whitelist — those no longer fall back to each upstream's own default timeout.
 - **`FakeIPRange` is honored**: `IsFakeIP()` / `ShouldProxy()` follow the CIDR actually configured on the pool. With a custom `FakeIPRange` (e.g. `10.66.0.0/16`) do not use the package-level `fakeip.IsFakeIP()`, which only knows the default `198.18.0.0/15`.
-- **Hot reload only replaces your custom part**: `UpdateDirectIPs()` and `UpdateDirectDomains()` always keep the built-in defaults (reserved CIDRs, `.cn` TLDs, popular China domains) instead of wiping them.
+- **Hot reload retains active region presets**: `UpdateDirectIPs()` and `UpdateDirectDomains()` always keep the reserved CIDRs as well as the active country preset's TLDs and seed domains (unless using `NONE` or `DisableBuiltinDirectDomains`).
 - **Cached TTL decays**: a cache hit returns the remaining lifetime, not the upstream's original TTL, so downstream clients never see a stale timestamp.
 - **`Resolve()` queries A records only** (IPv4). Use `ResolveAll()` when you also need AAAA; IPv4 results come first.
 - **Split-routing decisions are recorded**: every actual routing decision (direct/proxy rule hit, parallel-race adoption, Fake-IP allocation) is stored once per domain. `RoutedDomains()` returns a snapshot with the most recently decided domain first, `RoutedDomain(name)` looks one up, and `ClearRouteRecords()` wipes them. `Reason` is always one of `direct_domain` / `proxy_domain` / `parallel_direct` / `parallel_remote` / `fakeip`; failed resolutions produce no record and cache hits are not recorded again. Capacity is `Config.RouteRecordCapacity` (default 1000, LRU eviction; set it negative to disable).
