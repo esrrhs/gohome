@@ -555,6 +555,45 @@ func deliverFrame(to *FrameMgr, f *Frame) {
 	to.OnRecvFrame(cp)
 }
 
+func TestMarshalFrameAppend(t *testing.T) {
+	fm := NewFrameMgr(128, 1000, 64*1024, 64, 50, 0, 0)
+	f := &Frame{
+		Type: int32(Frame_DATA),
+		Id:   7,
+		Data: &FrameData{
+			Type:     int32(FrameData_USER_DATA),
+			Compress: true,
+			Data:     []byte("append payload"),
+		},
+	}
+
+	want, err := fm.MarshalFrame(f)
+	if err != nil {
+		t.Fatalf("MarshalFrame: %v", err)
+	}
+	got, err := fm.MarshalFrameAppend(make([]byte, 0, 1024), f)
+	if err != nil {
+		t.Fatalf("MarshalFrameAppend: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("MarshalFrameAppend = %x, want %x", got, want)
+	}
+
+	// Appending into a non-empty destination must keep its prefix intact.
+	got2, err := fm.MarshalFrameAppend([]byte{0xaa}[:1], f)
+	if err != nil {
+		t.Fatalf("MarshalFrameAppend(prefix): %v", err)
+	}
+	if got2[0] != 0xaa || !bytes.Equal(got2[1:], want) {
+		t.Fatal("MarshalFrameAppend did not preserve the destination prefix")
+	}
+
+	// Marshaling must not leak Resend/Sendtime mutations onto the frame.
+	if f.Resend || f.Sendtime != 0 {
+		t.Fatalf("MarshalFrameAppend leaked side effects: resend=%v sendtime=%d", f.Resend, f.Sendtime)
+	}
+}
+
 func cloneFrame(f *Frame) *Frame {
 	cp := &Frame{
 		Type:     f.Type,

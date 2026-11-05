@@ -57,6 +57,42 @@ func BenchmarkFrameMgrMarshalFrame(b *testing.B) {
 	}
 }
 
+// BenchmarkFrameMgrMarshalFrameReuse compares the allocating MarshalFrame with
+// MarshalFrameAppend on a ~900B frame, the payload size of a typical encrypted
+// tunnel packet.
+func BenchmarkFrameMgrMarshalFrameReuse(b *testing.B) {
+	fm := NewFrameMgr(128, 1000, 64*1024, 64, 50, 0, 0)
+	f := &Frame{
+		Type: int32(Frame_DATA),
+		Id:   1,
+		Data: &FrameData{
+			Type: int32(FrameData_USER_DATA),
+			Data: make([]byte, 900),
+		},
+	}
+	b.Run("MarshalFrame", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, err := fm.MarshalFrame(f); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("MarshalFrameAppend", func(b *testing.B) {
+		buf := make([]byte, 0, 1024)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			var err error
+			buf, err = fm.MarshalFrameAppend(buf[:0], f)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
 func BenchmarkBBCongestionCanSendUpdate(b *testing.B) {
 	bb := &BBCongestion{}
 	bb.Init()
