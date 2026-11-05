@@ -17,6 +17,17 @@ func TestDefaultChinaMainDomainsIncludesChinaList(t *testing.T) {
 		"xhscdn.com",
 		"xhscdn.net",
 		"xiaohongshu.net",
+		"cdn-apple.com",
+		"aaplimg.com",
+		"mzstatic.com",
+		"itunes-apple.com.akadns.net",
+		"edge-itunes-apple.com.akadns.net",
+		"ls-apple.com.akadns.net",
+		"gmedia.playstation.com",
+		"image.api.playstation.com",
+		"dittocdn.com",
+		"connectivitycheck.gstatic.com",
+		"dl.google.com",
 	}
 	have := make(map[string]struct{}, len(DefaultChinaMainDomains))
 	for _, d := range DefaultChinaMainDomains {
