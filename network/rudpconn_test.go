@@ -1,9 +1,11 @@
 package network
 
 import (
+	"bytes"
 	"fmt"
 	"github.com/esrrhs/gohome/loggo"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -643,5 +645,136 @@ func TestRudpCloseJoinEcho(t *testing.T) {
 	}
 	if err := ln.Close(); err != nil {
 		t.Fatalf("ln Close: %v", err)
+	}
+}
+
+// TestRudpCloseDuringSonnyFlood races listener Close against a flood of
+// connecting clients: the recv loop publishes sonnies into the listener map
+// while Close iterates it. The sonny's group must be wired before the
+// publish — Close reads listenersonny.wg from the map, and a
+// publish-then-wire ordering raced that read (surfaced by spp's Server
+// teardown under a rudp login flood). Run with -race.
+func TestRudpCloseDuringSonnyFlood(t *testing.T) {
+	c, err := NewConn("rudp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := c.Listen("127.0.0.1:58250")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		// Accept loop: sonnies are created by the recv loop regardless;
+		// draining the accept channel mirrors a serving server.
+		for {
+			if _, err := ln.Accept(); err != nil {
+				return
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				cc, err := NewConn("rudp")
+				if err != nil {
+					return
+				}
+				conn, err := cc.Dial("127.0.0.1:58250")
+				if err == nil {
+					conn.Write([]byte("flood"))
+				}
+				cc.Close()
+			}
+		}()
+	}
+
+	// Tear the listener down mid-flood, while sonnies are being published.
+	time.Sleep(100 * time.Millisecond)
+	ln.Close()
+	close(stop)
+	wg.Wait()
+	c.Close()
+}
+
+// TestRudpBatchedDownlinkBulk verifies the client-side batched recvmmsg read
+// loop under multiple in-flight datagrams from server to client.
+func TestRudpBatchedDownlinkBulk(t *testing.T) {
+	c, err := NewConn("rudp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	ln, err := c.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	addr := ln.(*RudpConn).listener.listenerconn.LocalAddr().String()
+
+	accepted := make(chan Conn, 1)
+	go func() {
+		s, err := ln.Accept()
+		if err == nil {
+			accepted <- s
+		}
+	}()
+
+	cli, err := c.Dial(addr)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cli.Close()
+
+	srv := <-accepted
+	defer srv.Close()
+
+	// Send a payload spanning multiple datagrams from server to client.
+	payload := make([]byte, 32*1024)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := srv.Write(payload)
+		errCh <- err
+	}()
+
+	got := make([]byte, len(payload))
+	readTotal := 0
+	buf := make([]byte, 4096)
+	deadline := time.After(5 * time.Second)
+	for readTotal < len(payload) {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out: read %d of %d bytes", readTotal, len(payload))
+		default:
+		}
+		n, err := cli.Read(buf)
+		if err != nil {
+			t.Fatalf("cli.Read: %v", err)
+		}
+		copy(got[readTotal:], buf[:n])
+		readTotal += n
+	}
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("srv.Write: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("downlink payload mismatch")
 	}
 }
