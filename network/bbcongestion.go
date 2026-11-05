@@ -298,10 +298,6 @@ func (bb *BBCongestion) Update() {
 			if bb.pacingRate < 4*1024*1024 {
 				bb.pacingRate = 4 * 1024 * 1024
 			}
-			maxPhysicalRate := float64(8 * 1024 * 1024) // 64 Mbps ceiling for cross-ocean link
-			if bb.pacingRate > maxPhysicalRate {
-				bb.pacingRate = maxPhysicalRate
-			}
 			if bb.maxfly < 4*1024*1024 {
 				bb.maxfly = 4 * 1024 * 1024
 			}

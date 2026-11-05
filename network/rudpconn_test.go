@@ -778,3 +778,115 @@ func TestRudpBatchedDownlinkBulk(t *testing.T) {
 		t.Fatal("downlink payload mismatch")
 	}
 }
+
+// TestRudpThroughputStability verifies that bulk RUDP transfer sustains high,
+// stable throughput across multiple consecutive measurement seconds without
+// periodic head-of-line collapse or zero-throughput stalls.
+func TestRudpThroughputStability(t *testing.T) {
+	c, err := NewConn("rudp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	ln, err := c.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	addr := ln.(*RudpConn).listener.listenerconn.LocalAddr().String()
+
+	accepted := make(chan Conn, 1)
+	go func() {
+		s, err := ln.Accept()
+		if err == nil {
+			accepted <- s
+		}
+	}()
+
+	cli, err := c.Dial(addr)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cli.Close()
+
+	srv := <-accepted
+	defer srv.Close()
+
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+
+	// Writer: continuously stream chunks
+	chunk := make([]byte, 64*1024)
+	for i := range chunk {
+		chunk[i] = byte(i)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for !stop.Load() {
+			_, err := srv.Write(chunk)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Reader: read and sample throughput in 1-second intervals
+	const testSeconds = 5
+	perSecBytes := make([]int64, testSeconds)
+	rbuf := make([]byte, 64*1024)
+
+	for sec := 0; sec < testSeconds; sec++ {
+		secStart := time.Now()
+		var bytesThisSec int64
+		for time.Since(secStart) < time.Second {
+			n, err := cli.Read(rbuf)
+			if err != nil {
+				t.Fatalf("Read failed at sec %d: %v", sec, err)
+			}
+			bytesThisSec += int64(n)
+		}
+		dur := time.Since(secStart)
+		perSecBytes[sec] = bytesThisSec
+		t.Logf("sec %d: %.2f MB/s (elapsed %v, bytes %d)",
+			sec+1, float64(bytesThisSec)/(1024*1024)/dur.Seconds(), dur, bytesThisSec)
+	}
+
+	stop.Store(true)
+	srv.Close()
+	cli.Close()
+	wg.Wait()
+
+	// Verify throughput stability:
+	// 1. Every measured second must sustain healthy throughput (>= 5 MB/s on loopback)
+	// 2. No second may experience a throughput collapse (stalling or 0.00 MB/s)
+	// 3. Steady-state stability: min/avg ratio >= 0.50 across steady measurement window
+	steadyRates := perSecBytes[1:] // skip sec 0 warmup
+	var totalSteady int64
+	minSteady := steadyRates[0]
+	maxSteady := steadyRates[0]
+
+	for _, b := range steadyRates {
+		if b < 5*1024*1024 {
+			t.Fatalf("throughput collapsed to %.2f MB/s (< 5 MB/s baseline)", float64(b)/(1024*1024))
+		}
+		if b < minSteady {
+			minSteady = b
+		}
+		if b > maxSteady {
+			maxSteady = b
+		}
+		totalSteady += b
+	}
+
+	avgSteady := float64(totalSteady) / float64(len(steadyRates))
+	stabilityRatio := float64(minSteady) / avgSteady
+	t.Logf("steady state avg: %.2f MB/s, min: %.2f MB/s, max: %.2f MB/s, stability ratio: %.2f",
+		avgSteady/(1024*1024), float64(minSteady)/(1024*1024), float64(maxSteady)/(1024*1024), stabilityRatio)
+
+	if stabilityRatio < 0.50 {
+		t.Fatalf("throughput unstable: min/avg ratio %.2f < 0.50", stabilityRatio)
+	}
+}
