@@ -82,9 +82,9 @@ func registerBuiltinPresets() {
 			"xn--c1avg", // .орг
 		},
 		DirectUpstreams: []string{
-			"77.88.8.8:53",      // Yandex.DNS
-			"77.88.8.1:53",      // Yandex.DNS Secondary
-			"195.208.4.1:53",    // 本地公共 DNS
+			"77.88.8.8:53",   // Yandex.DNS
+			"77.88.8.1:53",   // Yandex.DNS Secondary
+			"195.208.4.1:53", // 本地公共 DNS
 		},
 		DirectDomains: []string{
 			// 搜索与门户生态
