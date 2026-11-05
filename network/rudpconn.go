@@ -689,7 +689,7 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 					n, _ := pconn.ReadBatch(msgs, 0)
 					for i := 0; i < n; i++ {
 						f := &Frame{}
-						err := proto.Unmarshal(msgs[i].Buffers[0][:msgs[i].NN], f)
+						err := proto.Unmarshal(msgs[i].Buffers[0][:msgs[i].N], f)
 						if err == nil {
 							fm.OnRecvFrame(f)
 						} else {

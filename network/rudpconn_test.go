@@ -1,6 +1,7 @@
 package network
 
 import (
+	"bytes"
 	"fmt"
 	"github.com/esrrhs/gohome/loggo"
 	"strconv"
@@ -704,4 +705,76 @@ func TestRudpCloseDuringSonnyFlood(t *testing.T) {
 	close(stop)
 	wg.Wait()
 	c.Close()
+}
+
+// TestRudpBatchedDownlinkBulk verifies the client-side batched recvmmsg read
+// loop under multiple in-flight datagrams from server to client.
+func TestRudpBatchedDownlinkBulk(t *testing.T) {
+	c, err := NewConn("rudp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	ln, err := c.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	addr := ln.(*RudpConn).listener.listenerconn.LocalAddr().String()
+
+	accepted := make(chan Conn, 1)
+	go func() {
+		s, err := ln.Accept()
+		if err == nil {
+			accepted <- s
+		}
+	}()
+
+	cli, err := c.Dial(addr)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cli.Close()
+
+	srv := <-accepted
+	defer srv.Close()
+
+	// Send a payload spanning multiple datagrams from server to client.
+	payload := make([]byte, 32*1024)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := srv.Write(payload)
+		errCh <- err
+	}()
+
+	got := make([]byte, len(payload))
+	readTotal := 0
+	buf := make([]byte, 4096)
+	deadline := time.After(5 * time.Second)
+	for readTotal < len(payload) {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out: read %d of %d bytes", readTotal, len(payload))
+		default:
+		}
+		n, err := cli.Read(buf)
+		if err != nil {
+			t.Fatalf("cli.Read: %v", err)
+		}
+		copy(got[readTotal:], buf[:n])
+		readTotal += n
+	}
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("srv.Write: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("downlink payload mismatch")
+	}
 }
