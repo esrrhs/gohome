@@ -379,7 +379,7 @@ func (fm *FrameMgr) calSendList(cur int64) {
 		}
 		isTimeout := !isNew && cur-f.Sendtime > resendTimeout
 		minResendGap := fm.rttns / 2
-		if minResendGap < int64(time.Millisecond*50) {
+		if fm.rttns > 0 && minResendGap < int64(time.Millisecond*50) {
 			minResendGap = int64(time.Millisecond * 50)
 		}
 		isResend := !isNew && (f.Resend || isTimeout) && cur-f.Sendtime > minResendGap
@@ -875,7 +875,7 @@ func (fm *FrameMgr) combineWindowToRecvBuffer(cur int64) {
 		for id != fid && len(reqtmp) < maxReq {
 			oldReq := fm.reqmap[id]
 			reqInterval := fm.rttns * 3 / 4
-			if reqInterval < int64(time.Millisecond*50) {
+			if fm.rttns > 0 && reqInterval < int64(time.Millisecond*50) {
 				reqInterval = int64(time.Millisecond * 50)
 			}
 			if cur-oldReq > reqInterval {
