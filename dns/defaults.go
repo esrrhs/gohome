@@ -33,6 +33,17 @@ var defaultChinaMainDomainsSeed = []string{
 	// 来自线上 yellowsocks 分流历史：解析结果落在境内、但此前误走海外的域名
 	// （felixonmars china-list 未收录）。
 	"tripcdn.com", // 携程 CDN，境内节点
+	"cdn-apple.com", // Apple CDN 静态资源域名（国内落地电信/联通 CDN）
+	"aaplimg.com",   // Apple 静态资源与图片 CDN
+	"mzstatic.com",  // Apple App Store 图标与静态资产 CDN
+	"itunes-apple.com.akadns.net",      // Apple/Akamai 国内分流 GSLB
+	"edge-itunes-apple.com.akadns.net", // Apple/Akamai 国内分流 GSLB
+	"ls-apple.com.akadns.net",          // Apple 位置与地图服务国内分流
+	"gmedia.playstation.com",           // PlayStation 国内直连 CDN
+	"image.api.playstation.com",        // PlayStation 国内直连 CDN
+	"dittocdn.com",                     // 国内分发 CDN
+	"connectivitycheck.gstatic.com",    // Android 国内原生网络连通性探测
+	"dl.google.com",                    // Google 国内直连高速下载源（Chrome/Android）
 	"bag-china.itunes-apple.com.akadns.net", "init-china.itunes-apple.com.akadns.net",
 	"mesu-china.apple.com.akadns.net", "fpinit-apac-cn.edge-itunes-apple.com.akadns.net",
 	"gspe79-cn-ssl-ls-apple-com.v.aaplimg.com", // Apple 中国区专用域名
