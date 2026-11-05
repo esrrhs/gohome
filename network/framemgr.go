@@ -1139,6 +1139,19 @@ func (fm *FrameMgr) MarshalFrame(f *Frame) ([]byte, error) {
 	return mb, err
 }
 
+// MarshalFrameAppend serializes f into dst and returns the extended slice,
+// letting callers that recycle their buffer avoid the allocation MarshalFrame
+// makes for every frame. Resend/Sendtime are restored after marshaling, same
+// as MarshalFrame.
+func (fm *FrameMgr) MarshalFrameAppend(dst []byte, f *Frame) ([]byte, error) {
+	resend := f.Resend
+	sendtime := f.Sendtime
+	mb, err := proto.MarshalOptions{}.MarshalAppend(dst, f)
+	f.Resend = resend
+	f.Sendtime = sendtime
+	return mb, err
+}
+
 func (fm *FrameMgr) IsHBTimeout() bool {
 	now := time.Now().UnixNano()
 	if now-fm.lastRecvHBTime > int64(time.Second)*hbTimeoutSecond && now-fm.lastRecvDataTime > int64(time.Second)*hbTimeoutSecond {
