@@ -124,6 +124,9 @@ func (fm *FrameMgr) SetDebugid(debugid string) {
 func (fm *FrameMgr) SetCongestion(ct Congestion) {
 	fm.ct = ct
 	fm.ct.Init()
+	if rttSetter, ok := fm.ct.(interface{ SetRtt(time.Duration) }); ok && fm.lastPongTime > 0 && fm.rttns > 0 {
+		rttSetter.SetRtt(time.Duration(fm.rttns))
+	}
 }
 
 func NewFrameMgr(frame_max_size int, frame_max_id int, buffersize int, windowsize int, resend_timems int, compress int, openstat int) *FrameMgr {
@@ -147,7 +150,7 @@ func NewFrameMgr(frame_max_size int, frame_max_id int, buffersize int, windowsiz
 		sendwin: glist.NewROBuffer(windowsize, 0, frame_max_id), sendid: 0,
 		recvwin: glist.NewROBuffer(windowsize, 0, frame_max_id), recvid: 0,
 		close: false, remoteclosed: false, closesend: false,
-		lastPingTime: time.Now().UnixNano(), lastPongTime: time.Now().UnixNano(),
+		lastPingTime: time.Now().UnixNano(), lastPongTime: 0,
 		lastSendHBTime: time.Now().UnixNano(), lastRecvHBTime: time.Now().UnixNano(), lastRecvDataTime: time.Now().UnixNano(),
 		rttns:     int64(resend_timems) * int64(time.Millisecond),
 		reqmap:    make(map[int32]int64),
@@ -369,12 +372,35 @@ func (fm *FrameMgr) calSendList(cur int64) {
 	for e != nil && remaining > 0 {
 		remaining--
 		f := e.Value.(*Frame)
-		if cursorRank < 0 || fm.sendIdRank(origin, f.Id) >= cursorRank {
-			if !f.Acked && (f.Resend || cur-f.Sendtime > int64(fm.resend_timems*(int)(time.Millisecond))) &&
-				cur-f.Sendtime > fm.rttns {
-				if fm.ct != nil && f.Data != nil && len(f.Data.Data) > 0 && !fm.ct.CanSend(int(f.Id), len(f.Data.Data)) {
-					fm.ctLastSendId = f.Id
-					return
+		isNew := f.Sendtime == 0
+		resendTimeout := int64(fm.resend_timems * (int)(time.Millisecond))
+		if rttTimeout := fm.rttns * 2; rttTimeout > resendTimeout {
+			resendTimeout = rttTimeout
+		}
+		isTimeout := !isNew && cur-f.Sendtime > resendTimeout
+		minResendGap := fm.rttns / 2
+		if minResendGap < int64(time.Millisecond*50) {
+			minResendGap = int64(time.Millisecond * 50)
+		}
+		isResend := !isNew && (f.Resend || isTimeout) && cur-f.Sendtime > minResendGap
+		canSendFrame := !f.Acked && (isNew || isResend)
+
+		if isResend || cursorRank < 0 || fm.sendIdRank(origin, f.Id) >= cursorRank {
+			if canSendFrame {
+				if fm.ct != nil && f.Data != nil && len(f.Data.Data) > 0 {
+					if isNew {
+						if !fm.ct.CanSend(int(f.Id), len(f.Data.Data)) {
+							fm.ctLastSendId = f.Id
+							return
+						}
+					} else {
+						if resendChecker, ok := fm.ct.(interface{ CanSendResend(int, int) bool }); ok {
+							if !resendChecker.CanSendResend(int(f.Id), len(f.Data.Data)) {
+								fm.ctLastSendId = f.Id
+								return
+							}
+						}
+					}
 				}
 				f.Sendtime = cur
 				fm.sendFrame(f)
@@ -459,17 +485,19 @@ var frameSlicePool = sync.Pool{
 // preProcessRecvList runs on every Update and three fresh maps per call
 // dominated the allocator profile.
 type recvMaps struct {
-	req   map[int32]int
-	ack   map[int32]int
-	ackto map[int32]*Frame
+	req    map[int32]int
+	ack    map[int32]int
+	ackto  map[int32]*Frame
+	cumAck int32
 }
 
 var recvMapsPool = sync.Pool{
 	New: func() interface{} {
 		return &recvMaps{
-			req:   make(map[int32]int),
-			ack:   make(map[int32]int),
-			ackto: make(map[int32]*Frame),
+			req:    make(map[int32]int),
+			ack:    make(map[int32]int),
+			ackto:  make(map[int32]*Frame),
+			cumAck: -1,
 		}
 	},
 }
@@ -550,6 +578,7 @@ func (fm *FrameMgr) preProcessRecvList() *recvMaps {
 	clear(rm.req)
 	clear(rm.ack)
 	clear(rm.ackto)
+	rm.cumAck = -1
 	for _, f := range fm.recvq {
 		if f.Type == (int32)(Frame_REQ) {
 			for _, id := range f.Dataid {
@@ -560,6 +589,9 @@ func (fm *FrameMgr) preProcessRecvList() *recvMaps {
 			for _, id := range f.Dataid {
 				rm.ack[id]++
 				//loggo.Debug("debugid %v recv ack %v %v", fm.debugid, f.Id, common.Int32ArrayToString(f.Dataid, ","))
+			}
+			if f.Id >= 0 && (rm.cumAck < 0 || fm.sendIdRank(rm.cumAck, f.Id) < fm.windowsize) {
+				rm.cumAck = f.Id
 			}
 		} else if f.Type == (int32)(Frame_DATA) {
 			rm.ackto[f.Id] = f
@@ -630,6 +662,27 @@ func (fm *FrameMgr) processRecvList(rm *recvMaps) {
 		}
 	}
 
+	if rm.cumAck >= 0 {
+		e := fm.sendwin.FrontInter()
+		remaining := fm.sendwin.Size()
+		for e != nil && remaining > 0 {
+			remaining--
+			f := e.Value.(*Frame)
+			d := fm.sendIdRank(f.Id, rm.cumAck)
+			if d > 0 && d <= fm.windowsize {
+				if !f.Acked {
+					f.Acked = true
+					if fm.ct != nil && f.Data != nil {
+						fm.ct.RecvAck(int(f.Id), len(f.Data.Data))
+					}
+				}
+			} else {
+				break
+			}
+			e = e.Next()
+		}
+	}
+
 	for !fm.sendwin.Empty() {
 		err, value := fm.sendwin.Front()
 		if err != nil {
@@ -666,7 +719,7 @@ func (fm *FrameMgr) processRecvList(rm *recvMaps) {
 				}
 				if index >= tmpsize {
 					f := &Frame{Type: (int32)(Frame_ACK), Resend: false, Sendtime: 0,
-						Id:     0,
+						Id:     fm.recvid,
 						Dataid: tmp[0:index]}
 					fm.sendFrame(f)
 					index = 0
@@ -678,7 +731,7 @@ func (fm *FrameMgr) processRecvList(rm *recvMaps) {
 		}
 		if index > 0 {
 			f := &Frame{Type: (int32)(Frame_ACK), Resend: false, Sendtime: 0,
-				Id:     0,
+				Id:     fm.recvid,
 				Dataid: tmp[0:index]}
 			fm.sendFrame(f)
 			//loggo.Debug("debugid %v send ack %v %v", fm.debugid, f.Id, common.Int32ArrayToString(f.Dataid, ","))
@@ -821,7 +874,11 @@ func (fm *FrameMgr) combineWindowToRecvBuffer(cur int64) {
 		fid := int32(e.Id())
 		for id != fid && len(reqtmp) < maxReq {
 			oldReq := fm.reqmap[id]
-			if cur-oldReq > fm.rttns {
+			reqInterval := fm.rttns * 3 / 4
+			if reqInterval < int64(time.Millisecond*50) {
+				reqInterval = int64(time.Millisecond * 50)
+			}
+			if cur-oldReq > reqInterval {
 				if reqtmp == nil {
 					reqtmp = make(map[int32]int)
 				}
@@ -862,6 +919,7 @@ func (fm *FrameMgr) combineWindowToRecvBuffer(cur int64) {
 				fm.fs.sendReqNumsMap[id]++
 			}
 		}
+		fm.sendFrame(f)
 		fm.sendFrame(f)
 		//loggo.Debug("debugid %v send req %v %v", fm.debugid, f.Id, common.Int32ArrayToString(f.Dataid, ","))
 	}
@@ -920,7 +978,7 @@ func (fm *FrameMgr) CloseFlushed() bool {
 
 func (fm *FrameMgr) ping() {
 	cur := time.Now().UnixNano()
-	if cur-fm.lastPingTime > (int64)(time.Second) {
+	if cur-fm.lastPingTime > (int64)(time.Millisecond * 200) {
 		fm.lastPingTime = cur
 		f := &Frame{Type: (int32)(Frame_PING), Resend: false, Sendtime: cur,
 			Id: 0}
@@ -971,7 +1029,16 @@ func (fm *FrameMgr) processPong(f *Frame) {
 	cur := time.Now().UnixNano()
 	if cur > f.Sendtime {
 		rtt := cur - f.Sendtime
-		fm.rttns = (fm.rttns + rtt) / 2
+		if fm.lastPongTime == 0 {
+			fm.rttns = rtt
+		} else {
+			fm.rttns = (fm.rttns*7 + rtt) / 8
+		}
+		if fm.ct != nil {
+			if rttSetter, ok := fm.ct.(interface{ SetRtt(time.Duration) }); ok {
+				rttSetter.SetRtt(time.Duration(fm.rttns))
+			}
+		}
 		if fm.openstat > 0 {
 			fm.fs.recvpong++
 		}
@@ -1103,6 +1170,9 @@ func (fm *FrameMgr) second(cur int64) {
 		}
 
 		if fm.ct != nil {
+			if rttSetter, ok := fm.ct.(interface{ SetRtt(time.Duration) }); ok && fm.rttns > 0 {
+				rttSetter.SetRtt(time.Duration(fm.rttns))
+			}
 			fm.ct.Update()
 		}
 

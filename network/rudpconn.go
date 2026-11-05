@@ -34,6 +34,18 @@ type RudpConfig struct {
 	AcceptChanLen      int
 	Congestion         string
 	BatchSendPkgs      int
+	Key                string
+}
+
+func rudpObfuscate(data []byte, key string) {
+	if key == "" || len(data) == 0 {
+		return
+	}
+	k := []byte(key)
+	klen := len(k)
+	for i := range data {
+		data[i] ^= k[i%klen]
+	}
 }
 
 func DefaultRudpConfig() *RudpConfig {
@@ -41,8 +53,8 @@ func DefaultRudpConfig() *RudpConfig {
 		MaxPacketSize:      2048,
 		CutSize:            1200,
 		MaxId:              100000,
-		BufferSize:         1024 * 1024,
-		MaxWin:             10000,
+		BufferSize:         16 * 1024 * 1024,
+		MaxWin:             4000,
 		ResendTimems:       200,
 		Compress:           0,
 		Stat:               0,
@@ -52,6 +64,7 @@ func DefaultRudpConfig() *RudpConfig {
 		AcceptChanLen:      128,
 		Congestion:         "bb",
 		BatchSendPkgs:      64,
+		Key:                "fuckgcd",
 	}
 }
 
@@ -123,7 +136,7 @@ func (c *RudpConn) Read(p []byte) (n int, err error) {
 			if wg != nil && wg.IsExit() {
 				return 0, errors.New("closed conn")
 			}
-			time.Sleep(time.Millisecond * 100)
+			time.Sleep(time.Millisecond * 1)
 			continue
 		}
 
@@ -177,7 +190,7 @@ func (c *RudpConn) Write(p []byte) (n int, err error) {
 				}
 				return 0, errors.New("closed conn")
 			}
-			time.Sleep(time.Millisecond * 100)
+			time.Sleep(time.Millisecond * 1)
 			continue
 		}
 
@@ -188,7 +201,7 @@ func (c *RudpConn) Write(p []byte) (n int, err error) {
 			return totalsize, nil
 		}
 
-		time.Sleep(time.Millisecond * 100)
+		time.Sleep(time.Millisecond * 1)
 	}
 
 	if cur > 0 {
@@ -316,7 +329,11 @@ func (c *RudpConn) Dial(dst string) (Conn, error) {
 		fm.SetCongestion(&BBCongestion{})
 	}
 
-	dialer := &rudpConnDialer{conn: conn.(*net.UDPConn), fm: fm}
+	uconn := conn.(*net.UDPConn)
+	_ = uconn.SetReadBuffer(16 * 1024 * 1024)
+	_ = uconn.SetWriteBuffer(16 * 1024 * 1024)
+
+	dialer := &rudpConnDialer{conn: uconn, fm: fm}
 
 	u := &RudpConn{config: c.config, dialer: dialer}
 
@@ -338,6 +355,7 @@ func (c *RudpConn) Dial(dst string) (Conn, error) {
 		for e := sendlist.Front(); e != nil; e = e.Next() {
 			f := e.Value.(*Frame)
 			mb, _ := u.dialer.fm.MarshalFrame(f)
+			rudpObfuscate(mb, c.config.Key)
 			u.dialer.conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
 			u.dialer.conn.Write(mb)
 		}
@@ -346,6 +364,7 @@ func (c *RudpConn) Dial(dst string) (Conn, error) {
 		u.dialer.conn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
 		n, _ := u.dialer.conn.Read(buf)
 		if n > 0 {
+			rudpObfuscate(buf[0:n], c.config.Key)
 			f := &Frame{}
 			err := proto.Unmarshal(buf[0:n], f)
 			if err == nil {
@@ -411,6 +430,8 @@ func (c *RudpConn) Listen(dst string) (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	_ = listenerconn.SetReadBuffer(16 * 1024 * 1024)
+	_ = listenerconn.SetWriteBuffer(16 * 1024 * 1024)
 
 	ch := common.NewChannel(c.config.AcceptChanLen)
 
@@ -481,16 +502,23 @@ func (c *RudpConn) GetConfig() *RudpConfig {
 func (c *RudpConn) loopListenerRecv() error {
 	c.checkConfig()
 
-	buf := make([]byte, c.config.MaxPacketSize)
-	for !c.listener.wg.IsExit() {
-		c.listener.listenerconn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
-		n, srcaddr, err := c.listener.listenerconn.ReadFromUDP(buf)
-		if err != nil {
-			continue
+	batchRead := runtime.GOOS == "linux"
+	var pconn *ipv4.PacketConn
+	var msgs []ipv4.Message
+	if batchRead {
+		pconn = ipv4.NewPacketConn(c.listener.listenerconn)
+		msgs = make([]ipv4.Message, recvBatchMsgs)
+		for i := range msgs {
+			msgs[i].Buffers = [][]byte{make([]byte, c.config.MaxPacketSize)}
 		}
+	}
 
+	buf := make([]byte, c.config.MaxPacketSize)
+	lastCleanTime := time.Now()
+
+	processPacket := func(data []byte, srcaddr *net.UDPAddr) {
+		rudpObfuscate(data, c.config.Key)
 		srcaddrstr := srcaddr.String()
-
 		v, ok := c.listener.sonny.Load(srcaddrstr)
 		if !ok {
 			id := common.Guid()
@@ -508,48 +536,64 @@ func (c *RudpConn) loopListenerRecv() error {
 			}
 
 			u := &RudpConn{config: c.config, listenersonny: sonny}
-			// Wire the sonny's group BEFORE publishing: Close() iterates the
-			// sonny map and reads listenersonny.wg, so a publish-then-wire
-			// ordering raced that read under teardown (surfaced by spp's
-			// Server close during a rudp login flood).
 			u.listenersonny.wg = thread.NewGroup("RudpConn ListenerSonny"+" "+u.Info(), c.listener.wg, nil)
 			c.listener.sonny.Store(srcaddrstr, u)
 
-			// Feed the first packet (often CONNECT) into FrameMgr immediately;
-			// previously it was dropped and relied solely on retransmission.
 			f := &Frame{}
-			if err := proto.Unmarshal(buf[0:n], f); err == nil {
+			if err := proto.Unmarshal(data, f); err == nil {
 				u.listenersonny.fm.OnRecvFrame(f)
 			}
 
 			c.listener.wg.Go("RudpConn accept"+" "+u.Info(), func() error {
 				return c.accept(u)
 			})
-
-			//loggo.Debug("start accept remote rudp %s %s", u.Info(), id)
 		} else {
 			u := v.(*RudpConn)
 			if u.isclose.Load() {
 				c.listener.sonny.Delete(srcaddrstr)
-				continue
+				return
 			}
 
 			f := &Frame{}
-			err := proto.Unmarshal(buf[0:n], f)
+			err := proto.Unmarshal(data, f)
 			if err == nil {
 				u.listenersonny.fm.OnRecvFrame(f)
-				//loggo.Debug("%s recv frame %d", u.Info(), f.Id)
+			}
+		}
+	}
+
+	for !c.listener.wg.IsExit() {
+		c.listener.listenerconn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
+		if batchRead {
+			n, err := pconn.ReadBatch(msgs, 0)
+			if err == nil && n > 0 {
+				for i := 0; i < n; i++ {
+					m := &msgs[i]
+					if m.N > 0 && m.Addr != nil {
+						udpAddr, ok := m.Addr.(*net.UDPAddr)
+						if ok {
+							processPacket(m.Buffers[0][:m.N], udpAddr)
+						}
+					}
+				}
+			}
+		} else {
+			n, srcaddr, err := c.listener.listenerconn.ReadFromUDP(buf)
+			if err == nil && n > 0 {
+				processPacket(buf[:n], srcaddr)
 			}
 		}
 
-		c.listener.sonny.Range(func(key, value interface{}) bool {
-			u := value.(*RudpConn)
-			if u.isclose.Load() {
-				c.listener.sonny.Delete(key)
-				//loggo.Debug("delete sonny from map %s", u.Info())
-			}
-			return true
-		})
+		if time.Since(lastCleanTime) > time.Second {
+			lastCleanTime = time.Now()
+			c.listener.sonny.Range(func(key, value interface{}) bool {
+				u := value.(*RudpConn)
+				if u.isclose.Load() {
+					c.listener.sonny.Delete(key)
+				}
+				return true
+			})
+		}
 	}
 	return nil
 }
@@ -578,6 +622,7 @@ func (c *RudpConn) accept(u *RudpConn) error {
 				//loggo.Error("MarshalFrame fail %s", err)
 				break
 			}
+			rudpObfuscate(mb, c.config.Key)
 			u.listenersonny.fatherconn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
 			u.listenersonny.fatherconn.WriteToUDP(mb, u.listenersonny.dstaddr)
 		}
@@ -688,8 +733,10 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 				if batchRead {
 					n, _ := pconn.ReadBatch(msgs, 0)
 					for i := 0; i < n; i++ {
+						data := msgs[i].Buffers[0][:msgs[i].N]
+						rudpObfuscate(data, c.config.Key)
 						f := &Frame{}
-						err := proto.Unmarshal(msgs[i].Buffers[0][:msgs[i].N], f)
+						err := proto.Unmarshal(data, f)
 						if err == nil {
 							fm.OnRecvFrame(f)
 						} else {
@@ -699,6 +746,7 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 				} else {
 					n, _ := conn.Read(bytes)
 					if n > 0 {
+						rudpObfuscate(bytes[0:n], c.config.Key)
 						f := &Frame{}
 						err := proto.Unmarshal(bytes[0:n], f)
 						if err == nil {
@@ -731,15 +779,15 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 		avctive := fm.Update()
 
 		// send udp
-		sendlist := fm.GetSendList()
-		for e := sendlist.Front(); e != nil; e = e.Next() {
-			f := e.Value.(*Frame)
+		sendframes := fm.GetSendFrames()
+		for i, f := range sendframes {
 			mb, err := fm.MarshalFrame(f)
 			if err != nil {
 				//loggo.Error("MarshalFrame fail %s", err)
 				reason = "MarshalFrame"
 				break
 			}
+			rudpObfuscate(mb, c.config.Key)
 
 			if runtime.GOOS != "linux" {
 				conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
@@ -762,7 +810,7 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 				count++
 
 				// 如果积攒够了一批，或者列表到头了，就发送
-				if count >= c.config.BatchSendPkgs || e.Next() == nil {
+				if count >= c.config.BatchSendPkgs || i == len(sendframes)-1 {
 					conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
 
 					// WriteBatch 会调用底层的 sendmmsg
@@ -780,6 +828,8 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 				}
 			}
 		}
+		numSent := len(sendframes)
+		fm.PutSendFrames(sendframes)
 
 		if reason == "MarshalFrame" || reason == "WriteBatch" {
 			break
@@ -798,8 +848,8 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 			break
 		}
 
-		if !avctive && sendlist.Len() <= 0 {
-			time.Sleep(time.Millisecond * 10)
+		if !avctive && numSent <= 0 {
+			time.Sleep(time.Millisecond * 1)
 		}
 	}
 
@@ -822,6 +872,7 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 				//loggo.Error("MarshalFrame fail %s", err)
 				break
 			}
+			rudpObfuscate(mb, c.config.Key)
 			conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
 			if dstaddr != nil {
 				conn.WriteToUDP(mb, dstaddr)
