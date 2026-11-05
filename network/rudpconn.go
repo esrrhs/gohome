@@ -64,7 +64,7 @@ func DefaultRudpConfig() *RudpConfig {
 		AcceptChanLen:      128,
 		Congestion:         "bb",
 		BatchSendPkgs:      64,
-		Key:                "fuckgcd",
+		Key:                "",
 	}
 }
 
