@@ -30,6 +30,38 @@ const (
 	benchDuration    = time.Minute
 )
 
+// channelSpec 描述压测用的模拟信道：丢包率、单向时延、链路速率（bit/s，0 = 不限速）。
+// 速率按全双工模拟：转发信道每个方向独立按该速率限速。
+type channelSpec struct {
+	loss        float64
+	oneWayDelay time.Duration
+	rateBps     int64
+}
+
+// ratePacer 是漏桶虚拟时钟限速器：book(n) 为 n 字节预约下一个发送时隙，
+// 返回调用者需要等待的时长。rateBps <= 0 时空开销直通。预约按调用顺序
+// 单调递增，因此同一方向上 book 的先后次序即发送次序。
+type ratePacer struct {
+	rateBps   float64
+	mu        sync.Mutex
+	nextAvail time.Time
+}
+
+func (p *ratePacer) book(n int) time.Duration {
+	if p == nil || p.rateBps <= 0 || n <= 0 {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	if p.nextAvail.Before(now) {
+		p.nextAvail = now
+	}
+	wait := p.nextAvail.Sub(now)
+	p.nextAvail = p.nextAvail.Add(time.Duration(float64(n) * 8 * float64(time.Second) / p.rateBps))
+	return wait
+}
+
 // 所有协议共用同一块载荷，保证发的数据一致。
 var benchPayload = func() []byte {
 	p := make([]byte, benchPayloadSize)
@@ -86,6 +118,10 @@ func BenchmarkReliableThroughput(b *testing.B) {
 
 // runFixedPayloadDownload: 一 server 不停发 1024，一 client 不停收并校验，跑满 duration。
 func runFixedPayloadDownload(proto string, loss float64, duration time.Duration, seed int64) (mbps float64, verifiedBytes int64, err error) {
+	return runFixedPayloadDownloadWithSpec(proto, channelSpec{loss: loss, oneWayDelay: benchOneWayDelay}, duration, seed)
+}
+
+func runFixedPayloadDownloadWithSpec(proto string, cs channelSpec, duration time.Duration, seed int64) (mbps float64, verifiedBytes int64, err error) {
 	lnFactory, err := NewConn(proto)
 	if err != nil {
 		return 0, 0, err
@@ -110,25 +146,46 @@ func runFixedPayloadDownload(proto string, loss float64, duration time.Duration,
 
 	dialAddr := backend
 	var stopNetem func()
+	rateOnly := cs.rateBps > 0 && cs.oneWayDelay == 0 && cs.loss == 0
 	switch proto {
-	case "rhttp":
-		port, perr := tcpPortOf(backend)
-		if perr != nil {
-			return 0, 0, perr
+	case "tcp":
+		switch {
+		case rateOnly:
+			dialAddr, stopNetem, err = startTCPRateProxy(backend, cs.rateBps)
+		case cs.rateBps > 0 || cs.oneWayDelay > 0 || cs.loss > 0:
+			var port int
+			port, err = tcpPortOf(backend)
+			if err == nil {
+				stopNetem, err = startLoTCNetemTCP(port, cs.oneWayDelay, cs.loss, cs.rateBps)
+			}
 		}
-		stopNetem, err = startLoTCNetemTCP(port, benchOneWayDelay, loss)
+	case "rhttp":
+		switch {
+		case rateOnly:
+			dialAddr, stopNetem, err = startTCPRateProxy(backend, cs.rateBps)
+		case cs.rateBps > 0 || cs.oneWayDelay > 0 || cs.loss > 0:
+			var port int
+			port, err = tcpPortOf(backend)
+			if err == nil {
+				stopNetem, err = startLoTCNetemTCP(port, cs.oneWayDelay, cs.loss, cs.rateBps)
+			}
+		}
 	case "ricmp":
 		dialAddr = "127.0.0.1"
-		stopNetem, err = startLoTCNetemICMP(benchOneWayDelay, loss)
+		if cs.rateBps > 0 || cs.oneWayDelay > 0 || cs.loss > 0 {
+			stopNetem, err = startLoTCNetemICMP(cs.oneWayDelay, cs.loss, cs.rateBps)
+		}
 	default:
 		var proxyAddr string
-		proxyAddr, stopNetem, err = startUDPNetemProxy(backend, loss, benchOneWayDelay, seed)
+		proxyAddr, stopNetem, err = startUDPNetemProxy(backend, cs, seed)
 		dialAddr = proxyAddr
 	}
 	if err != nil {
 		return 0, 0, err
 	}
-	defer stopNetem()
+	if stopNetem != nil {
+		defer stopNetem()
+	}
 
 	var exit atomic.Bool
 	var total atomic.Int64
@@ -173,7 +230,7 @@ func runFixedPayloadDownload(proto string, loss float64, duration time.Duration,
 	}
 
 	acceptWait := 30 * time.Second
-	if proto == "rhttp" && loss >= 0.5 {
+	if proto == "rhttp" && cs.loss >= 0.5 {
 		acceptWait = 2 * time.Minute // 短连接 + 高丢包，握手很慢
 	}
 	select {
@@ -293,7 +350,8 @@ func connListenAddr(ln Conn) (string, error) {
 	}
 }
 
-func startUDPNetemProxy(backend string, loss float64, oneWayDelay time.Duration, seed int64) (proxyAddr string, stop func(), err error) {
+func startUDPNetemProxy(backend string, cs channelSpec, seed int64) (proxyAddr string, stop func(), err error) {
+	loss, oneWayDelay, rateBps := cs.loss, cs.oneWayDelay, cs.rateBps
 	backAddr, err := net.ResolveUDPAddr("udp", backend)
 	if err != nil {
 		return "", nil, err
@@ -305,6 +363,10 @@ func startUDPNetemProxy(backend string, loss float64, oneWayDelay time.Duration,
 	_ = pc.SetReadBuffer(8 << 20)
 	_ = pc.SetWriteBuffer(8 << 20)
 
+	// 全双工限速：两个方向各一个 pacer，各自独享链路速率。
+	upPacer := &ratePacer{rateBps: float64(rateBps)}
+	downPacer := &ratePacer{rateBps: float64(rateBps)}
+
 	rng := rand.New(rand.NewSource(seed))
 	var mu sync.Mutex
 	var writeMu sync.Mutex
@@ -313,7 +375,7 @@ func startUDPNetemProxy(backend string, loss float64, oneWayDelay time.Duration,
 	var delayWG sync.WaitGroup
 
 	// 并行延迟（不串行 HOL）；约 2% 包 +1ms，轻微乱序。
-	schedule := func(pkt []byte, dst *net.UDPAddr) {
+	schedule := func(pkt []byte, dst *net.UDPAddr, pacer *ratePacer) {
 		if dst == nil || closed.Load() {
 			return
 		}
@@ -325,6 +387,9 @@ func startUDPNetemProxy(backend string, loss float64, oneWayDelay time.Duration,
 			if bump {
 				delay += time.Millisecond
 			}
+		}
+		if pacer != nil {
+			delay += pacer.book(len(pkt))
 		}
 		delayWG.Add(1)
 		time.AfterFunc(delay, func() {
@@ -365,7 +430,7 @@ func startUDPNetemProxy(backend string, loss float64, oneWayDelay time.Duration,
 				if ca == nil || drop {
 					continue
 				}
-				schedule(pkt, ca)
+				schedule(pkt, ca, downPacer)
 				continue
 			}
 			if clientAddr == nil {
@@ -376,7 +441,7 @@ func startUDPNetemProxy(backend string, loss float64, oneWayDelay time.Duration,
 			if drop {
 				continue
 			}
-			schedule(pkt, backAddr)
+			schedule(pkt, backAddr, upPacer)
 		}
 	}()
 
@@ -413,9 +478,9 @@ func runTC(args ...string) error {
 	return nil
 }
 
-// startLoTCNetemTCP 在 lo 上对指定 TCP 端口挂内核 netem（delay + loss）。
-func startLoTCNetemTCP(port int, delay time.Duration, loss float64) (stop func(), err error) {
-	return startLoTCNetem(delay, loss, [][]string{
+// startLoTCNetemTCP 在 lo 上对指定 TCP 端口挂内核 netem（delay + loss + rate）。
+func startLoTCNetemTCP(port int, delay time.Duration, loss float64, rateBps int64) (stop func(), err error) {
+	return startLoTCNetem(delay, loss, rateBps, [][]string{
 		{"filter", "add", "dev", "lo", "protocol", "ip", "parent", "1:0", "prio", "1",
 			"u32", "match", "ip", "dport", strconv.Itoa(port), "0xffff", "flowid", "1:3"},
 		{"filter", "add", "dev", "lo", "protocol", "ip", "parent", "1:0", "prio", "1",
@@ -424,14 +489,14 @@ func startLoTCNetemTCP(port int, delay time.Duration, loss float64) (stop func()
 }
 
 // startLoTCNetemICMP 在 lo 上对 ICMP（protocol 1）挂内核 netem。
-func startLoTCNetemICMP(delay time.Duration, loss float64) (stop func(), err error) {
-	return startLoTCNetem(delay, loss, [][]string{
+func startLoTCNetemICMP(delay time.Duration, loss float64, rateBps int64) (stop func(), err error) {
+	return startLoTCNetem(delay, loss, rateBps, [][]string{
 		{"filter", "add", "dev", "lo", "protocol", "ip", "parent", "1:0", "prio", "1",
 			"u32", "match", "ip", "protocol", "1", "0xff", "flowid", "1:3"},
 	})
 }
 
-func startLoTCNetem(delay time.Duration, loss float64, filters [][]string) (stop func(), err error) {
+func startLoTCNetem(delay time.Duration, loss float64, rateBps int64, filters [][]string) (stop func(), err error) {
 	if _, err := exec.LookPath(tcBin); err != nil {
 		if p, e := exec.LookPath("tc"); e == nil {
 			tcBin = p
@@ -454,6 +519,13 @@ func startLoTCNetem(delay time.Duration, loss float64, filters [][]string) (stop
 		"qdisc", "add", "dev", "lo", "parent", "1:3", "handle", "30:",
 		"netem", "delay", fmt.Sprintf("%dms", delayMs),
 		"limit", "100000",
+	}
+	if rateBps > 0 {
+		mbit := (rateBps + 1000_000 - 1) / 1000_000
+		if mbit == 0 {
+			mbit = 1
+		}
+		netemArgs = append(netemArgs, "rate", fmt.Sprintf("%dmbit", mbit))
 	}
 	if loss > 0 {
 		netemArgs = append(netemArgs, "loss", fmt.Sprintf("%g%%", loss*100))

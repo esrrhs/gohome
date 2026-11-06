@@ -2,7 +2,6 @@ package network
 
 import (
 	"fmt"
-	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/list"
 	"math"
 	"strconv"
@@ -52,12 +51,18 @@ type BBCongestion struct {
 	flyeddata     int
 	lastflyeddata int
 	flyingdata    int
+	totalsent     int
 	rateflywin    *list.Rlistgo
 	flyedwin      *list.Rlistgo
 	propindex     int
 	last          time.Time
 	lastratewin   float64
 	lastflyedwin  int
+	rtt           time.Duration
+	minRtt        time.Duration
+	lastPaceTime  time.Time
+	paceTokens    float64
+	pacingRate    float64
 }
 
 func (bb *BBCongestion) Init() {
@@ -66,6 +71,30 @@ func (bb *BBCongestion) Init() {
 	bb.rateflywin = list.NewRList(bbc_win)
 	bb.flyedwin = list.NewRList(bbc_win)
 	bb.last = time.Now()
+	bb.rtt = 0
+	bb.minRtt = 0
+	bb.lastPaceTime = time.Now()
+	bb.paceTokens = float64(64 * 1024)
+	bb.pacingRate = 0
+}
+
+func (bb *BBCongestion) SetRtt(rtt time.Duration) {
+	if rtt > 0 {
+		bb.rtt = rtt
+		if bb.minRtt == 0 || (rtt < bb.minRtt && rtt > time.Millisecond*5) {
+			bb.minRtt = rtt
+		}
+		if bb.pacingRate == 0 && bb.maxfly > 0 {
+			initialRate := float64(bb.maxfly) / bb.rtt.Seconds()
+			if initialRate < 5*1024*1024 {
+				initialRate = 5 * 1024 * 1024
+			}
+			bb.pacingRate = initialRate
+			if bb.maxfly < 4*1024*1024 {
+				bb.maxfly = 4 * 1024 * 1024
+			}
+		}
+	}
 }
 
 func (bb *BBCongestion) RecvAck(id int, size int) {
@@ -73,6 +102,10 @@ func (bb *BBCongestion) RecvAck(id int, size int) {
 		panic("error size")
 	}
 	bb.flyeddata += size
+	bb.flyingdata -= size
+	if bb.flyingdata < 0 {
+		bb.flyingdata = 0
+	}
 }
 
 func (bb *BBCongestion) CanSend(id int, size int) bool {
@@ -82,7 +115,50 @@ func (bb *BBCongestion) CanSend(id int, size int) bool {
 	if bb.flyingdata > bb.maxfly {
 		return false
 	}
+	if bb.rtt > 0 && bb.pacingRate > 0 {
+		now := time.Now()
+		elapsed := now.Sub(bb.lastPaceTime)
+		if elapsed > 0 {
+			bb.lastPaceTime = now
+			bb.paceTokens += elapsed.Seconds() * bb.pacingRate
+			maxBurst := float64(256 * 1024)
+			if bb.paceTokens > maxBurst {
+				bb.paceTokens = maxBurst
+			}
+		}
+		if bb.paceTokens < float64(size) {
+			return false
+		}
+		bb.paceTokens -= float64(size)
+	}
 	bb.flyingdata += size
+	bb.totalsent += size
+	return true
+}
+
+func (bb *BBCongestion) CanSendResend(id int, size int) bool {
+	if size < 0 {
+		panic("error size")
+	}
+	if bb.rtt > 0 && bb.pacingRate > 0 {
+		now := time.Now()
+		elapsed := now.Sub(bb.lastPaceTime)
+		if elapsed > 0 {
+			bb.lastPaceTime = now
+			bb.paceTokens += elapsed.Seconds() * bb.pacingRate
+			maxBurst := float64(256 * 1024)
+			if bb.paceTokens > maxBurst {
+				bb.paceTokens = maxBurst
+			}
+		}
+		// Retransmissions are prioritized to unblock head-of-line blocking:
+		// allow overdraft down to -128KB. Subsequent new packets will wait until
+		// tokens regenerate.
+		if bb.paceTokens < -float64(128*1024) {
+			return false
+		}
+		bb.paceTokens -= float64(size)
+	}
 	return true
 }
 
@@ -92,7 +168,11 @@ func (bb *BBCongestion) Update() {
 		return
 	}
 
-	currate := float64(bb.flyingdata) / float64(bb.flyeddata)
+	sent := bb.totalsent
+	if sent <= 0 {
+		sent = bb.flyingdata
+	}
+	currate := float64(sent) / float64(bb.flyeddata)
 	if currate < 1 {
 		currate = 1
 	}
@@ -103,17 +183,30 @@ func (bb *BBCongestion) Update() {
 	bb.rateflywin.PushBack(currate)
 
 	lastratewin := math.MaxFloat64
+	sumRate := 0.0
+	cntRate := 0
 	for e := bb.rateflywin.FrontInter(); e != nil; e = e.Next() {
 		rate := e.Value.(float64)
 		if rate < lastratewin {
 			lastratewin = rate
 		}
+		sumRate += rate
+		cntRate++
+	}
+	avgRate := currate
+	if cntRate > 0 {
+		avgRate = sumRate / float64(cntRate)
+	}
+
+	effectiveFlyed := bb.flyeddata
+	if sent > 0 && effectiveFlyed > int(float64(sent)*1.15) {
+		effectiveFlyed = int(float64(sent) * 1.15)
 	}
 
 	if bb.flyedwin.Full() {
 		bb.flyedwin.PopFront()
 	}
-	bb.flyedwin.PushBack(bb.flyeddata)
+	bb.flyedwin.PushBack(effectiveFlyed)
 
 	lastflyedwin := 0
 	for e := bb.flyedwin.FrontInter(); e != nil; e = e.Next() {
@@ -124,28 +217,102 @@ func (bb *BBCongestion) Update() {
 	}
 
 	if bb.status == bbc_status_init {
-		if float64(bb.flyeddata) <= bbc_maxfly_compare*float64(bb.lastflyeddata) {
-			oldmaxfly := bb.maxfly
-			bb.maxfly = int(float64(oldmaxfly) / bbc_maxfly_grow)
+		growFactor := 1.35
+		shouldExit := false
+		if bb.rtt > 0 {
+			queueDelay := time.Duration(0)
+			if bb.minRtt > 0 && bb.rtt > bb.minRtt {
+				queueDelay = bb.rtt - bb.minRtt
+			}
+			plateau := bb.lastflyeddata > 0 && float64(bb.flyeddata) < float64(bb.lastflyeddata)*1.03 && bb.flyeddata > 5*1024*1024
+			severe := avgRate > 1.25 || queueDelay > 90*time.Millisecond
+			shouldExit = severe || plateau
+		} else {
+			growFactor = bbc_maxfly_grow
+			shouldExit = currate > 1.20 || (bb.lastflyeddata > 0 && float64(bb.flyeddata) <= bbc_maxfly_compare*float64(bb.lastflyeddata))
+		}
+
+		if shouldExit {
 			bb.status = bbc_status_prop
+			if bb.rtt > 0 {
+				deliveryRate := float64(bb.flyeddata)
+				bdp := int(deliveryRate * bb.rtt.Seconds())
+				if bdp < 1024*1024 {
+					bdp = 1024 * 1024
+				}
+				bb.maxfly = int(float64(bdp) * 2.5)
+				if bb.maxfly < 4*1024*1024 {
+					bb.maxfly = 4 * 1024 * 1024
+				}
+				bb.pacingRate = deliveryRate
+			} else {
+				oldmaxfly := bb.maxfly
+				bb.maxfly = int(float64(oldmaxfly) / growFactor)
+			}
 			//loggo.Debug("bbc_status_init flyeddata %d maxfly %d change", bb.flyeddata, bb.maxfly)
 		} else {
 			oldmaxfly := bb.maxfly
-			bb.maxfly = int(float64(oldmaxfly) * bbc_maxfly_grow)
+			bb.maxfly = int(float64(oldmaxfly) * growFactor)
+			if bb.rtt > 0 {
+				bb.pacingRate = float64(bb.maxfly) / bb.rtt.Seconds()
+				if bb.maxfly < 4*1024*1024 {
+					bb.maxfly = 4 * 1024 * 1024
+				}
+			}
 			//loggo.Debug("bbc_status_init grow flyeddata %d oldmaxfly %d maxfly %d", bb.flyeddata, oldmaxfly, bb.maxfly)
 		}
 		bb.lastflyeddata = bb.flyeddata
 	} else if bb.status == bbc_status_prop {
-		maxfly := float64(lastflyedwin) * lastratewin
-		curmaxfly := int(maxfly)
-		if curmaxfly > bb.maxfly {
-			bb.maxfly = curmaxfly
-		} else {
-			if common.NearlyEqual(bb.flyingdata, bb.maxfly) {
-				bb.maxfly = curmaxfly
+		if bb.rtt > 0 {
+			deliveryRate := float64(lastflyedwin)
+			if deliveryRate < 1024*1024 {
+				deliveryRate = 1024 * 1024
 			}
+			bdp := int(deliveryRate * bb.rtt.Seconds())
+			if bdp < 1024*1024 {
+				bdp = 1024 * 1024
+			}
+
+			queueDelay := time.Duration(0)
+			if bb.minRtt > 0 && bb.rtt > bb.minRtt {
+				queueDelay = bb.rtt - bb.minRtt
+			}
+
+			if avgRate > 1.20 || queueDelay > 90*time.Millisecond {
+				// Buffer starting to fill or persistent loss: gentle back off to drain queue
+				bb.pacingRate = deliveryRate * 0.95
+				bb.maxfly = int(float64(bdp) * 2.5)
+			} else if avgRate <= 1.08 && queueDelay < 60*time.Millisecond {
+				// Clean delivery and empty queue: probe upward
+				probeFactor := 1.04
+				if prop_seq[bb.propindex] > 1.0 {
+					probeFactor = 1.10
+				}
+				bb.pacingRate = deliveryRate * probeFactor
+				bb.maxfly = int(float64(bdp) * 3.0)
+			} else {
+				// Steady delivery: maintain gentle upward drift
+				bb.pacingRate = deliveryRate * 1.02
+				bb.maxfly = int(float64(bdp) * 2.5)
+			}
+			if bb.pacingRate < 4*1024*1024 {
+				bb.pacingRate = 4 * 1024 * 1024
+			}
+			if bb.maxfly < 4*1024*1024 {
+				bb.maxfly = 4 * 1024 * 1024
+			}
+		} else {
+			curmaxfly := int(float64(lastflyedwin) * lastratewin)
+			if currate < 1.08 && curmaxfly < lastflyedwin {
+				curmaxfly = lastflyedwin
+			}
+			if curmaxfly > bb.maxfly {
+				bb.maxfly = curmaxfly
+			} else if currate > 1.25 {
+				bb.maxfly = int(float64(bb.maxfly) * 0.85)
+			}
+			bb.maxfly = int(float64(bb.maxfly) * prop_seq[bb.propindex])
 		}
-		bb.maxfly = int(float64(bb.maxfly) * prop_seq[bb.propindex])
 		//loggo.Debug("bbc_status_prop lastflyedwin %v lastrate %v maxfly %d prop %v", lastflyedwin, lastrate, bb.maxfly, prop_seq[bb.propindex])
 		bb.propindex++
 		bb.propindex = bb.propindex % len(prop_seq)
@@ -155,6 +322,7 @@ func (bb *BBCongestion) Update() {
 
 	bb.flyeddata = 0
 	bb.flyingdata = 0
+	bb.totalsent = 0
 	bb.lastratewin = lastratewin
 	bb.lastflyedwin = lastflyedwin
 
@@ -164,6 +332,6 @@ func (bb *BBCongestion) Update() {
 }
 
 func (bb *BBCongestion) Info() string {
-	return fmt.Sprintf("status %v maxfly %v flyeddata %v lastratewin %v lastflyedwin %v", bb.status, bb.maxfly,
-		bb.flyeddata, bb.lastratewin, bb.lastflyedwin)
+	return fmt.Sprintf("status %v maxfly %v flyeddata %v rtt %v lastratewin %v lastflyedwin %v", bb.status, bb.maxfly,
+		bb.flyeddata, bb.rtt, bb.lastratewin, bb.lastflyedwin)
 }
