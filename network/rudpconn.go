@@ -53,7 +53,7 @@ func DefaultRudpConfig() *RudpConfig {
 		MaxPacketSize:      2048,
 		CutSize:            1200,
 		MaxId:              100000,
-		BufferSize:         16 * 1024 * 1024,
+		BufferSize:         4 * 1024 * 1024,
 		MaxWin:             4000,
 		ResendTimems:       200,
 		Compress:           0,
@@ -136,6 +136,7 @@ func (c *RudpConn) Read(p []byte) (n int, err error) {
 			if wg != nil && wg.IsExit() {
 				return 0, errors.New("closed conn")
 			}
+			// 1ms 轮询等待以提供毫秒级低延迟响应与吞吐，避免 100ms 引起的长时停顿
 			time.Sleep(time.Millisecond * 1)
 			continue
 		}
@@ -190,6 +191,7 @@ func (c *RudpConn) Write(p []byte) (n int, err error) {
 				}
 				return 0, errors.New("closed conn")
 			}
+			// 1ms 轮询等待以提供毫秒级低延迟响应与吞吐，避免 100ms 引起的长时停顿
 			time.Sleep(time.Millisecond * 1)
 			continue
 		}
@@ -330,8 +332,8 @@ func (c *RudpConn) Dial(dst string) (Conn, error) {
 	}
 
 	uconn := conn.(*net.UDPConn)
-	_ = uconn.SetReadBuffer(16 * 1024 * 1024)
-	_ = uconn.SetWriteBuffer(16 * 1024 * 1024)
+	_ = uconn.SetReadBuffer(4 * 1024 * 1024)
+	_ = uconn.SetWriteBuffer(4 * 1024 * 1024)
 
 	dialer := &rudpConnDialer{conn: uconn, fm: fm}
 
@@ -430,8 +432,8 @@ func (c *RudpConn) Listen(dst string) (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = listenerconn.SetReadBuffer(16 * 1024 * 1024)
-	_ = listenerconn.SetWriteBuffer(16 * 1024 * 1024)
+	_ = listenerconn.SetReadBuffer(4 * 1024 * 1024)
+	_ = listenerconn.SetWriteBuffer(4 * 1024 * 1024)
 
 	ch := common.NewChannel(c.config.AcceptChanLen)
 
@@ -828,6 +830,7 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 		}
 
 		if !avctive && numSent <= 0 {
+			// 1ms 轮询等待以提供毫秒级低延迟响应与吞吐，避免 100ms 引起的长时停顿
 			time.Sleep(time.Millisecond * 1)
 		}
 	}

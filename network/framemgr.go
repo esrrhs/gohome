@@ -919,6 +919,7 @@ func (fm *FrameMgr) combineWindowToRecvBuffer(cur int64) {
 				fm.fs.sendReqNumsMap[id]++
 			}
 		}
+		// 连续发送两次 REQ 帧：在跨洋弱网和高丢包环境下，单份 REQ 若丢失会导致对端重传超时进而触发 HOL 卡顿，双发可加速丢包恢复
 		fm.sendFrame(f)
 		fm.sendFrame(f)
 		//loggo.Debug("debugid %v send req %v %v", fm.debugid, f.Id, common.Int32ArrayToString(f.Dataid, ","))
