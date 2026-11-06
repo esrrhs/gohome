@@ -502,23 +502,18 @@ func (c *RudpConn) GetConfig() *RudpConfig {
 func (c *RudpConn) loopListenerRecv() error {
 	c.checkConfig()
 
-	batchRead := runtime.GOOS == "linux"
-	var pconn *ipv4.PacketConn
-	var msgs []ipv4.Message
-	if batchRead {
-		pconn = ipv4.NewPacketConn(c.listener.listenerconn)
-		msgs = make([]ipv4.Message, recvBatchMsgs)
-		for i := range msgs {
-			msgs[i].Buffers = [][]byte{make([]byte, c.config.MaxPacketSize)}
-		}
-	}
-
 	buf := make([]byte, c.config.MaxPacketSize)
-	lastCleanTime := time.Now()
+	for !c.listener.wg.IsExit() {
+		c.listener.listenerconn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
+		n, srcaddr, err := c.listener.listenerconn.ReadFromUDP(buf)
+		if err != nil {
+			continue
+		}
 
-	processPacket := func(data []byte, srcaddr *net.UDPAddr) {
-		rudpObfuscate(data, c.config.Key)
+		rudpObfuscate(buf[0:n], c.config.Key)
+
 		srcaddrstr := srcaddr.String()
+
 		v, ok := c.listener.sonny.Load(srcaddrstr)
 		if !ok {
 			id := common.Guid()
@@ -536,64 +531,48 @@ func (c *RudpConn) loopListenerRecv() error {
 			}
 
 			u := &RudpConn{config: c.config, listenersonny: sonny}
+			// Wire the sonny's group BEFORE publishing: Close() iterates the
+			// sonny map and reads listenersonny.wg, so a publish-then-wire
+			// ordering raced that read under teardown (surfaced by spp's
+			// Server close during a rudp login flood).
 			u.listenersonny.wg = thread.NewGroup("RudpConn ListenerSonny"+" "+u.Info(), c.listener.wg, nil)
 			c.listener.sonny.Store(srcaddrstr, u)
 
+			// Feed the first packet (often CONNECT) into FrameMgr immediately;
+			// previously it was dropped and relied solely on retransmission.
 			f := &Frame{}
-			if err := proto.Unmarshal(data, f); err == nil {
+			if err := proto.Unmarshal(buf[0:n], f); err == nil {
 				u.listenersonny.fm.OnRecvFrame(f)
 			}
 
 			c.listener.wg.Go("RudpConn accept"+" "+u.Info(), func() error {
 				return c.accept(u)
 			})
+
+			//loggo.Debug("start accept remote rudp %s %s", u.Info(), id)
 		} else {
 			u := v.(*RudpConn)
 			if u.isclose.Load() {
 				c.listener.sonny.Delete(srcaddrstr)
-				return
+				continue
 			}
 
 			f := &Frame{}
-			err := proto.Unmarshal(data, f)
+			err := proto.Unmarshal(buf[0:n], f)
 			if err == nil {
 				u.listenersonny.fm.OnRecvFrame(f)
-			}
-		}
-	}
-
-	for !c.listener.wg.IsExit() {
-		c.listener.listenerconn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
-		if batchRead {
-			n, err := pconn.ReadBatch(msgs, 0)
-			if err == nil && n > 0 {
-				for i := 0; i < n; i++ {
-					m := &msgs[i]
-					if m.N > 0 && m.Addr != nil {
-						udpAddr, ok := m.Addr.(*net.UDPAddr)
-						if ok {
-							processPacket(m.Buffers[0][:m.N], udpAddr)
-						}
-					}
-				}
-			}
-		} else {
-			n, srcaddr, err := c.listener.listenerconn.ReadFromUDP(buf)
-			if err == nil && n > 0 {
-				processPacket(buf[:n], srcaddr)
+				//loggo.Debug("%s recv frame %d", u.Info(), f.Id)
 			}
 		}
 
-		if time.Since(lastCleanTime) > time.Second {
-			lastCleanTime = time.Now()
-			c.listener.sonny.Range(func(key, value interface{}) bool {
-				u := value.(*RudpConn)
-				if u.isclose.Load() {
-					c.listener.sonny.Delete(key)
-				}
-				return true
-			})
-		}
+		c.listener.sonny.Range(func(key, value interface{}) bool {
+			u := value.(*RudpConn)
+			if u.isclose.Load() {
+				c.listener.sonny.Delete(key)
+				//loggo.Debug("delete sonny from map %s", u.Info())
+			}
+			return true
+		})
 	}
 	return nil
 }
