@@ -3,8 +3,6 @@
 package aes
 
 import (
-	"math/bits"
-
 	"golang.org/x/sys/cpu"
 )
 
@@ -64,13 +62,6 @@ func CnExpandKeyGoAsm(key []uint64, rkeys *[40]uint32) {
 
 // rotrw 与 rotw 方向相反，见 CnExpandKeyGoAsm 中的说明。
 func rotrw(w uint32) uint32 { return w>>8 | w<<24 }
-
-// 供测试使用的格式转换：硬件格式轮密钥 = 软件格式轮密钥逐字字节反转。
-func reverseKeyWords(dst *[40]uint32, src *[40]uint32) {
-	for i := range dst {
-		dst[i] = bits.ReverseBytes32(src[i])
-	}
-}
 
 //go:noescape
 func CnRoundsAsm(dst, src *uint64, rkeys *[40]uint32)
