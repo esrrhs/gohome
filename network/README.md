@@ -83,6 +83,7 @@ Standard-compliant implementation of **RFC 1928** and **RFC 1929**:
 | **`ricmp`** | Reliable | Covert reliable transport over ICMP Echo packets (requires `CAP_NET_RAW` privileges). | Raw ICMP Socket |
 | **`rhttp`** | Reliable | Reliable bi-directional data tunnel layered over repeated HTTP requests with connection pooling and server timeouts. | HTTP / TCP |
 | **`rdns`** | Reliable | FrameMgr ARQ tunnel over DNS queries/responses (TXT or NULL). Tiny CutSize; optional AES-GCM PSK. DNS metadata stays visible. | UDP DNS |
+| **`wss`** | Reliable / 可靠 | Verified TLS WebSocket byte stream; configurable CA, certificate, hostname and path. [API and runnable example](WSS.md). | TLS / TCP |
 
 ---
 
@@ -261,3 +262,21 @@ benchstat old.txt new.txt
 2. **Moderate Loss (10% Loss)**: **`kcp`** maintains high throughput (~5.13 MB/s). **`ricmp`** and **`rudp`** perform similarly (~2.5 MB/s).
 3. **Extreme Loss (50% Loss)**: **`kcp`** remains resilient (~1.83 MB/s), whereas `ricmp` drops to near zero and `rhttp` skips due to dial handshakes failing.
 4. **Push vs. Poll**: Unlike `rhttp` (which requires client polling), `ricmp` allows the server to proactively push downstream ICMP packets to the client directly.
+
+## RDNS weak-network regression / 弱网回归
+
+`go test -race ./network -run '^TestRdnsWeakNetwork$' -count=3 -timeout=5m`
+uses a local unprivileged scripted UDP proxy in both directions: loss,
+duplication, delayed packets and actual reordering, with exact seeded payload
+checks (16 KiB each way, TXT and NULL+PSK). Each transfer is bounded to 45 seconds;
+proxy workers and connection IO are cleaned up on failure. FrameMgr ARQ recovers
+transient packet loss within a live session. There is **no automatic reconnect**:
+after Close/terminal timeout, explicitly Dial again to create a fresh session;
+old byte streams are not resumed. The regression also verifies fresh-session
+redial and that writes to a closed stream fail.
+
+The `Protocols` CI workflow has named tcp/udp/rudp/kcp/quic/rhttp/wss/rdns/ricmp
+matrix entries. RDNS includes the weak-network regression; WSS uses generated
+local test certificates. Every entry checks that real tests ran and passed,
+rejecting empty selectors and skips. Raw ICMP runs with CAP_NET_RAW (IPv4/IPv6).
+Full-suite coverage, lint, full race and Big Endian checks remain separate.

@@ -83,6 +83,7 @@ type Conn interface {
 | **`ricmp`** | 可靠 | 基于 ICMP Echo 报文构建的隐蔽可靠通信信道（需 `CAP_NET_RAW` 特权）。 | Raw ICMP Socket |
 | **`rhttp`** | 可靠 | 基于 HTTP 请求轮询与推送的可靠穿透通道，连接池复用并带超时硬限制。 | HTTP / TCP |
 | **`rdns`** | 可靠 | 基于 FrameMgr ARQ 的 DNS 隧道（TXT/NULL 查询响应）。CutSize 很小；可选 AES-GCM PSK。DNS 元数据仍可见。 | UDP DNS |
+| **`wss`** | Reliable / 可靠 | Verified TLS WebSocket byte stream; configurable CA, certificate, hostname and path. [API and runnable example](WSS.md). | TLS / TCP |
 
 ---
 
@@ -261,3 +262,21 @@ benchstat old.txt new.txt
 2. **10% 丢包链路**：`kcp` 依然维持较高吞吐（5.13 MB/s）；`ricmp` 与 `rudp` 表现相当（约 2.5 MB/s）。
 3. **50% 极高丢包链路**：`kcp` 表现最顽强（1.83 MB/s）；`ricmp` 性能受损严重（接近 0.00）；`rhttp` 建连受阻直接 Skip。
 4. **推送机制差异**：`ricmp` 与 `rhttp` 不同——`rhttp` 必须依赖客户端发起轮询拉取，而 `ricmp` 服务端具备直接向客户端推送 ICMP 报文的能力。
+
+## RDNS weak-network regression / 弱网回归
+
+`go test -race ./network -run '^TestRdnsWeakNetwork$' -count=3 -timeout=5m`
+uses a local unprivileged scripted UDP proxy in both directions: loss,
+duplication, delayed packets and actual reordering, with exact seeded payload
+checks (16 KiB each way, TXT and NULL+PSK). Each transfer is bounded to 45 seconds;
+proxy workers and connection IO are cleaned up on failure. FrameMgr ARQ recovers
+transient packet loss within a live session. There is **no automatic reconnect**:
+after Close/terminal timeout, explicitly Dial again to create a fresh session;
+old byte streams are not resumed. The regression also verifies fresh-session
+redial and that writes to a closed stream fail.
+
+The `Protocols` CI workflow has named tcp/udp/rudp/kcp/quic/rhttp/wss/rdns/ricmp
+matrix entries. RDNS includes the weak-network regression; WSS uses generated
+local test certificates. Every entry checks that real tests ran and passed,
+rejecting empty selectors and skips. Raw ICMP runs with CAP_NET_RAW (IPv4/IPv6).
+Full-suite coverage, lint, full race and Big Endian checks remain separate.

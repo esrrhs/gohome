@@ -100,18 +100,18 @@ type rdnsConnDialer struct {
 	fm      *FrameMgr
 	wg      *thread.Group
 	seq     uint32
+	rdnsFrameQueue
 }
 
 type rdnsConnListenerSonny struct {
-	session    string
-	remote     atomic.Pointer[net.UDPAddr]
-	fatherconn *net.UDPConn
-	listener   *rdnsConnListener
-	fm         *FrameMgr
-	fmMu       sync.Mutex // serializes FrameMgr across recv/accept/update/R/W
-	wg         *thread.Group
-	pending    [][]byte // downlink frames waiting to be carried in next responses
-	pendMu     sync.Mutex
+	session        string
+	remote         atomic.Pointer[net.UDPAddr]
+	fatherconn     *net.UDPConn
+	listener       *rdnsConnListener
+	fm             *FrameMgr
+	fmMu           sync.Mutex // serializes FrameMgr across recv/accept/update/R/W
+	wg             *thread.Group
+	rdnsFrameQueue // owned serialized frames; protected by fmMu
 }
 
 type rdnsConnListener struct {
@@ -352,15 +352,6 @@ func (c *RdnsConn) requireDomain() (string, error) {
 	return d, nil
 }
 
-func (c *RdnsConn) newFrameMgr(debugSuffix string) *FrameMgr {
-	fm := NewFrameMgr(c.config.CutSize, c.config.MaxId, c.config.BufferSize, c.config.MaxWin, c.config.ResendTimems, c.config.Compress, c.config.Stat)
-	fm.SetDebugid(c.id + debugSuffix)
-	if c.config.Congestion == "bb" {
-		fm.SetCongestion(&BBCongestion{})
-	}
-	return fm
-}
-
 func (c *RdnsConn) Dial(dst string) (Conn, error) {
 	c.checkConfig()
 	domain, err := c.requireDomain()
@@ -385,28 +376,31 @@ func (c *RdnsConn) Dial(dst string) (Conn, error) {
 
 	id := common.Guid()
 	session := rdnsSessionID(id)
-	fm := c.newFrameMgr("-dialer")
-	// Clamp CutSize so uplink frames fit in a QNAME after seal+base32.
-	maxUp := rdnsMaxUplinkPayload(domain, session)
+	// Budget the serialized protobuf envelope as well as pack and AEAD overhead.
+	maxUp := rdnsMaxUplinkPayload(domain, session) - 2
 	if c.config.PSK != "" {
-		maxUp -= rdnsGCMNonceSize + 16 // nonce + GCM tag
+		maxUp -= rdnsGCMNonceSize + 16
 	}
-	maxUp -= 2 // length prefix in pack
-	if maxUp < 16 {
-		conn.Close()
-		return nil, fmt.Errorf("rdns: domain too long for tunnel payloads (max uplink ~%d)", maxUp)
-	}
-	if c.config.CutSize > maxUp {
-		// Recreate FrameMgr with clamped cut size.
-		cut := maxUp
-		fm = NewFrameMgr(cut, c.config.MaxId, c.config.BufferSize, c.config.MaxWin, c.config.ResendTimems, c.config.Compress, c.config.Stat)
-		fm.SetDebugid(id + "-dialer")
-		if c.config.Congestion == "bb" {
-			fm.SetCongestion(&BBCongestion{})
+	cut := min(c.config.CutSize, maxUp)
+	for cut > 0 {
+		probe := &Frame{Type: int32(Frame_DATA), Id: int32(c.config.MaxId), Sendtime: 1<<63 - 1, Resend: true, Acked: true,
+			Data: &FrameData{Type: int32(FrameData_HB), Compress: true, Data: make([]byte, cut)}}
+		if proto.Size(probe) <= maxUp {
+			break
 		}
+		cut--
 	}
+	if cut < 16 {
+		conn.Close()
+		return nil, fmt.Errorf("rdns: domain too long for tunnel payloads (frame budget %d)", maxUp)
+	}
+	fm := NewFrameMgr(cut, c.config.MaxId, c.config.BufferSize, c.config.MaxWin, c.config.ResendTimems, c.config.Compress, c.config.Stat)
+	fm.SetDebugid(id + "-dialer")
+	if c.config.Congestion == "bb" {
+		fm.SetCongestion(&BBCongestion{})
+	}
+	dialer := &rdnsConnDialer{dnsAddr: raddr.String(), conn: conn, fm: fm, rdnsFrameQueue: rdnsFrameQueue{maxFrame: maxUp, pending: make(map[rdnsFrameKey][]byte)}}
 
-	dialer := &rdnsConnDialer{dnsAddr: raddr.String(), conn: conn, fm: fm}
 	u := &RdnsConn{id: id, session: session, config: c.config, dialer: dialer}
 
 	u.dialer.fm.Connect()
@@ -504,24 +498,131 @@ func (c *RdnsConn) Accept() (Conn, error) {
 	return nil, errors.New("listener close")
 }
 
+type rdnsFrameQueue struct {
+	pending  map[rdnsFrameKey][]byte
+	order    []rdnsFrameKey
+	maxFrame int
+	sent     map[int32]bool
+	turn     uint64
+}
+
+type rdnsFrameKey struct {
+	kind, id int32
+	part     int
+}
+
+// queueUplink also splits large packed ACK/REQ ID lists to fit a QNAME.
+func (c *RdnsConn) queueUplink() error { return c.dialer.stage(c.dialer.fm) }
+
+func (d *rdnsFrameQueue) stage(fm *FrameMgr) error {
+	if d.sent == nil {
+		d.sent = make(map[int32]bool)
+	}
+	for id := range d.sent {
+		err, value := fm.sendwin.Get(int(id))
+		if err != nil || value == nil || value.(*Frame).Acked {
+			delete(d.sent, id)
+		}
+	}
+	if d.pending == nil {
+		d.pending = make(map[rdnsFrameKey][]byte)
+	}
+	enqueue := func(key rdnsFrameKey, payload []byte) {
+		if _, ok := d.pending[key]; !ok {
+			d.order = append(d.order, key)
+		}
+		d.pending[key] = payload
+	}
+	frames := fm.GetSendList()
+	for e := frames.Front(); e != nil; e = e.Next() {
+		f := e.Value.(*Frame)
+		key := rdnsFrameKey{kind: f.Type}
+		if f.Type == int32(Frame_DATA) {
+			key.id = f.Id
+		}
+		payload, err := fm.MarshalFrame(f)
+		if err != nil {
+			return err
+		}
+		if len(payload) <= d.maxFrame {
+			enqueue(key, payload)
+			continue
+		}
+		if len(f.Dataid) == 0 {
+			return fmt.Errorf("rdns: serialized frame exceeds QNAME budget: %d > %d", len(payload), d.maxFrame)
+		}
+		// Work on a clone; FrameMgr may still own the original frame.
+		cp := proto.Clone(f).(*Frame)
+		ids := cp.Dataid
+		for len(ids) > 0 {
+			n := len(ids)
+			for {
+				cp.Dataid = ids[:n]
+				payload, err = fm.MarshalFrame(cp)
+				if err != nil {
+					return err
+				}
+				if len(payload) <= d.maxFrame {
+					break
+				}
+				n--
+				if n == 0 {
+					return errors.New("rdns: control frame exceeds QNAME budget")
+				}
+			}
+			enqueue(key, payload)
+			key.part++
+			ids = ids[n:]
+		}
+	}
+	return nil
+}
+
+// pop alternates FIFO service with control/retransmit service. A lost early
+// frame must not wait behind the entire unsent window: that would block both
+// in-order data and heartbeat processing beyond FrameMgr's liveness timeout.
+func (d *rdnsFrameQueue) pop() []byte {
+	if len(d.order) == 0 {
+		return nil
+	}
+	index := 0
+	d.turn++
+	if d.turn%2 == 0 {
+		for i, key := range d.order {
+			if key.kind != int32(Frame_DATA) || d.sent[key.id] {
+				index = i
+				break
+			}
+		}
+	}
+	key := d.order[index]
+	copy(d.order[index:], d.order[index+1:])
+	d.order = d.order[:len(d.order)-1]
+	payload := d.pending[key]
+	delete(d.pending, key)
+	if key.kind == int32(Frame_DATA) {
+		if d.sent == nil {
+			d.sent = make(map[int32]bool)
+		}
+		d.sent[key.id] = true
+	}
+	return payload
+}
+
 func (c *RdnsConn) clientExchange() error {
 	cfg := c.config
 	domain := rdnsNormalizeDomain(cfg.Domain)
 	fm := c.dialer.fm
 
-	// One FrameMgr packet per DNS query keeps QNAMEs under the 255-byte limit.
+	// Marshal before the next Update: FrameMgr owns/recycles DATA pointers.
+	// Coalesce retransmissions in a FIFO of owned bytes, so a slow DNS uplink
+	// cannot grow an unbounded queue or starve control frames behind duplicates.
+	if err := c.queueUplink(); err != nil {
+		return err
+	}
 	var frames [][]byte
-	sendlist := fm.GetSendList()
-	if e := sendlist.Front(); e != nil {
-		f := e.Value.(*Frame)
-		if mb, err := fm.MarshalFrame(f); err == nil {
-			frames = append(frames, mb)
-		}
-		// Re-queue leftovers immediately so the next poll can carry them
-		// without waiting for the ARQ resend timer.
-		for e = e.Next(); e != nil; e = e.Next() {
-			fm.sendFrame(e.Value.(*Frame))
-		}
+	if len(c.dialer.order) > 0 {
+		frames = append(frames, c.dialer.pop())
 	}
 	blob := rdnsPackFrames(frames)
 	sealed, err := rdnsSeal(cfg.PSK, blob)
@@ -530,12 +631,7 @@ func (c *RdnsConn) clientExchange() error {
 	}
 	qname, err := rdnsBuildQName(domain, c.session, sealed)
 	if err != nil {
-		// Fall back to an empty poll so the connection stays alive.
-		sealed, _ = rdnsSeal(cfg.PSK, nil)
-		qname, err = rdnsBuildQName(domain, c.session, sealed)
-		if err != nil {
-			return err
-		}
+		return err
 	}
 
 	msg := new(dns.Msg)
@@ -562,13 +658,24 @@ func (c *RdnsConn) clientExchange() error {
 
 	buf := make([]byte, int(udpSize)+512)
 	_ = c.dialer.conn.SetReadDeadline(time.Now().Add(time.Millisecond * 300))
-	n, err := c.dialer.conn.Read(buf)
-	if err != nil || n <= 0 {
-		return err
-	}
-	resp := new(dns.Msg)
-	if err := resp.Unpack(buf[:n]); err != nil {
-		return err
+	// Drain stale/duplicated datagrams within this exchange's fixed deadline.
+	// A fresh Dial resets DNS IDs; checking the echoed question/session as well
+	// prevents delayed replies from an old session injecting ACKs or stream data.
+	var resp *dns.Msg
+	for {
+		n, err := c.dialer.conn.Read(buf)
+		if err != nil {
+			return err
+		}
+		candidate := new(dns.Msg)
+		if err := candidate.Unpack(buf[:n]); err != nil {
+			continue
+		}
+		if !rdnsMatchesResponse(msg, candidate) {
+			continue
+		}
+		resp = candidate
+		break
 	}
 	down, err := rdnsExtractAnswer(resp, cfg.QueryType)
 	if err != nil || len(down) == 0 {
@@ -589,6 +696,14 @@ func (c *RdnsConn) clientExchange() error {
 		}
 	}
 	return nil
+}
+
+func rdnsMatchesResponse(query, response *dns.Msg) bool {
+	if query == nil || response == nil || !response.Response || response.Id != query.Id || response.Rcode != dns.RcodeSuccess || len(query.Question) != 1 || len(response.Question) != 1 {
+		return false
+	}
+	q, r := query.Question[0], response.Question[0]
+	return strings.EqualFold(q.Name, r.Name) && q.Qtype == r.Qtype && q.Qclass == r.Qclass
 }
 
 func rdnsExtractAnswer(resp *dns.Msg, queryType string) ([]byte, error) {
@@ -713,16 +828,18 @@ func (c *RdnsConn) loopListenerRecv() error {
 		var u *RdnsConn
 		if !loaded {
 			id := common.Guid()
-			fm := NewFrameMgr(c.config.CutSize, c.config.MaxId, c.config.BufferSize, c.config.MaxWin, c.config.ResendTimems, c.config.Compress, c.config.Stat)
+			// A single serialized DATA frame must fit the downlink DNS budget too.
+			fm := NewFrameMgr(min(c.config.CutSize, 900), c.config.MaxId, c.config.BufferSize, c.config.MaxWin, c.config.ResendTimems, c.config.Compress, c.config.Stat)
 			fm.SetDebugid(id + "-listener")
 			if c.config.Congestion == "bb" {
 				fm.SetCongestion(&BBCongestion{})
 			}
 			sonny := &rdnsConnListenerSonny{
-				session:    session,
-				fatherconn: c.listener.listenerconn,
-				listener:   c.listener,
-				fm:         fm,
+				session:        session,
+				fatherconn:     c.listener.listenerconn,
+				listener:       c.listener,
+				fm:             fm,
+				rdnsFrameQueue: rdnsFrameQueue{maxFrame: 950},
 			}
 			sonny.remote.Store(srcaddr)
 			u = &RdnsConn{id: id, session: session, config: c.config, listenersonny: sonny}
@@ -748,7 +865,12 @@ func (c *RdnsConn) loopListenerRecv() error {
 		}
 
 		// Build downlink from FrameMgr send queue / pending.
-		down := c.collectDownlink(u)
+		down, err := c.collectDownlink(u)
+		if err != nil {
+			_ = u.Close()
+			c.writeDNSError(req, srcaddr, dns.RcodeServerFailure)
+			continue
+		}
 		resp := c.buildDNSResponse(req, down)
 		wire, err := resp.Pack()
 		if err != nil {
@@ -787,51 +909,42 @@ func (c *RdnsConn) feedUplink(u *RdnsConn, sealed []byte) {
 	}
 }
 
-func (c *RdnsConn) collectDownlink(u *RdnsConn) []byte {
-	fm := u.listenersonny.fm
+// updateRdnsSonny must be called under fmMu. Every Update's output is
+// serialized before another Update can ACK-pop/recycle FrameMgr DATA pointers.
+func updateRdnsSonny(s *rdnsConnListenerSonny) (bool, error) {
+	active := s.fm.Update()
+	return active, s.stage(s.fm)
+}
 
-	var frames [][]byte
-	u.listenersonny.pendMu.Lock()
-	if len(u.listenersonny.pending) > 0 {
-		frames = append(frames, u.listenersonny.pending...)
-		u.listenersonny.pending = nil
+func (c *RdnsConn) collectDownlink(u *RdnsConn) ([]byte, error) {
+	s := u.listenersonny
+	s.fmMu.Lock()
+	defer s.fmMu.Unlock()
+	if _, err := updateRdnsSonny(s); err != nil {
+		return nil, err
 	}
-	u.listenersonny.pendMu.Unlock()
-
-	u.listenersonny.fmMu.Lock()
-	fm.Update()
-	sendlist := fm.GetSendList()
-	for e := sendlist.Front(); e != nil; e = e.Next() {
-		f := e.Value.(*Frame)
-		mb, err := fm.MarshalFrame(f)
-		if err != nil {
-			continue
+	var frames [][]byte
+	size := 0
+	// Leave overflow in the owned FIFO, rather than losing staged frames or
+	// retaining FrameMgr's pooled objects across Update calls.
+	for len(s.order) > 0 && len(frames) < 8 {
+		// Conservative bound; all pending frames fit individually. Keeping one
+		// response under 950 bytes avoids UDP fragmentation for default cuts.
+		maxNext := 0
+		for _, payload := range s.pending {
+			if len(payload) > maxNext {
+				maxNext = len(payload)
+			}
 		}
-		frames = append(frames, mb)
-		if len(frames) >= 8 {
+		if size+2+maxNext > 950 && len(frames) > 0 {
 			break
 		}
+		payload := s.pop()
+		size += 2 + len(payload)
+		frames = append(frames, payload)
 	}
-	u.listenersonny.fmMu.Unlock()
 
-	blob := rdnsPackFrames(frames)
-	sealed, err := rdnsSeal(c.config.PSK, blob)
-	if err != nil {
-		return nil
-	}
-	// Keep response reasonably small for UDP DNS.
-	maxDown := 1000
-	if len(sealed) > maxDown && len(frames) > 1 {
-		// Put overflow back as pending for next poll.
-		keep := frames[:1]
-		rest := frames[1:]
-		u.listenersonny.pendMu.Lock()
-		u.listenersonny.pending = append(rest, u.listenersonny.pending...)
-		u.listenersonny.pendMu.Unlock()
-		blob = rdnsPackFrames(keep)
-		sealed, _ = rdnsSeal(c.config.PSK, blob)
-	}
-	return sealed
+	return rdnsSeal(c.config.PSK, rdnsPackFrames(frames))
 }
 
 func (c *RdnsConn) buildDNSResponse(req *dns.Msg, payload []byte) *dns.Msg {
@@ -894,12 +1007,17 @@ func (c *RdnsConn) accept(u *RdnsConn) error {
 	for !c.listener.wg.IsExit() {
 		u.listenersonny.fmMu.Lock()
 		connected := u.listenersonny.fm.IsConnected()
+		var stageErr error
 		if !connected {
 			// Downlink frames produced here wait in GetSendList until the next
 			// client poll picks them up via collectDownlink.
-			u.listenersonny.fm.Update()
+			_, stageErr = updateRdnsSonny(u.listenersonny)
 		}
 		u.listenersonny.fmMu.Unlock()
+		if stageErr != nil {
+			_ = u.Close()
+			return stageErr
+		}
 		if connected {
 			done = true
 			break
@@ -938,10 +1056,13 @@ func (c *RdnsConn) updateListenerSonny() error {
 	reason := ""
 	for !wg.IsExit() {
 		c.listenersonny.fmMu.Lock()
-		active := fm.Update()
+		active, stageErr := updateRdnsSonny(c.listenersonny)
 		hb := fm.IsHBTimeout()
 		remoteClosed := fm.IsRemoteClosed()
 		c.listenersonny.fmMu.Unlock()
+		if stageErr != nil {
+			return stageErr
+		}
 		if hb {
 			reason = "HBTimeout"
 			break
@@ -962,9 +1083,12 @@ func (c *RdnsConn) updateListenerSonny() error {
 	startCloseTime := time.Now()
 	for !wg.IsExit() {
 		c.listenersonny.fmMu.Lock()
-		fm.Update()
+		_, stageErr := updateRdnsSonny(c.listenersonny)
 		remoteClosed := fm.IsRemoteClosed()
 		c.listenersonny.fmMu.Unlock()
+		if stageErr != nil {
+			return stageErr
+		}
 		if time.Since(startCloseTime) > time.Millisecond*time.Duration(c.config.CloseTimeoutMs) {
 			break
 		}
