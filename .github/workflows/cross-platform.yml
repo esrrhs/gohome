@@ -1,0 +1,93 @@
+name: Cross Platform
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    # #29 supplies WSS + RDNS weak-link coverage; also test the stacked PR.
+    branches: [master, feat/wss-rdns-weaknet-protocol-ci]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: portable (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-amd64
+            target: windows/amd64
+            runner: windows-latest
+          - platform: macos-arm64
+            target: darwin/arm64
+            runner: macos-latest
+          - platform: linux-arm64
+            target: linux/arm64
+            runner: ubuntu-24.04-arm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.3'
+      - name: Native toolchain and race prerequisites
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          go version
+          go env GOOS GOARCH CGO_ENABLED CC
+          test "$(go env GOOS)/$(go env GOARCH)" = "$EXPECTED_TARGET"
+          # All three native targets officially support -race (including ARM64).
+          # Windows needs modern MinGW-w64; never silently fall back to non-race.
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            export PATH="/c/mingw64/bin:$PATH"
+            echo 'C:/mingw64/bin' >> "$GITHUB_PATH"
+            gcc --version
+            lib=$(gcc --print-file-name=libsynchronization.a)
+            test "$lib" != libsynchronization.a && test -f "$lib"
+          fi
+      - name: Build all packages natively
+        run: go build ./...
+      # No raw ICMP, Linux process-group tests, setcap/modprobe or kernel netem.
+      # scripts/test-portable.py verifies every selected package/protocol has real
+      # passing tests and rejects ANY skipped test. Full coverage, race-slow and
+      # privileged RICMP remain in go.yml / protocols.yml on Linux AMD64.
+      - name: Portable units and eight unprivileged protocols (race)
+        env:
+          CGO_ENABLED: '1'
+        run: python scripts/test-portable.py
+
+  build:
+    name: build (${{ matrix.goos }}-${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: linux
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.3'
+      - name: Cross-build all packages (no emulation or skipped test binaries)
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: go build ./...
