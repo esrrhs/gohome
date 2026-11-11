@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	github.com/OneOfOne/xxhash v1.2.8
+	github.com/coder/websocket v1.8.15
 	github.com/google/uuid v1.6.0
 	github.com/klauspost/compress v1.20.3
 	github.com/miekg/dns v1.1.73

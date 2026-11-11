@@ -2,6 +2,9 @@ package network
 
 import (
 	"bytes"
+	"github.com/miekg/dns"
+	"google.golang.org/protobuf/proto"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -321,5 +324,114 @@ func TestRdnsNULLQueryType(t *testing.T) {
 	}
 	if !bytes.Equal(got, msg) {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// FrameMgr may recycle DATA pointers on its next Update. RDNS must own bytes,
+// deduplicate staged retransmits, and split ACK/REQ ID lists for tiny QNAMEs.
+func TestRdnsUplinkQueueOwnershipAndBudget(t *testing.T) {
+	fm := NewFrameMgr(32, 100000, 4096, 64, 200, 0, 0)
+	c := &RdnsConn{dialer: &rdnsConnDialer{fm: fm, rdnsFrameQueue: rdnsFrameQueue{maxFrame: 64, pending: make(map[rdnsFrameKey][]byte)}}}
+	f := &Frame{Type: int32(Frame_DATA), Id: 7, Data: &FrameData{Data: []byte("original payload")}}
+	fm.sendFrame(f)
+	fm.sendFrame(f)
+	if err := c.queueUplink(); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.dialer.order) != 1 {
+		t.Fatalf("duplicate DATA staged %d times", len(c.dialer.order))
+	}
+	f.Data.Data[0] = 'X'
+	var got Frame
+	if err := proto.Unmarshal(c.dialer.pending[c.dialer.order[0]], &got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got.Data.Data) != "original payload" {
+		t.Fatal("queue retained pooled frame memory")
+	}
+	ids := make([]int32, 300)
+	for i := range ids {
+		ids[i] = int32(i + 1000)
+	}
+	for _, kind := range []Frame_TYPE{Frame_ACK, Frame_REQ} {
+		fm.sendFrame(&Frame{Type: int32(kind), Id: 99, Dataid: ids})
+		if err := c.queueUplink(); err != nil {
+			t.Fatal(err)
+		}
+		var all []int32
+		for _, key := range c.dialer.order {
+			if key.kind != int32(kind) {
+				continue
+			}
+			wire := c.dialer.pending[key]
+			if len(wire) > 64 {
+				t.Fatal("oversized frame")
+			}
+			var part Frame
+			if err := proto.Unmarshal(wire, &part); err != nil {
+				t.Fatal(err)
+			}
+			all = append(all, part.Dataid...)
+		}
+		if !reflect.DeepEqual(ids, all) {
+			t.Fatal("split control IDs lost or reordered")
+		}
+	}
+}
+
+// DNS IDs repeat on redial. A response for another session must never feed
+// FrameMgr, even when it has a valid PSK and happens to match the current ID.
+func TestRdnsResponseSessionValidation(t *testing.T) {
+	query := new(dns.Msg)
+	query.SetQuestion("payload.s.current.rdns.test.", dns.TypeTXT)
+	response := new(dns.Msg)
+	response.SetReply(query)
+	if !rdnsMatchesResponse(query, response) {
+		t.Fatal("valid reply rejected")
+	}
+	for _, name := range []string{"id", "session", "querytype", "queryclass", "rcode", "notresponse", "noquestion"} {
+		t.Run(name, func(t *testing.T) {
+			bad := response.Copy()
+			switch name {
+			case "id":
+				bad.Id++
+			case "session":
+				bad.Question[0].Name = "payload.s.previous.rdns.test."
+			case "querytype":
+				bad.Question[0].Qtype = dns.TypeNULL
+			case "queryclass":
+				bad.Question[0].Qclass = dns.ClassCHAOS
+			case "rcode":
+				bad.Rcode = dns.RcodeRefused
+			case "notresponse":
+				bad.Response = false
+			case "noquestion":
+				bad.Question = nil
+			}
+			if rdnsMatchesResponse(query, bad) {
+				t.Fatal("mismatched DNS reply accepted")
+			}
+		})
+	}
+}
+
+func TestRdnsUplinkRetransmitFairness(t *testing.T) {
+	q := rdnsFrameQueue{pending: make(map[rdnsFrameKey][]byte), sent: map[int32]bool{1: true}}
+	for id := int32(2); id <= 100; id++ {
+		key := rdnsFrameKey{kind: int32(Frame_DATA), id: id}
+		q.order = append(q.order, key)
+		q.pending[key] = []byte{byte(id)}
+	}
+	lost := rdnsFrameKey{kind: int32(Frame_DATA), id: 1}
+	q.order = append(q.order, lost)
+	q.pending[lost] = []byte{1}
+	if got := q.pop(); !bytes.Equal(got, []byte{2}) {
+		t.Fatalf("new data starved: %v", got)
+	}
+	if got := q.pop(); !bytes.Equal(got, []byte{1}) {
+		t.Fatalf("retransmit stuck behind window: %v", got)
+	}
+	if got := q.pop(); !bytes.Equal(got, []byte{3}) {
+		t.Fatalf("FIFO service lost: %v", got)
 	}
 }
