@@ -14,6 +14,7 @@
   - [3. Bandwidth-Based Congestion Control (`BBCongestion`)](#3-bandwidth-based-congestion-control-bbcongestion)
   - [4. SOCKS5 Proxy Implementation](#4-socks5-proxy-implementation)
 - [Supported Protocols](#supported-protocols)
+- [CI platform coverage](#ci-platform-coverage)
 - [Usage Examples](#usage-examples)
   - [Echo Server & Client (KCP / QUIC / TCP / RUDP)](#echo-server--client-kcp--quic--tcp--rudp)
   - [SOCKS5 Server with Password Auth](#socks5-server-with-password-auth)
@@ -87,6 +88,37 @@ Standard-compliant implementation of **RFC 1928** and **RFC 1929**:
 | **`wss`** | Reliable | Verified TLS WebSocket byte stream; configurable CA, certificate, hostname and path. [API and runnable example](#wss-byte-stream-transport). | TLS / TCP |
 
 ---
+
+## CI platform coverage
+
+The cross-platform gate is a bounded portability check, not a claim that every
+privileged or kernel-dependent feature works on every OS. Native jobs use `-race`
+on all three targets (supported by Go); selectors must run real tests and any
+skipped test fails the entry. Matrix jobs use `fail-fast: false`.
+
+| Platform / runner | TCP, UDP, RUDP, KCP, QUIC | RHTTP (H1/H2C) | WSS | RDNS | RICMP / privileges |
+|---|---|---|---|---|---|
+| Linux AMD64 / `ubuntu-latest` | Race integration | Race integration | All WSS tests | All RDNS tests incl. weak links | Privileged IPv4/IPv6 + ping-dgram; `CAP_NET_RAW` via `setcap` (sudo fallback), `ping_group_range` |
+| Windows AMD64 / `windows-latest` | Native race integration | Native race integration | All WSS tests (race) | All RDNS tests incl. weak links (race) | Explicitly omitted; no raw-socket coverage promised |
+| macOS ARM64 / `macos-latest` | Native race integration | Native race integration | All WSS tests (race) | All RDNS tests incl. weak links (race) | Explicitly omitted; no Linux `setcap`/`sysctl` setup |
+| Linux ARM64 / `ubuntu-24.04-arm` | Native race integration | Native race integration | All WSS tests (race) | All RDNS tests incl. weak links (race) | Explicitly omitted; privileged coverage stays on Linux AMD64 |
+
+Loopback integrations use ephemeral unprivileged TCP/UDP ports; RDNS uses a local
+scripted loss/reorder/duplicate/delay relay, not kernel netem. Cross-platform jobs
+do not invoke `modprobe`, `setcap`, or Linux-only process-group tests. Windows
+shell cancellation kills the direct child using Go's default `CommandContext`
+behavior; Unix process-group/descendant cancellation is not provided on Windows.
+
+Native jobs build **all packages**, race-test `list`, `lru`, `pool`, `dns/cache`,
+`dns/matcher`, `dns/fakeip`, and selected `thread` lifecycle tests, then run eight
+protocol entries independently. They do not duplicate the expensive complete
+network/crypto suite. A cheap Linux-hosted `CGO_ENABLED=0` build matrix covers
+Windows AMD64, macOS AMD64/ARM64, and Linux ARM64; these are builds, not runtime
+coverage. Existing Linux AMD64 lint, full tests/coverage, race-fast/race-slow,
+protocol checks, nightly fuzzing, and s390x Big Endian checks remain in place.
+
+Runner labels: [GitHub-hosted runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+Race support: [Go race detector requirements](https://go.dev/doc/articles/race_detector#Requirements).
 
 ## Usage Examples
 

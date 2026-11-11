@@ -406,3 +406,27 @@ FrameMgr ARQ 可在存活会话内恢复短暂丢包，但不提供自动重连�
 RDNS 条目包含弱网回归；WSS 使用本地生成的测试证书。每个条目都要求实际运行并通过
 测试，匹配为空或有跳过测试时均失败。原始 ICMP 使用 `CAP_NET_RAW` 运行，覆盖
 IPv4/IPv6。完整测试及覆盖率、静态检查、完整竞态检测和大端检查仍由独立任务执行。
+
+## CI 跨平台验证
+
+| 平台 / Runner | TCP / UDP / RUDP / KCP / QUIC | RHTTP H1/H2C | WSS / RDNS | RICMP 权限 |
+|---|---|---|---|---|
+| Linux AMD64 / `ubuntu-latest` | race 集成测试 | race 集成测试 | 全部专项测试（含 RDNS 弱网） | 保留特权 IPv4/IPv6、ping-dgram；`CAP_NET_RAW`，`setcap` 失败则 sudo，并设置 `ping_group_range` |
+| Windows AMD64 / `windows-latest` | 原生 race 集成测试 | 原生 race 集成测试 | 全部专项 race 测试（含 RDNS 弱网） | 明确不运行 raw ICMP，不承诺该平台特权覆盖 |
+| macOS ARM64 / `macos-latest` | 原生 race 集成测试 | 原生 race 集成测试 | 全部专项 race 测试（含 RDNS 弱网） | 明确不运行 raw ICMP，不执行 Linux 权限配置 |
+| Linux ARM64 / `ubuntu-24.04-arm` | 原生 race 集成测试 | 原生 race 集成测试 | 全部专项 race 测试（含 RDNS 弱网） | 明确不运行；特权覆盖保留在 Linux AMD64 |
+
+新矩阵 `fail-fast: false`；每个条目必须有真实通过测试，匹配为空或有 skip 均失败。
+新原生任务构建全部包，并运行 `list`、`lru`、`pool`、`dns/cache`、`dns/matcher`、
+`dns/fakeip` 全部单测及 `thread` 生命周期专项（均含 race），不复制昂贵的完整
+network/crypto 测试。额外交叉编译 Windows AMD64、macOS AMD64/ARM64、Linux ARM64
+（`CGO_ENABLED=0`）；交叉编译不代表运行时覆盖。
+
+八个无特权协议使用本机高位临时端口。RDNS 弱网由本地确定性 UDP 中继实现，不依赖
+内核 netem；新任务不运行 `modprobe`、`setcap` 或 Linux 进程组专项。Windows shell
+超时使用 Go `CommandContext` 默认的直接子进程终止，不提供 Unix 进程组/子孙进程终止语义。
+原有 Linux lint、完整测试/覆盖率、race-fast/race-slow、协议矩阵、夜间 fuzz 和 s390x
+Big Endian 均保留。此矩阵验证适用测试，不保证所有平台具备完整特权功能。
+
+[Runner 官方说明](https://docs.github.com/en/actions/reference/runners/github-hosted-runners) ·
+[Go race 支持平台](https://go.dev/doc/articles/race_detector#Requirements)

@@ -7,7 +7,7 @@ on:
   push:
     branches: [ "master" ]
   pull_request:
-    branches: [ "master" ]
+    branches: [ "master", "feat/wss-rdns-weaknet-protocol-ci" ]
 
 jobs:
   # Fast static gates — gofmt / vet / lint run in parallel with tests.
