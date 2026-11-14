@@ -12,7 +12,7 @@ require (
 	github.com/quic-go/quic-go v0.65.0
 	github.com/xtaci/kcp-go v5.4.20+incompatible
 	golang.org/x/net v0.62.0
-	golang.org/x/sync v0.24.0
+	golang.org/x/sync v0.25.0
 	golang.org/x/sys v0.49.0
 	google.golang.org/protobuf v1.36.12
 )
