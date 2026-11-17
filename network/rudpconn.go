@@ -53,8 +53,8 @@ func DefaultRudpConfig() *RudpConfig {
 		MaxPacketSize:      2048,
 		CutSize:            1200,
 		MaxId:              100000,
-		BufferSize:         4 * 1024 * 1024,
-		MaxWin:             4000,
+		BufferSize:         8 * 1024 * 1024,
+		MaxWin:             12000,
 		ResendTimems:       200,
 		Compress:           0,
 		Stat:               0,
@@ -63,7 +63,7 @@ func DefaultRudpConfig() *RudpConfig {
 		CloseWaitTimeoutMs: 5000,
 		AcceptChanLen:      128,
 		Congestion:         "bb",
-		BatchSendPkgs:      64,
+		BatchSendPkgs:      128,
 		Key:                "",
 	}
 }
@@ -505,10 +505,21 @@ func (c *RudpConn) loopListenerRecv() error {
 	c.checkConfig()
 
 	buf := make([]byte, c.config.MaxPacketSize)
+	lastCleanTime := time.Now()
 	for !c.listener.wg.IsExit() {
 		c.listener.listenerconn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
 		n, srcaddr, err := c.listener.listenerconn.ReadFromUDP(buf)
 		if err != nil {
+			if time.Since(lastCleanTime) > time.Second {
+				lastCleanTime = time.Now()
+				c.listener.sonny.Range(func(key, value interface{}) bool {
+					u := value.(*RudpConn)
+					if u.isclose.Load() {
+						c.listener.sonny.Delete(key)
+					}
+					return true
+				})
+			}
 			continue
 		}
 
@@ -567,14 +578,17 @@ func (c *RudpConn) loopListenerRecv() error {
 			}
 		}
 
-		c.listener.sonny.Range(func(key, value interface{}) bool {
-			u := value.(*RudpConn)
-			if u.isclose.Load() {
-				c.listener.sonny.Delete(key)
-				//loggo.Debug("delete sonny from map %s", u.Info())
-			}
-			return true
-		})
+		if time.Since(lastCleanTime) > time.Second {
+			lastCleanTime = time.Now()
+			c.listener.sonny.Range(func(key, value interface{}) bool {
+				u := value.(*RudpConn)
+				if u.isclose.Load() {
+					c.listener.sonny.Delete(key)
+					//loggo.Debug("delete sonny from map %s", u.Info())
+				}
+				return true
+			})
+		}
 	}
 	return nil
 }
@@ -750,9 +764,17 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 	// sockaddr from its real address family, so WriteBatch works for
 	// AF_INET6 sockets/destinations on Linux too (covered by the
 	// TestIPv6_RUDP_Loopback CI case).
+	batchCap := c.config.BatchSendPkgs
+	if batchCap < 1 {
+		batchCap = 1
+	}
 	pconn := ipv4.NewPacketConn(conn)
-	// 预分配消息数组，避免循环内分配
-	msgs := make([]ipv4.Message, 0, c.config.BatchSendPkgs)
+	// 预分配消息与序列化缓冲数组，避免热路径每帧堆分配
+	msgs := make([]ipv4.Message, 0, batchCap)
+	batchBufs := make([][]byte, batchCap)
+	for i := range batchBufs {
+		batchBufs[i] = make([]byte, 0, c.config.MaxPacketSize)
+	}
 	count := 0
 
 	for !wg.IsExit() {
@@ -762,12 +784,17 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 		// send udp
 		sendframes := fm.GetSendFrames()
 		for i, f := range sendframes {
-			mb, err := fm.MarshalFrame(f)
+			bufIdx := 0
+			if runtime.GOOS == "linux" {
+				bufIdx = count
+			}
+			mb, err := fm.MarshalFrameAppend(batchBufs[bufIdx][:0], f)
 			if err != nil {
 				//loggo.Error("MarshalFrame fail %s", err)
 				reason = "MarshalFrame"
 				break
 			}
+			batchBufs[bufIdx] = mb
 			rudpObfuscate(mb, c.config.Key)
 
 			if runtime.GOOS != "linux" {
@@ -791,7 +818,7 @@ func (c *RudpConn) update_rudp(wg *thread.Group, fm *FrameMgr, conn *net.UDPConn
 				count++
 
 				// 如果积攒够了一批，或者列表到头了，就发送
-				if count >= c.config.BatchSendPkgs || i == len(sendframes)-1 {
+				if count >= batchCap || i == len(sendframes)-1 {
 					conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100))
 
 					// WriteBatch 会调用底层的 sendmmsg

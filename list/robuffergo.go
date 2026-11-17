@@ -232,6 +232,35 @@ func (b *ROBuffergo) FrontInterFromBegin() *ROBuffergoInter {
 	return bi.Next()
 }
 
+// InterAt returns an iterator positioned at the filled slot for id, or nil if
+// id is outside the window or empty. Calling Next() walks forward until the
+// ring wraps back to begin.
+func (b *ROBuffergo) InterAt(id int) *ROBuffergoInter {
+	if b.begin >= len(b.flag) || b.size <= 0 {
+		return nil
+	}
+	cur := b.id[b.begin]
+	if id < 0 || id >= b.maxid {
+		return nil
+	}
+	var index int
+	if id < cur {
+		index = (b.begin + (id + b.maxid - cur)) % b.len
+	} else {
+		index = (b.begin + (id - cur)) % b.len
+	}
+	if b.id[index] != id || !b.flag[index] || b.buffer[index] == nil {
+		return nil
+	}
+	return &ROBuffergoInter{
+		startindex: b.begin,
+		index:      index,
+		Value:      b.buffer[index],
+		id:         b.id[index],
+		b:          b,
+	}
+}
+
 // Id returns the frame id carried by the slot under the iterator.
 func (bi *ROBuffergoInter) Id() int {
 	return bi.id
