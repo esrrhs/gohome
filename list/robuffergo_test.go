@@ -1,6 +1,7 @@
 package list
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -328,5 +329,106 @@ func isIdOld(recvid int, windowsize int, id int, maxid int) bool {
 		return id >= begin && id < end
 	} else {
 		return (id >= begin && id < maxid) || (id >= 0 && id < end)
+	}
+}
+
+// 已被 ACK 弹出的槽位会把自己的环 id 改写为 cur+len-1，此时旧 id 的
+// Get 必须报告 ErrOutOfWin，而不是命中仍在使用的槽位后报内部不一致。
+// 线上表现就是 "set id error 21 20021 21" 这类噪声日志。
+func TestGetStaleIdReturnsOutOfWin(t *testing.T) {
+	const win, maxid = 20000, 1000000
+	b := NewROBuffer(win, 0, maxid)
+	for id := 0; id <= 21; id++ {
+		if err := b.Set(id, id); err != nil {
+			t.Fatalf("set %d: %v", id, err)
+		}
+	}
+	for i := 0; i <= 21; i++ {
+		if err := b.PopFront(); err != nil {
+			t.Fatalf("pop %d: %v", i, err)
+		}
+	}
+
+	err, v := b.Get(21)
+	if !errors.Is(err, ErrOutOfWin) {
+		t.Fatalf("stale get want ErrOutOfWin, got err=%v value=%v", err, v)
+	}
+	if v != nil {
+		t.Fatalf("stale get want nil value, got %v", v)
+	}
+
+	// 窗口前端 22 仍在窗口内且为空槽：应当是 nil,nil。
+	err, v = b.Get(22)
+	if err != nil || v != nil {
+		t.Fatalf("front slot want (nil,nil), got err=%v value=%v", err, v)
+	}
+}
+
+// 超前到窗口末端之外的 id 同样属于越界。
+func TestGetAheadIdReturnsOutOfWin(t *testing.T) {
+	b := NewROBuffer(4, 0, 100)
+	if err := b.Set(0, 0); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	if err, _ := b.Get(4); !errors.Is(err, ErrOutOfWin) {
+		t.Fatalf("ahead get want ErrOutOfWin, got %v", err)
+	}
+	// 窗口内的空槽不算越界。
+	if err, v := b.Get(3); err != nil || v != nil {
+		t.Fatalf("in-win empty slot want (nil,nil), got err=%v value=%v", err, v)
+	}
+}
+
+// Set 只允许写入窗口内 id，落后于前端时同样报 ErrOutOfWin。
+func TestSetBehindReturnsOutOfWin(t *testing.T) {
+	b := NewROBuffer(4, 0, 100)
+	for id := 0; id < 4; id++ {
+		if err := b.Set(id, id); err != nil {
+			t.Fatalf("set %d: %v", id, err)
+		}
+	}
+	if err := b.PopFront(); err != nil {
+		t.Fatalf("pop: %v", err)
+	}
+	if err := b.Set(0, 0); !errors.Is(err, ErrOutOfWin) {
+		t.Fatalf("set behind want ErrOutOfWin, got %v", err)
+	}
+	if err := b.Set(4, 4); err != nil {
+		t.Fatalf("set front+len-1 should be in win: %v", err)
+	}
+}
+
+// 小 maxid 下窗口跨过环回点后，窗口内 id 仍可读写，窗口外仍报越界。
+func TestWindowWrapAroundBoundary(t *testing.T) {
+	const maxid = 10
+	b := NewROBuffer(4, 0, maxid)
+	for id := 0; id < 8; id++ {
+		if err := b.Set(id, id); err != nil {
+			t.Fatalf("set %d: %v", id, err)
+		}
+		if err := b.PopFront(); err != nil {
+			t.Fatalf("pop %d: %v", id, err)
+		}
+	}
+
+	// 窗口覆盖 8,9,0,1
+	for _, id := range []int{8, 9, 0, 1} {
+		if err := b.Set(id, id*10); err != nil {
+			t.Fatalf("set in win %d: %v", id, err)
+		}
+	}
+	for _, id := range []int{8, 9, 0, 1} {
+		err, v := b.Get(id)
+		if err != nil || v != id*10 {
+			t.Fatalf("get in win %d: err=%v value=%v", id, err, v)
+		}
+	}
+
+	if err, _ := b.Get(7); !errors.Is(err, ErrOutOfWin) {
+		t.Fatalf("stale across wrap want ErrOutOfWin, got %v", err)
+	}
+	if err, _ := b.Get(2); !errors.Is(err, ErrOutOfWin) {
+		t.Fatalf("ahead across wrap want ErrOutOfWin, got %v", err)
 	}
 }
