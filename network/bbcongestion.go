@@ -43,7 +43,7 @@ const (
 	bbc_maxfly_compare = float64(1.5)
 )
 
-var prop_seq = []float64{1, 1, 1.5, 1}
+var prop_seq = []float64{1.20, 1.05, 1.15, 1.05}
 
 type BBCongestion struct {
 	status        int
@@ -52,6 +52,7 @@ type BBCongestion struct {
 	lastflyeddata int
 	flyingdata    int
 	totalsent     int
+	resendsSent   int
 	rateflywin    *list.Rlistgo
 	flyedwin      *list.Rlistgo
 	propindex     int
@@ -60,20 +61,23 @@ type BBCongestion struct {
 	lastflyedwin  int
 	rtt           time.Duration
 	minRtt        time.Duration
+	minRttTime    time.Time
 	lastPaceTime  time.Time
 	paceTokens    float64
 	pacingRate    float64
 }
 
 func (bb *BBCongestion) Init() {
+	now := time.Now()
 	bb.status = bbc_status_init
 	bb.maxfly = 1024 * 1024
 	bb.rateflywin = list.NewRList(bbc_win)
 	bb.flyedwin = list.NewRList(bbc_win)
-	bb.last = time.Now()
+	bb.last = now
 	bb.rtt = 0
 	bb.minRtt = 0
-	bb.lastPaceTime = time.Now()
+	bb.minRttTime = now
+	bb.lastPaceTime = now
 	bb.paceTokens = float64(64 * 1024)
 	bb.pacingRate = 0
 }
@@ -81,13 +85,17 @@ func (bb *BBCongestion) Init() {
 func (bb *BBCongestion) SetRtt(rtt time.Duration) {
 	if rtt > 0 {
 		bb.rtt = rtt
-		if bb.minRtt == 0 || (rtt < bb.minRtt && rtt > time.Millisecond*5) {
+		now := time.Now()
+		if bb.minRtt == 0 || (rtt < bb.minRtt && rtt > time.Millisecond*5) || now.Sub(bb.minRttTime) > 30*time.Second {
 			bb.minRtt = rtt
+			bb.minRttTime = now
 		}
 		if bb.pacingRate == 0 && bb.maxfly > 0 {
-			initialRate := float64(bb.maxfly) / bb.rtt.Seconds()
+			initialRate := float64(1024*1024) / bb.rtt.Seconds()
 			if initialRate < 5*1024*1024 {
 				initialRate = 5 * 1024 * 1024
+			} else if initialRate > 10*1024*1024 {
+				initialRate = 10 * 1024 * 1024
 			}
 			bb.pacingRate = initialRate
 			if bb.maxfly < 4*1024*1024 {
@@ -152,19 +160,40 @@ func (bb *BBCongestion) CanSendResend(id int, size int) bool {
 			}
 		}
 		// Retransmissions are prioritized to unblock head-of-line blocking:
-		// allow overdraft down to -128KB. Subsequent new packets will wait until
-		// tokens regenerate.
+		// allow overdraft down to -128KB, while sharing the total wire pacing budget.
 		if bb.paceTokens < -float64(128*1024) {
 			return false
 		}
 		bb.paceTokens -= float64(size)
 	}
+	bb.resendsSent += size
 	return true
 }
 
 func (bb *BBCongestion) Update() {
+	now := time.Now()
+	elapsed := now.Sub(bb.last).Seconds()
+	bb.last = now
+	if elapsed < 0.2 {
+		elapsed = 0.2
+	} else if elapsed > 5.0 {
+		elapsed = 5.0
+	}
 
 	if bb.flyeddata <= 0 {
+		bb.flyingdata = 0
+		bb.totalsent = 0
+		bb.resendsSent = 0
+		return
+	}
+
+	// Skip idle/keepalive intervals so bursty traffic (e.g. video chunk pauses)
+	// does not decay deliveryRate and pacingRate back down to the floor.
+	if bb.totalsent < 128*1024 && bb.flyeddata < 128*1024 {
+		bb.flyeddata = 0
+		bb.flyingdata = 0
+		bb.totalsent = 0
+		bb.resendsSent = 0
 		return
 	}
 
@@ -175,6 +204,8 @@ func (bb *BBCongestion) Update() {
 	currate := float64(sent) / float64(bb.flyeddata)
 	if currate < 1 {
 		currate = 1
+	} else if currate > 4 {
+		currate = 4
 	}
 
 	if bb.rateflywin.Full() {
@@ -198,9 +229,20 @@ func (bb *BBCongestion) Update() {
 		avgRate = sumRate / float64(cntRate)
 	}
 
-	effectiveFlyed := bb.flyeddata
-	if sent > 0 && effectiveFlyed > int(float64(sent)*1.15) {
-		effectiveFlyed = int(float64(sent) * 1.15)
+	// Loss compensation factor (sent/acked), bounded so a transient ACK
+	// outage cannot blow the pacing rate up.
+	lossComp := avgRate
+	if lossComp < 1.0 {
+		lossComp = 1.0
+	} else if lossComp > 1.8 {
+		lossComp = 1.8
+	}
+
+	flyedRate := int(float64(bb.flyeddata) / elapsed)
+	sentRate := int(float64(sent) / elapsed)
+	effectiveFlyed := flyedRate
+	if sentRate > 0 && effectiveFlyed > int(float64(sentRate)*1.15) {
+		effectiveFlyed = int(float64(sentRate) * 1.15)
 	}
 
 	if bb.flyedwin.Full() {
@@ -217,15 +259,18 @@ func (bb *BBCongestion) Update() {
 	}
 
 	if bb.status == bbc_status_init {
-		growFactor := 1.35
+		growFactor := 1.40
 		shouldExit := false
 		if bb.rtt > 0 {
 			queueDelay := time.Duration(0)
 			if bb.minRtt > 0 && bb.rtt > bb.minRtt {
 				queueDelay = bb.rtt - bb.minRtt
 			}
-			plateau := bb.lastflyeddata > 0 && float64(bb.flyeddata) < float64(bb.lastflyeddata)*1.03 && bb.flyeddata > 5*1024*1024
-			severe := avgRate > 1.25 || queueDelay > 90*time.Millisecond
+			// Loss is NOT a congestion signal here: on lossy cross-ocean paths
+			// random loss of 15-30% is independent of send rate. Only RTT
+			// inflation (standing queue) or a delivery plateau ends startup.
+			plateau := bb.lastflyeddata > 0 && float64(flyedRate) < float64(bb.lastflyeddata)*1.03 && flyedRate > 6*1024*1024 && queueDelay > 30*time.Millisecond
+			severe := queueDelay > 100*time.Millisecond
 			shouldExit = severe || plateau
 		} else {
 			growFactor = bbc_maxfly_grow
@@ -235,40 +280,60 @@ func (bb *BBCongestion) Update() {
 		if shouldExit {
 			bb.status = bbc_status_prop
 			if bb.rtt > 0 {
-				deliveryRate := float64(bb.flyeddata)
+				// Wire rate = acked rate scaled back up by the observed loss
+				// ratio, so random loss does not shrink the pacing rate.
+				deliveryRate := float64(flyedRate) * lossComp
+				if deliveryRate < 2*1024*1024 {
+					deliveryRate = 2 * 1024 * 1024
+				}
 				bdp := int(deliveryRate * bb.rtt.Seconds())
 				if bdp < 1024*1024 {
 					bdp = 1024 * 1024
 				}
-				bb.maxfly = int(float64(bdp) * 2.5)
+				bb.maxfly = int(float64(bdp) * 3.0)
 				if bb.maxfly < 4*1024*1024 {
 					bb.maxfly = 4 * 1024 * 1024
 				}
-				bb.pacingRate = deliveryRate
+				bb.pacingRate = deliveryRate * 1.05
 			} else {
 				oldmaxfly := bb.maxfly
 				bb.maxfly = int(float64(oldmaxfly) / growFactor)
 			}
-			//loggo.Debug("bbc_status_init flyeddata %d maxfly %d change", bb.flyeddata, bb.maxfly)
 		} else {
 			oldmaxfly := bb.maxfly
 			bb.maxfly = int(float64(oldmaxfly) * growFactor)
 			if bb.rtt > 0 {
-				bb.pacingRate = float64(bb.maxfly) / bb.rtt.Seconds()
-				if bb.maxfly < 4*1024*1024 {
-					bb.maxfly = 4 * 1024 * 1024
+				if bb.pacingRate <= 0 {
+					bb.pacingRate = 5 * 1024 * 1024
+				} else {
+					nextRate := bb.pacingRate * growFactor
+					if capRate := float64(flyedRate) * 1.6; capRate > 5*1024*1024 && nextRate > capRate {
+						nextRate = capRate
+					}
+					bb.pacingRate = nextRate
+				}
+				minFly := int(bb.pacingRate * bb.rtt.Seconds() * 3.0)
+				if minFly < 4*1024*1024 {
+					minFly = 4 * 1024 * 1024
+				}
+				if bb.maxfly < minFly {
+					bb.maxfly = minFly
 				}
 			}
-			//loggo.Debug("bbc_status_init grow flyeddata %d oldmaxfly %d maxfly %d", bb.flyeddata, oldmaxfly, bb.maxfly)
 		}
-		bb.lastflyeddata = bb.flyeddata
+		bb.lastflyeddata = flyedRate
 	} else if bb.status == bbc_status_prop {
 		if bb.rtt > 0 {
+			// deliveryRate is the ACKed rate. With random loss p the wire must
+			// carry deliveryRate/(1-p) = deliveryRate*lossComp to sustain it,
+			// otherwise a probe gain of ~1.1 against a delivery ratio of 0.83
+			// shrinks pacing every cycle and throughput decays to a floor.
 			deliveryRate := float64(lastflyedwin)
 			if deliveryRate < 1024*1024 {
 				deliveryRate = 1024 * 1024
 			}
-			bdp := int(deliveryRate * bb.rtt.Seconds())
+			wireRate := deliveryRate * lossComp
+			bdp := int(wireRate * bb.rtt.Seconds())
 			if bdp < 1024*1024 {
 				bdp = 1024 * 1024
 			}
@@ -278,22 +343,19 @@ func (bb *BBCongestion) Update() {
 				queueDelay = bb.rtt - bb.minRtt
 			}
 
-			if avgRate > 1.20 || queueDelay > 90*time.Millisecond {
-				// Buffer starting to fill or persistent loss: gentle back off to drain queue
-				bb.pacingRate = deliveryRate * 0.95
+			if queueDelay > 110*time.Millisecond {
+				// Standing queue: loss alone never triggers this, only RTT inflation.
+				bb.pacingRate = wireRate * 0.85
 				bb.maxfly = int(float64(bdp) * 2.5)
-			} else if avgRate <= 1.08 && queueDelay < 60*time.Millisecond {
-				// Clean delivery and empty queue: probe upward
-				probeFactor := 1.04
-				if prop_seq[bb.propindex] > 1.0 {
-					probeFactor = 1.10
-				}
-				bb.pacingRate = deliveryRate * probeFactor
-				bb.maxfly = int(float64(bdp) * 3.0)
+			} else if queueDelay < 70*time.Millisecond {
+				// Healthy queue: probe up on the loss-compensated wire rate.
+				probeFactor := prop_seq[bb.propindex]
+				bb.pacingRate = wireRate * probeFactor
+				bb.maxfly = int(float64(bdp) * 3.5)
 			} else {
-				// Steady delivery: maintain gentle upward drift
-				bb.pacingRate = deliveryRate * 1.02
-				bb.maxfly = int(float64(bdp) * 2.5)
+				// Moderate queue delay: hold steady.
+				bb.pacingRate = wireRate * 1.0
+				bb.maxfly = int(float64(bdp) * 3.0)
 			}
 			if bb.pacingRate < 4*1024*1024 {
 				bb.pacingRate = 4 * 1024 * 1024
@@ -313,7 +375,6 @@ func (bb *BBCongestion) Update() {
 			}
 			bb.maxfly = int(float64(bb.maxfly) * prop_seq[bb.propindex])
 		}
-		//loggo.Debug("bbc_status_prop lastflyedwin %v lastrate %v maxfly %d prop %v", lastflyedwin, lastrate, bb.maxfly, prop_seq[bb.propindex])
 		bb.propindex++
 		bb.propindex = bb.propindex % len(prop_seq)
 	} else {
@@ -323,6 +384,7 @@ func (bb *BBCongestion) Update() {
 	bb.flyeddata = 0
 	bb.flyingdata = 0
 	bb.totalsent = 0
+	bb.resendsSent = 0
 	bb.lastratewin = lastratewin
 	bb.lastflyedwin = lastflyedwin
 

@@ -113,8 +113,11 @@ type FrameMgr struct {
 
 	debugid string
 
-	ct           Congestion
-	ctLastSendId int32
+	ct              Congestion
+	ctLastSendId    int32
+	firstNewId      int32
+	lastTimeoutScan int64
+	hasPendingReq   bool
 }
 
 func (fm *FrameMgr) SetDebugid(debugid string) {
@@ -155,7 +158,7 @@ func NewFrameMgr(frame_max_size int, frame_max_id int, buffersize int, windowsiz
 		rttns:     int64(resend_timems) * int64(time.Millisecond),
 		reqmap:    make(map[int32]int64),
 		connected: false, openstat: openstat, lastPrintStat: time.Now().UnixNano(),
-		ctLastSendId: -1,
+		ctLastSendId: -1, firstNewId: -1,
 	}
 
 	if openstat > 0 {
@@ -269,6 +272,8 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 		err := fm.sendwin.Set(int(f.Id), f)
 		if err != nil {
 			loggo.Error("sendwin Set fail %v", err)
+		} else if fm.firstNewId < 0 {
+			fm.firstNewId = f.Id
 		}
 		//loggo.Debug("debugid %v cut frame push to send win %v %v %v", fm.debugid, f.Id, fm.frame_max_size, fm.sendwin.Size())
 	}
@@ -297,6 +302,8 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 		err := fm.sendwin.Set(int(f.Id), f)
 		if err != nil {
 			loggo.Error("sendwin Set fail %v", err)
+		} else if fm.firstNewId < 0 {
+			fm.firstNewId = f.Id
 		}
 		//loggo.Debug("debugid %v cut small frame push to send win %v %v %v", fm.debugid, f.Id, len(f.Data.Data), fm.sendwin.Size())
 	}
@@ -317,6 +324,8 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 		err := fm.sendwin.Set(int(f.Id), f)
 		if err != nil {
 			loggo.Error("sendwin Set fail %v", err)
+		} else if fm.firstNewId < 0 {
+			fm.firstNewId = f.Id
 		}
 		fm.closesend = true
 		//loggo.Debug("debugid %v close frame push to send win %v %v", fm.debugid, f.Id, fm.sendwin.Size())
@@ -338,6 +347,8 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 		err := fm.sendwin.Set(int(f.Id), f)
 		if err != nil {
 			loggo.Error("sendwin Set halfclose fail %v", err)
+		} else if fm.firstNewId < 0 {
+			fm.firstNewId = f.Id
 		}
 		fm.halfclosesend = true
 	}
@@ -353,6 +364,12 @@ func (fm *FrameMgr) sendIdRank(origin, id int32) int32 {
 }
 
 func (fm *FrameMgr) calSendList(cur int64) {
+	if fm.sendwin.Empty() {
+		fm.ctLastSendId = -1
+		fm.firstNewId = -1
+		return
+	}
+
 	cursorRank := int32(-1)
 	var origin int32
 	if fm.ct != nil && fm.ctLastSendId >= 0 {
@@ -365,23 +382,43 @@ func (fm *FrameMgr) calSendList(cur int64) {
 		}
 	}
 
+	resendTimeout := int64(fm.resend_timems) * int64(time.Millisecond)
+	if rttTimeout := fm.rttns * 2; rttTimeout > resendTimeout {
+		resendTimeout = rttTimeout
+	}
+	minResendGap := fm.rttns * 3 / 4
+	if fm.rttns > 0 && minResendGap < int64(time.Millisecond*50) {
+		minResendGap = int64(time.Millisecond * 50)
+	}
+
+	// Fast-path on pacing ticks when no REQ arrived and the 10ms timeout scan
+	// ran recently: jump directly to ctLastSendId (or firstNewId) in O(1)
+	// instead of walking thousands of already-transmitted frames every 1ms.
+	var e *glist.ROBuffergoInter
+	fastPath := fm.ct != nil && !fm.hasPendingReq && cur-fm.lastTimeoutScan <= int64(10*time.Millisecond)
+	if fastPath {
+		if fm.ctLastSendId >= 0 {
+			e = fm.sendwin.InterAt(int(fm.ctLastSendId))
+		} else if fm.firstNewId >= 0 {
+			e = fm.sendwin.InterAt(int(fm.firstNewId))
+		} else {
+			return
+		}
+	}
+	if e == nil {
+		fm.lastTimeoutScan = cur
+		fm.hasPendingReq = false
+		e = fm.sendwin.FrontInter()
+	}
+
 	// Same bound as GetSendWinSize: visit only the filled slots so the idle
 	// tail of the ring is never scanned. This is the per-Update send walk.
-	e := fm.sendwin.FrontInter()
 	remaining := fm.sendwin.Size()
 	for e != nil && remaining > 0 {
 		remaining--
 		f := e.Value.(*Frame)
 		isNew := f.Sendtime == 0
-		resendTimeout := int64(fm.resend_timems * (int)(time.Millisecond))
-		if rttTimeout := fm.rttns * 2; rttTimeout > resendTimeout {
-			resendTimeout = rttTimeout
-		}
 		isTimeout := !isNew && cur-f.Sendtime > resendTimeout
-		minResendGap := fm.rttns / 2
-		if fm.rttns > 0 && minResendGap < int64(time.Millisecond*50) {
-			minResendGap = int64(time.Millisecond * 50)
-		}
 		isResend := !isNew && (f.Resend || isTimeout) && cur-f.Sendtime > minResendGap
 		canSendFrame := !f.Acked && (isNew || isResend)
 
@@ -391,12 +428,14 @@ func (fm *FrameMgr) calSendList(cur int64) {
 					if isNew {
 						if !fm.ct.CanSend(int(f.Id), len(f.Data.Data)) {
 							fm.ctLastSendId = f.Id
+							fm.firstNewId = -1
 							return
 						}
 					} else {
 						if resendChecker, ok := fm.ct.(interface{ CanSendResend(int, int) bool }); ok {
 							if !resendChecker.CanSendResend(int(f.Id), len(f.Data.Data)) {
 								fm.ctLastSendId = f.Id
+								fm.firstNewId = -1
 								return
 							}
 						}
@@ -418,6 +457,7 @@ func (fm *FrameMgr) calSendList(cur int64) {
 		e = e.Next()
 	}
 	fm.ctLastSendId = -1
+	fm.firstNewId = -1
 }
 
 // GetSendFrames returns the outbound frames staged by sendFrame and empties
@@ -626,6 +666,7 @@ func (fm *FrameMgr) processRecvList(rm *recvMaps) {
 		f := value.(*Frame)
 		if f.Id == id {
 			f.Resend = true
+			fm.hasPendingReq = true
 			//loggo.Debug("debugid %v choose resend win %v %v", fm.debugid, f.Id, len(f.Data.Data))
 		} else {
 			loggo.Error("sendwin get id diff %v %v", id, f.Id)
@@ -647,7 +688,12 @@ func (fm *FrameMgr) processRecvList(rm *recvMaps) {
 		}
 		f := value.(*Frame)
 		if f.Id == id {
-			f.Acked = true
+			if !f.Acked {
+				f.Acked = true
+				if fm.ct != nil && f.Data != nil {
+					fm.ct.RecvAck(int(id), len(f.Data.Data))
+				}
+			}
 			//loggo.Debug("debugid %v remove send win %v %v", fm.debugid, f.Id, len(f.Data.Data))
 		} else {
 			loggo.Error("sendwin get id diff %v %v", id, f.Id)
@@ -656,9 +702,6 @@ func (fm *FrameMgr) processRecvList(rm *recvMaps) {
 		if fm.openstat > 0 {
 			fm.fs.recvAckNum += num
 			fm.fs.recvAckNumsMap[id] += num
-		}
-		if fm.ct != nil {
-			fm.ct.RecvAck(int(id), len(f.Data.Data))
 		}
 	}
 
@@ -874,7 +917,7 @@ func (fm *FrameMgr) combineWindowToRecvBuffer(cur int64) {
 		fid := int32(e.Id())
 		for id != fid && len(reqtmp) < maxReq {
 			oldReq := fm.reqmap[id]
-			reqInterval := fm.rttns * 3 / 4
+			reqInterval := fm.rttns * 5 / 4
 			if fm.rttns > 0 && reqInterval < int64(time.Millisecond*50) {
 				reqInterval = int64(time.Millisecond * 50)
 			}
@@ -1010,6 +1053,8 @@ func (fm *FrameMgr) hb() {
 		err := fm.sendwin.Set(int(f.Id), f)
 		if err != nil {
 			loggo.Error("sendwin Set fail %v", err)
+		} else if fm.firstNewId < 0 {
+			fm.firstNewId = f.Id
 		}
 		//loggo.Debug("debugid %v send hb %v", fm.debugid, f.Id)
 	}
@@ -1097,6 +1142,8 @@ func (fm *FrameMgr) Connect() {
 		err := fm.sendwin.Set(int(f.Id), f)
 		if err != nil {
 			loggo.Error("sendwin Set fail %v", err)
+		} else if fm.firstNewId < 0 {
+			fm.firstNewId = f.Id
 		}
 		//loggo.Debug("debugid %v start connect", fm.debugid)
 	} else {
@@ -1120,6 +1167,8 @@ func (fm *FrameMgr) sendConnectRsp() {
 		err := fm.sendwin.Set(int(f.Id), f)
 		if err != nil {
 			loggo.Error("sendwin Set fail %v", err)
+		} else if fm.firstNewId < 0 {
+			fm.firstNewId = f.Id
 		}
 		//loggo.Debug("debugid %v send connect rsp", fm.debugid)
 	} else {

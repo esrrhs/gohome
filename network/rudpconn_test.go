@@ -890,3 +890,29 @@ func TestRudpThroughputStability(t *testing.T) {
 		t.Fatalf("throughput unstable: min/avg ratio %.2f < 0.50", stabilityRatio)
 	}
 }
+
+// TestRudpCrossOceanLossThroughputRedline simulates a high-BDP cross-ocean link
+// (100ms RTT + 3% random packet loss) and enforces a minimum goodput redline so
+// future congestion/window changes cannot silently regress download bandwidth.
+func TestRudpCrossOceanLossThroughputRedline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cross-ocean throughput redline test in short mode")
+	}
+	cs := channelSpec{
+		loss:        0.03,
+		oneWayDelay: 50 * time.Millisecond, // 100ms RTT
+	}
+	const (
+		testDuration = 6 * time.Second
+		redlineMBps  = 3.0 // 24 Mbps minimum goodput redline under 100ms RTT + 3% loss
+	)
+	mbps, total, err := runFixedPayloadDownloadWithSpec("rudp", cs, testDuration, 42)
+	if err != nil {
+		t.Fatalf("cross-ocean RUDP download failed: %v", err)
+	}
+	t.Logf("cross-ocean RUDP (100ms RTT, 3%% loss): %.2f MB/s (%.2f Mbps, %d bytes in %s)",
+		mbps, mbps*8, total, testDuration)
+	if mbps < redlineMBps {
+		t.Fatalf("cross-ocean RUDP throughput %.2f MB/s fell below redline %.2f MB/s", mbps, redlineMBps)
+	}
+}
