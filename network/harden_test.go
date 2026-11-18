@@ -322,7 +322,7 @@ func TestHardenBBCPanics(t *testing.T) {
 		bb.CanSend(0, -1)
 	}()
 
-	bb.RecvAck(0, 1)
+	bb.RecvAck(0, 128*1024)
 	bb.status = 9
 	func() {
 		defer func() {
@@ -344,7 +344,7 @@ func TestHardenBBCStateMachine(t *testing.T) {
 		t.Fatal("unexpected status change without flyed data")
 	}
 
-	bb.RecvAck(0, 1000)
+	bb.RecvAck(0, 256*1024)
 	if !bb.CanSend(0, 500) {
 		t.Fatal("CanSend under maxfly should be true")
 	}
@@ -356,15 +356,15 @@ func TestHardenBBCStateMachine(t *testing.T) {
 
 	// Stalled acked data relative to previous window: shrink and enter prop.
 	bb.lastflyeddata = 100 * 1024 * 1024
-	bb.RecvAck(0, 1)
+	bb.RecvAck(0, 128*1024)
 	bb.Update()
 	if bb.status != bbc_status_prop {
 		t.Fatalf("expect prop status, got %d", bb.status)
 	}
 
 	for i := 0; i < 6; i++ {
-		bb.RecvAck(0, 1024)
-		if !bb.CanSend(0, 1024) {
+		bb.RecvAck(0, 128*1024)
+		if !bb.CanSend(0, 128*1024) {
 			t.Fatal("CanSend should be allowed after update reset flying")
 		}
 		bb.Update()
@@ -374,23 +374,23 @@ func TestHardenBBCStateMachine(t *testing.T) {
 	grow := &BBCongestion{}
 	grow.Init()
 	grow.status = bbc_status_prop
-	grow.maxfly = 10
-	grow.RecvAck(0, 100)
-	if !grow.CanSend(0, 100) {
+	grow.maxfly = 256 * 1024
+	grow.RecvAck(0, 512*1024)
+	if !grow.CanSend(0, 256*1024) {
 		t.Fatal("setup CanSend")
 	}
 	grow.Update()
-	if grow.maxfly <= 10 {
-		t.Fatalf("prop grow maxfly = %d, want > 10", grow.maxfly)
+	if grow.maxfly <= 256*1024 {
+		t.Fatalf("prop grow maxfly = %d, want > %d", grow.maxfly, 256*1024)
 	}
 
-	// prop branch: product equal to maxfly (NearlyEqual) replaces it.
+	// prop branch: product below 1MB floor gets clamped to 1MB.
 	eq := &BBCongestion{}
 	eq.Init()
 	eq.status = bbc_status_prop
-	eq.maxfly = 10
-	eq.RecvAck(0, 10)
-	if !eq.CanSend(0, 10) {
+	eq.maxfly = 128 * 1024
+	eq.RecvAck(0, 128*1024)
+	if !eq.CanSend(0, 128*1024) {
 		t.Fatal("setup CanSend")
 	}
 	eq.Update()
@@ -401,7 +401,7 @@ func TestHardenBBCStateMachine(t *testing.T) {
 	// maxfly floor: prop result below 1MB must be clamped up.
 	bb.maxfly = 500 * 1024
 	bb.propindex = len(prop_seq) - 1
-	bb.flyeddata = 1
+	bb.flyeddata = 128 * 1024
 	bb.flyingdata = 0
 	bb.Update()
 	if bb.maxfly != 1024*1024 {
