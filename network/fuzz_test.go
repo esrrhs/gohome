@@ -290,13 +290,16 @@ func FuzzFrameMgrMarshal(f *testing.F) {
 // ---------- BBCongestion ----------
 
 // FuzzBBCongestion 用"先 CanSend 再 RecvAck"的成对流量驱动状态机，
-// 断言：Update 之后飞行量归零、窗口下限仍在、控制器不会被永久卡死，
-// 且重复 Update 是无副作用的（flyeddata 为 0 时必须立即返回）。
+// 断言：Update 之后飞行量归零、窗口下限仍在、控制器不会被永久卡死；
+// 无 ACK（flyeddata==0）时 Update 必须滚动发送预算（清零 flying/totalsent/
+// resendsSent，见 c721ce4），但不得改动 maxfly/status。
 func FuzzBBCongestion(f *testing.F) {
 	f.Add([]byte{0, 1, 2})
 	f.Add([]byte{64, 65, 66, 128, 128, 128})
 	f.Add([]byte{192, 192, 192, 1, 65, 129, 193})
 	f.Add([]byte{})
+	// Nightly Fuzz 语料：CanSend 后再无 ACK Update，必须滚动 flying 预算。
+	f.Add([]byte{0x30, 0x81})
 
 	f.Fuzz(func(t *testing.T, ops []byte) {
 		if len(ops) > 512 {
@@ -322,14 +325,22 @@ func FuzzBBCongestion(f *testing.F) {
 				outstanding -= size
 			case 2:
 				if bb.flyeddata <= 0 {
-					// 一个 ACK 都没收到时 Update 必须立即返回，
-					// 既不能改窗口，也不能动飞行量。
-					maxfly, flying := bb.maxfly, bb.flyingdata
+					// 无 ACK 窗口：仍须滚动发送预算，否则 flying 卡在 maxfly
+					// 以上会造成永久 stall（c721ce4）。窗口算法本身无反馈。
+					maxfly, status := bb.maxfly, bb.status
 					bb.Update()
-					if bb.maxfly != maxfly || bb.flyingdata != flying {
-						t.Fatalf("Update changed state without feedback: maxfly %d->%d flying %d->%d",
-							maxfly, bb.maxfly, flying, bb.flyingdata)
+					if bb.maxfly != maxfly || bb.status != status {
+						t.Fatalf("ack-less Update changed window: maxfly %d->%d status %d->%d",
+							maxfly, bb.maxfly, status, bb.status)
 					}
+					if bb.flyingdata != 0 || bb.totalsent != 0 || bb.resendsSent != 0 {
+						t.Fatalf("ack-less Update must roll send budget to zero: flying=%d totalsent=%d resends=%d",
+							bb.flyingdata, bb.totalsent, bb.resendsSent)
+					}
+					if bb.flyingdata > bb.maxfly {
+						t.Fatal("controller permanently blocked after ack-less budget roll")
+					}
+					outstanding = 0
 					continue
 				}
 
@@ -348,7 +359,7 @@ func FuzzBBCongestion(f *testing.F) {
 				if !bb.CanSend(0, 1) {
 					t.Fatal("controller permanently blocked right after Update")
 				}
-				// 归零后再 Update 同样必须完全无副作用
+				// 归零后再 Update 同样不得改动窗口
 				maxfly := bb.maxfly
 				bb.Update()
 				if bb.maxfly != maxfly {
