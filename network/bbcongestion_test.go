@@ -69,3 +69,32 @@ func TestBBCongestionRandomLossCompensation(t *testing.T) {
 			bb.pacingRate/(1024*1024), float64(minExpectedPacing)/(1024*1024))
 	}
 }
+
+// TestBBCongestionAcklessUpdateRollsFlyingBudget locks in c721ce4:
+// a window with no ACKs must still clear flyingdata so CanSend cannot
+// deadlock forever after a full-window loss burst.
+func TestBBCongestionAcklessUpdateRollsFlyingBudget(t *testing.T) {
+	bb := &BBCongestion{}
+	bb.Init()
+
+	stuck := bb.maxfly + 64*1024
+	bb.flyingdata = stuck
+	bb.totalsent = stuck
+	bb.resendsSent = 1024
+	bb.flyeddata = 0
+	maxfly, status := bb.maxfly, bb.status
+
+	bb.Update()
+
+	if bb.maxfly != maxfly || bb.status != status {
+		t.Fatalf("ack-less Update changed window: maxfly %d->%d status %d->%d",
+			maxfly, bb.maxfly, status, bb.status)
+	}
+	if bb.flyingdata != 0 || bb.totalsent != 0 || bb.resendsSent != 0 {
+		t.Fatalf("ack-less Update must zero send budget: flying=%d totalsent=%d resends=%d",
+			bb.flyingdata, bb.totalsent, bb.resendsSent)
+	}
+	if !bb.CanSend(0, 1024) {
+		t.Fatal("CanSend must succeed after ack-less budget roll-forward")
+	}
+}
