@@ -5,6 +5,11 @@ import (
 	"fmt"
 )
 
+// ErrOutOfWin 表示目标 id 不在当前窗口覆盖范围内：可能是已被确认并弹出的
+// 旧 id，也可能是窗口末端之后的未来 id。调用方据此区分"正常的迟到包"与
+// "环形结构异常"。
+var ErrOutOfWin = errors.New("id out of window")
+
 /*
 ROBuffergo 实现了一个循环缓冲区（Ring Buffer），用于存储带有唯一 ID 的数据。
 该缓冲区支持通过 ID 存取数据，并提供基本的管理功能，如获取、设置、前端数据操作和容量检查。
@@ -75,24 +80,35 @@ func NewROBuffer(len int, startid int, maxid int) *ROBuffergo {
 	return buffer
 }
 
-func (b *ROBuffergo) Get(id int) (error, data interface{}) {
+// rank 返回 id 相对窗口前端的前向环距离。
+func (b *ROBuffergo) rank(id int) int {
+	d := id - b.id[b.begin]
+	if d < 0 {
+		d += b.maxid
+	}
+	return d
+}
+
+// 注意 err 必须声明为 error 而非 interface{}，否则调用方无法用 errors.Is
+// 区分 ErrOutOfWin。
+func (b *ROBuffergo) Get(id int) (err error, data interface{}) {
 	if b.begin >= len(b.flag) {
 		return fmt.Errorf("not init"), nil
 	}
-	cur := b.id[b.begin]
-	if id >= b.maxid {
-		return fmt.Errorf("id out of range %d %d %d", id, cur, b.maxid), nil
+	if id < 0 || id >= b.maxid {
+		return fmt.Errorf("id out of range %d %d %d", id, b.id[b.begin], b.maxid), nil
 	}
 
-	index := 0
-	if id < cur {
-		index = (b.begin + (id + b.maxid - cur)) % b.len
-	} else {
-		index = (b.begin + (id - cur)) % b.len
+	// 窗口只覆盖 rank 落在 [0, len) 的 id，越界时取模会折回到仍在使用的
+	// 槽位，因此必须先判定越界，不能只依赖槽内 id 比对兜底。
+	rank := b.rank(id)
+	if rank >= b.len {
+		return ErrOutOfWin, nil
 	}
+	index := (b.begin + rank) % b.len
 
 	if b.id[index] != id {
-		return fmt.Errorf("set id error %d %d %d", id, b.id[index], index), nil
+		return fmt.Errorf("ring slot mismatch %d %d %d", id, b.id[index], index), nil
 	}
 
 	if !b.flag[index] {
@@ -113,20 +129,18 @@ func (b *ROBuffergo) Set(id int, data interface{}) error {
 	if b.begin >= len(b.flag) {
 		return fmt.Errorf("not init")
 	}
-	cur := b.id[b.begin]
-	if id >= b.maxid {
-		return fmt.Errorf("id out of range %d %d %d", id, cur, b.maxid)
+	if id < 0 || id >= b.maxid {
+		return fmt.Errorf("id out of range %d %d %d", id, b.id[b.begin], b.maxid)
 	}
 
-	index := 0
-	if id < cur {
-		index = (b.begin + (id + b.maxid - cur)) % b.len
-	} else {
-		index = (b.begin + (id - cur)) % b.len
+	rank := b.rank(id)
+	if rank >= b.len {
+		return fmt.Errorf("%w: set %d front %d len %d", ErrOutOfWin, id, b.id[b.begin], b.len)
 	}
+	index := (b.begin + rank) % b.len
 
 	if b.id[index] != id {
-		return fmt.Errorf("set id error %d %d %d", id, b.id[index], index)
+		return fmt.Errorf("ring slot mismatch %d %d %d", id, b.id[index], index)
 	}
 	b.buffer[index] = data
 	if !b.flag[index] {
