@@ -300,6 +300,7 @@ func FuzzBBCongestion(f *testing.F) {
 	f.Add([]byte{})
 	// Nightly Fuzz 语料：CanSend 后再无 ACK Update，必须滚动 flying 预算。
 	f.Add([]byte{0x30, 0x81})
+	f.Add([]byte{0x30, 0x84})
 
 	f.Fuzz(func(t *testing.T, ops []byte) {
 		if len(ops) > 512 {
