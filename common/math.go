@@ -1,8 +1,9 @@
 package common
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -37,6 +38,9 @@ func HasString(data []string, dst string) bool {
 }
 
 func MinOfInt(vars ...int) int {
+	if len(vars) == 0 {
+		return 0
+	}
 	min := vars[0]
 
 	for _, i := range vars {
@@ -49,6 +53,9 @@ func MinOfInt(vars ...int) int {
 }
 
 func MaxOfInt(vars ...int) int {
+	if len(vars) == 0 {
+		return 0
+	}
 	max := vars[0]
 
 	for _, i := range vars {
@@ -61,6 +68,9 @@ func MaxOfInt(vars ...int) int {
 }
 
 func MinOfInt64(vars ...int64) int64 {
+	if len(vars) == 0 {
+		return 0
+	}
 	min := vars[0]
 
 	for _, i := range vars {
@@ -73,6 +83,9 @@ func MinOfInt64(vars ...int64) int64 {
 }
 
 func MaxOfInt64(vars ...int64) int64 {
+	if len(vars) == 0 {
+		return 0
+	}
 	max := vars[0]
 
 	for _, i := range vars {
@@ -213,16 +226,33 @@ func NearlyEqual(a int, b int) bool {
 
 // Setup a bare-bones TLS config for the server
 func GenerateTLSConfig(name string) (*tls.Config, error) {
-	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	template := x509.Certificate{SerialNumber: big.NewInt(1)}
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := rand.Int(rand.Reader, serialLimit)
+	if err != nil || serial.Sign() <= 0 {
+		serial = big.NewInt(1)
+	}
+	now := time.Now()
+	template := x509.Certificate{
+		SerialNumber:          serial,
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+	}
 	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
 	if err != nil {
 		return nil, err
 	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil, err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 
 	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)

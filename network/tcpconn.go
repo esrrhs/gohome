@@ -87,8 +87,8 @@ func (c *TcpConn) Dial(dst string) (Conn, error) {
 	}()
 
 	var d net.Dialer
-	if gControlOnConnSetup != nil {
-		d = net.Dialer{Control: gControlOnConnSetup}
+	if ctrl := getDialerController(); ctrl != nil {
+		d = net.Dialer{Control: ctrl}
 	}
 	conn, err := d.DialContext(ctx, "tcp", addr.String())
 	if err != nil {

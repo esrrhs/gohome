@@ -26,7 +26,14 @@ func CrashLog() {
 }
 
 func DumpStacks() string {
-	buf := make([]byte, 16384)
-	buf = buf[:runtime.Stack(buf, true)]
-	return fmt.Sprintf("=== BEGIN goroutine stack dump ===\n%s\n=== END goroutine stack dump ===", buf)
+	size := 16384
+	const maxStackSize = 4 << 20
+	for {
+		buf := make([]byte, size)
+		n := runtime.Stack(buf, true)
+		if n < size || size >= maxStackSize {
+			return fmt.Sprintf("=== BEGIN goroutine stack dump ===\n%s\n=== END goroutine stack dump ===", buf[:n])
+		}
+		size *= 2
+	}
 }

@@ -300,3 +300,66 @@ func TestHardenDoHSOCKS5Proxy(t *testing.T) {
 		_ = uBad.Close()
 	}
 }
+
+func TestHardenSocketUpstreamTruncatedFallsBackToTCP(t *testing.T) {
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Skipf("udp listen: %v", err)
+	}
+	defer udpConn.Close()
+
+	tcpLn, err := net.Listen("tcp", udpConn.LocalAddr().String())
+	if err != nil {
+		t.Skipf("tcp listen on same port: %v", err)
+	}
+	defer tcpLn.Close()
+
+	// UDP returns TC=1 (Truncated) with empty Answer.
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			n, addr, err := udpConn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			req := new(dns.Msg)
+			if req.Unpack(buf[:n]) != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			resp.Truncated = true
+			if wire, err := resp.Pack(); err == nil {
+				_, _ = udpConn.WriteTo(wire, addr)
+			}
+		}
+	}()
+
+	// TCP returns full untruncated Answer.
+	tcpSrv := &dns.Server{
+		Listener: tcpLn,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			if rr, err := dns.NewRR(req.Question[0].Name + " 60 IN A 9.9.9.9"); err == nil {
+				resp.Answer = append(resp.Answer, rr)
+			}
+			_ = w.WriteMsg(resp)
+		}),
+	}
+	go func() { _ = tcpSrv.ActivateAndServe() }()
+	defer func() { _ = tcpSrv.Shutdown() }()
+
+	u, err := NewSocketUpstream(udpConn.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := u.Exchange(context.Background(), BuildQuery("tc.example.com", dns.TypeA))
+	if err != nil {
+		t.Fatalf("Exchange failed: %v", err)
+	}
+	ips := ExtractIPs(resp)
+	if len(ips) != 1 || ips[0].String() != "9.9.9.9" {
+		t.Fatalf("expected TCP fallback IP 9.9.9.9, got %v", ips)
+	}
+}

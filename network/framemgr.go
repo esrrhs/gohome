@@ -8,6 +8,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -89,11 +90,11 @@ type FrameMgr struct {
 	recvid  int32
 
 	close            bool
-	remoteclosed     bool
+	remoteclosed     atomic.Bool
 	closesend        bool
 	closesendreq     bool
 	halfclosesend    bool
-	remotesendclosed bool
+	remotesendclosed atomic.Bool
 
 	lastPingTime int64
 	lastPongTime int64
@@ -105,7 +106,10 @@ type FrameMgr struct {
 
 	reqmap map[int32]int64
 
-	connected bool
+	connected atomic.Bool
+
+	recvNotify chan struct{}
+	sendNotify chan struct{}
 
 	fs            *FrameStat
 	openstat      int
@@ -152,13 +156,15 @@ func NewFrameMgr(frame_max_size int, frame_max_id int, buffersize int, windowsiz
 		windowsize: int32(windowsize), resend_timems: resend_timems, compress: compress,
 		sendwin: glist.NewROBuffer(windowsize, 0, frame_max_id), sendid: 0,
 		recvwin: glist.NewROBuffer(windowsize, 0, frame_max_id), recvid: 0,
-		close: false, remoteclosed: false, closesend: false,
+		close: false, closesend: false,
 		lastPingTime: time.Now().UnixNano(), lastPongTime: 0,
 		lastSendHBTime: time.Now().UnixNano(), lastRecvHBTime: time.Now().UnixNano(), lastRecvDataTime: time.Now().UnixNano(),
-		rttns:     int64(resend_timems) * int64(time.Millisecond),
-		reqmap:    make(map[int32]int64),
-		connected: false, openstat: openstat, lastPrintStat: time.Now().UnixNano(),
+		rttns:    int64(resend_timems) * int64(time.Millisecond),
+		reqmap:   make(map[int32]int64),
+		openstat: openstat, lastPrintStat: time.Now().UnixNano(),
 		ctLastSendId: -1, firstNewId: -1,
+		recvNotify: make(chan struct{}, 1),
+		sendNotify: make(chan struct{}, 1),
 	}
 
 	if openstat > 0 {
@@ -205,13 +211,13 @@ func (fm *FrameMgr) GetSendWinSize() int {
 
 // GetLastRecvHBTime returns when the last heartbeat from the peer arrived.
 func (fm *FrameMgr) GetLastRecvHBTime() int64 {
-	return fm.lastRecvHBTime
+	return atomic.LoadInt64(&fm.lastRecvHBTime)
 }
 
 func (fm *FrameMgr) WriteSendBuffer(data []byte) {
 	fm.sendblock.Lock()
-	defer fm.sendblock.Unlock()
 	fm.sendb.Write(data)
+	fm.sendblock.Unlock()
 	//loggo.Debug("debugid %v WriteSendBuffer %v %v", fm.debugid, fm.sendb.Size(), len(data))
 }
 
@@ -243,6 +249,7 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 	defer fm.sendblock.Unlock()
 
 	sendall := false
+	drained := false
 
 	if fm.sendb.Size() < fm.frame_max_size {
 		sendall = true
@@ -251,6 +258,7 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 	for fm.sendb.Size() >= fm.frame_max_size && fm.sendwin.Size() < int(fm.windowsize) {
 		fd := getSendFrame(fm.frame_max_size).Data
 		fm.sendb.Read(fd.Data)
+		drained = true
 
 		if fm.compress > 0 && len(fd.Data) > fm.compress {
 			newb := common.CompressDataZstd(fd.Data)
@@ -281,6 +289,7 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 	if sendall && fm.sendb.Size() > 0 && fm.sendwin.Size() < int(fm.windowsize) {
 		fd := getSendFrame(fm.sendb.Size()).Data
 		fm.sendb.Read(fd.Data)
+		drained = true
 
 		if fm.compress > 0 && len(fd.Data) > fm.compress {
 			newb := common.CompressDataZstd(fd.Data)
@@ -351,6 +360,13 @@ func (fm *FrameMgr) cutSendBufferToWindow(cur int64) {
 			fm.firstNewId = f.Id
 		}
 		fm.halfclosesend = true
+	}
+
+	if drained {
+		select {
+		case fm.sendNotify <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -605,6 +621,9 @@ func (fm *FrameMgr) sendFrame(f *Frame) {
 }
 
 func (fm *FrameMgr) OnRecvFrame(f *Frame) {
+	if f == nil {
+		return
+	}
 	fm.recvlock.Lock()
 	defer fm.recvlock.Unlock()
 	fm.recvq = append(fm.recvq, f)
@@ -620,6 +639,9 @@ func (fm *FrameMgr) preProcessRecvList() *recvMaps {
 	clear(rm.ackto)
 	rm.cumAck = -1
 	for _, f := range fm.recvq {
+		if f == nil {
+			continue
+		}
 		if f.Type == (int32)(Frame_REQ) {
 			for _, id := range f.Dataid {
 				rm.req[id]++
@@ -634,6 +656,10 @@ func (fm *FrameMgr) preProcessRecvList() *recvMaps {
 				rm.cumAck = f.Id
 			}
 		} else if f.Type == (int32)(Frame_DATA) {
+			if f.Data == nil {
+				loggo.Error("recv data frame nil payload %v", f.Id)
+				continue
+			}
 			rm.ackto[f.Id] = f
 			if fm.openstat > 0 {
 				fm.fs.recvDataNum++
@@ -807,9 +833,12 @@ func (fm *FrameMgr) addToRecvWin(rf *Frame) bool {
 }
 
 func (fm *FrameMgr) processRecvFrame(f *Frame) bool {
+	if f == nil || f.Data == nil {
+		loggo.Error("recv frame nil data")
+		return false
+	}
 	if f.Data.Type == (int32)(FrameData_USER_DATA) {
 		fm.recvblock.Lock()
-		defer fm.recvblock.Unlock()
 
 		left := fm.recvb.Capacity() - fm.recvb.Size()
 		if left >= len(f.Data.Data) {
@@ -817,42 +846,50 @@ func (fm *FrameMgr) processRecvFrame(f *Frame) bool {
 			if f.Data.Compress {
 				old, err := common.DeCompressDataZstd(src)
 				if err != nil {
+					fm.recvblock.Unlock()
 					loggo.Error("recv frame DeCompressDataZstd error %v", f.Id)
 					return false
 				}
 				if left < len(old) {
+					fm.recvblock.Unlock()
 					return false
 				}
 				//loggo.Debug("debugid %v DeCompressDataZstd recv frame %v %v %v", fm.debugid, f.Id, len(src), len(old))
 				src = old
 			}
 
-			fm.lastRecvDataTime = time.Now().UnixNano()
+			atomic.StoreInt64(&fm.lastRecvDataTime, time.Now().UnixNano())
 
 			fm.recvb.Write(src)
+			fm.recvblock.Unlock()
+			select {
+			case fm.recvNotify <- struct{}{}:
+			default:
+			}
 			//loggo.Debug("debugid %v combined recv frame to recv buffer %v %v", fm.debugid, f.Id, len(src))
 			return true
 		}
+		fm.recvblock.Unlock()
 		return false
 	} else if f.Data.Type == (int32)(FrameData_CLOSE) {
-		fm.remoteclosed = true
+		fm.remoteclosed.Store(true)
 		//loggo.Debug("debugid %v recv remote close frame %v", fm.debugid, f.Id)
 		return true
 	} else if f.Data.Type == (int32)(FrameData_CONN) {
 		fm.sendConnectRsp()
-		fm.connected = true
+		fm.connected.Store(true)
 		//loggo.Debug("debugid %v recv remote conn frame %v", fm.debugid, f.Id)
 		return true
 	} else if f.Data.Type == (int32)(FrameData_CONNRSP) {
-		fm.connected = true
+		fm.connected.Store(true)
 		//loggo.Debug("debugid %v recv remote conn rsp frame %v", fm.debugid, f.Id)
 		return true
 	} else if f.Data.Type == (int32)(FrameData_HB) {
-		fm.lastRecvHBTime = time.Now().UnixNano()
+		atomic.StoreInt64(&fm.lastRecvHBTime, time.Now().UnixNano())
 		//loggo.Debug("debugid %v recv remote hb frame %v", fm.debugid, f.Id)
 		return true
 	} else if f.Data.Type == (int32)(FrameData_HALFCLOSE) {
-		fm.remotesendclosed = true
+		fm.remotesendclosed.Store(true)
 		//loggo.Debug("debugid %v recv remote halfclose frame %v", fm.debugid, f.Id)
 		return true
 	} else {
@@ -994,26 +1031,32 @@ func (fm *FrameMgr) SkipRecvBuffer(size int) {
 }
 
 func (fm *FrameMgr) Close() {
+	fm.sendblock.Lock()
 	fm.close = true
+	fm.sendblock.Unlock()
 }
 
 func (fm *FrameMgr) IsRemoteClosed() bool {
-	return fm.remoteclosed
+	return fm.remoteclosed.Load()
 }
 
 // CloseSend half-closes the send side: after the send buffer drains, a
 // HALFCLOSE frame is delivered and the recv direction stays usable.
 func (fm *FrameMgr) CloseSend() {
+	fm.sendblock.Lock()
 	fm.closesendreq = true
+	fm.sendblock.Unlock()
 }
 
 func (fm *FrameMgr) IsRemoteSendClosed() bool {
-	return fm.remotesendclosed
+	return fm.remotesendclosed.Load()
 }
 
 // CloseFlushed reports that every frame this side sent — including its own
 // close/halfclose marker — has been acknowledged by the peer.
 func (fm *FrameMgr) CloseFlushed() bool {
+	fm.sendblock.Lock()
+	defer fm.sendblock.Unlock()
 	if !fm.closesend && !fm.halfclosesend {
 		return false
 	}
@@ -1123,7 +1166,7 @@ func (fm *FrameMgr) isIdOld(id int32, maxid int32) bool {
 }
 
 func (fm *FrameMgr) IsConnected() bool {
-	return fm.connected
+	return fm.connected.Load()
 }
 
 func (fm *FrameMgr) Connect() {
@@ -1251,31 +1294,41 @@ func (fm *FrameMgr) printStatMap(m *map[int32]int) string {
 }
 
 func (fm *FrameMgr) MarshalFrame(f *Frame) ([]byte, error) {
-	resend := f.Resend
-	sendtime := f.Sendtime
-	mb, err := proto.Marshal(f)
-	f.Resend = resend
-	f.Sendtime = sendtime
-	return mb, err
+	return proto.Marshal(f)
 }
 
 // MarshalFrameAppend serializes f into dst and returns the extended slice,
 // letting callers that recycle their buffer avoid the allocation MarshalFrame
-// makes for every frame. Resend/Sendtime are restored after marshaling, same
-// as MarshalFrame.
+// makes for every frame.
 func (fm *FrameMgr) MarshalFrameAppend(dst []byte, f *Frame) ([]byte, error) {
-	resend := f.Resend
-	sendtime := f.Sendtime
-	mb, err := proto.MarshalOptions{}.MarshalAppend(dst, f)
-	f.Resend = resend
-	f.Sendtime = sendtime
-	return mb, err
+	return proto.MarshalOptions{}.MarshalAppend(dst, f)
 }
 
 func (fm *FrameMgr) IsHBTimeout() bool {
 	now := time.Now().UnixNano()
-	if now-fm.lastRecvHBTime > int64(time.Second)*hbTimeoutSecond && now-fm.lastRecvDataTime > int64(time.Second)*hbTimeoutSecond {
+	lastHB := atomic.LoadInt64(&fm.lastRecvHBTime)
+	lastData := atomic.LoadInt64(&fm.lastRecvDataTime)
+	if now-lastHB > int64(time.Second)*hbTimeoutSecond && now-lastData > int64(time.Second)*hbTimeoutSecond {
 		return true
 	}
 	return false
+}
+
+// RecvNotify returns a channel signaled whenever new user data enters recvb.
+func (fm *FrameMgr) RecvNotify() <-chan struct{} {
+	return fm.recvNotify
+}
+
+// SendNotify returns a channel signaled whenever sendb drains space.
+func (fm *FrameMgr) SendNotify() <-chan struct{} {
+	return fm.sendNotify
+}
+
+func waitNotify(ch <-chan struct{}, d time.Duration) {
+	t := time.NewTimer(d)
+	select {
+	case <-ch:
+		t.Stop()
+	case <-t.C:
+	}
 }

@@ -94,3 +94,26 @@ func Test0001(t *testing.T) {
 	fmt.Println(c1)
 	fmt.Println(c2)
 }
+
+func TestUnalignedSliceAES(t *testing.T) {
+	// Subslice at odd uint64 index is guaranteed 8-byte (not 16-byte) aligned.
+	backing1 := make([]uint64, 5)
+	backing2 := make([]uint64, 5)
+	for i := range backing1 {
+		backing1[i] = uint64(0x0102030405060708) * uint64(i+1)
+		backing2[i] = backing1[i]
+	}
+	var rk1, rk2 [40]uint32
+	key := make([]uint64, 5)
+	for i := range key {
+		key[i] = uint64(i + 11)
+	}
+	CnExpandKeyGo(key[1:5], &rk1)
+	CnExpandKeyGoSoft(key[1:5], &rk2)
+
+	CnRoundsGo(backing1[1:3], backing1[1:3], &rk1)
+	CnRoundsGoSoft(backing2[1:3], backing2[1:3], &rk2)
+	if backing1[1] != backing2[1] || backing1[2] != backing2[2] {
+		t.Fatalf("unaligned CnRoundsGo mismatch: %x vs %x", backing1[1:3], backing2[1:3])
+	}
+}

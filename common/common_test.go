@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image/color"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -110,9 +111,11 @@ func Test0002(t *testing.T) {
 	st.AddLine(stl)
 	fmt.Println(st.String(""))
 
-	SaveJson("test.json", &ts)
+	dir := t.TempDir()
+	jsonPath := filepath.Join(dir, "test.json")
+	SaveJson(jsonPath, &ts)
 	ts1 := TestStruct{}
-	err := LoadJson("test.json", &ts1)
+	err := LoadJson(jsonPath, &ts1)
 	fmt.Println(err)
 	fmt.Println(ts1.C)
 }
@@ -233,13 +236,19 @@ func Test0011(t *testing.T) {
 }
 
 func Test0012(t *testing.T) {
-	Copy("common.go", "common.go.1")
-	fmt.Println(FileExists("common.go.1"))
-	fmt.Println(FileMd5("common.go.1"))
-	fmt.Println(FileReplace("common.go.1", "func", "fuck"))
-	fmt.Println(IsSymlink("common.go.1"))
-	fmt.Println(FileFind("common.go.1", "fuck ini()"))
-	fmt.Println(FileLineCount("common.go.1"))
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "alg.go.1")
+	if err := Copy("alg.go", dst); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	fmt.Println(FileExists(dst))
+	fmt.Println(FileMd5(dst))
+	if err := FileReplace(dst, "func", "fn"); err != nil {
+		t.Fatalf("FileReplace: %v", err)
+	}
+	fmt.Println(IsSymlink(dst))
+	fmt.Println(FileFind(dst, "fn CompressData"))
+	fmt.Println(FileLineCount(dst))
 }
 
 func Test0013(t *testing.T) {

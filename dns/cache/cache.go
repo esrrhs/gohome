@@ -57,7 +57,9 @@ func (c *DNSCache) Get(key string) (*dns.Msg, bool) {
 	if time.Now().After(e.ExpiresAt) {
 		c.mu.RUnlock()
 		c.mu.Lock()
-		delete(c.items, key)
+		if cur, exists := c.items[key]; exists && cur == e {
+			delete(c.items, key)
+		}
 		c.mu.Unlock()
 		c.misses.Add(1) // 过期未命中同样计入 miss
 		return nil, false

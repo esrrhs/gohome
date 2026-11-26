@@ -336,17 +336,18 @@ func TestTMysqlInsertBindsValues(t *testing.T) {
 	}
 }
 
-// TestTMysqlPurgeBindsRetention: the retention window is a parameter too.
+// TestTMysqlPurgeBindsRetention: the retention window is a parameter too,
+// and uses a sargable predicate over the indexed time column.
 func TestTMysqlPurgeBindsRetention(t *testing.T) {
 	tr, d := newFakeDB(t, nil)
 	tr.purge()
 	for _, s := range d.allStmts() {
 		if strings.Contains(s, "delete") {
-			if strings.Contains(s, ">= 7") {
+			if strings.Contains(s, "7") {
 				t.Errorf("retention day inlined into SQL: %s", s)
 			}
-			if !strings.Contains(s, ">= ?") {
-				t.Errorf("purge should bind the retention day, got: %s", s)
+			if !strings.Contains(s, "INTERVAL ? DAY") {
+				t.Errorf("purge should bind the retention day via ?, got: %s", s)
 			}
 		}
 	}

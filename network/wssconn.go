@@ -141,7 +141,7 @@ func (c *WssConn) DialContext(ctx context.Context, dst string) (Conn, error) {
 	c.pending[&cancel] = struct{}{}
 	c.mu.Unlock()
 	defer func() { c.mu.Lock(); delete(c.pending, &cancel); c.mu.Unlock() }()
-	d := &net.Dialer{Control: gControlOnConnSetup}
+	d := &net.Dialer{Control: getDialerController()}
 	tr := &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: cfg.TLSConfig, DialContext: d.DialContext, TLSHandshakeTimeout: cfg.HandshakeTimeout}
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("wss: redirects are not allowed") }}

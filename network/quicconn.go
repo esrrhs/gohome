@@ -247,6 +247,10 @@ func (c *QuicConn) Close() error {
 
 	var firstErr error
 	if c.stream != nil {
+		// CancelRead unblocks any concurrent Read(p) immediately; stream.Close()
+		// in quic-go only sends a write-side FIN and leaves Read hanging when
+		// the underlying session stays open (streamOnly / cached clientSess).
+		c.stream.CancelRead(0)
 		if err := c.stream.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -315,7 +319,7 @@ func (c *QuicConn) Dial(dst string) (Conn, error) {
 	// Get (or establish) the shared session for this server address. The
 	// cache entry holds one reference until the dialed conn is delivered or
 	// this Dial fails/aborts.
-	cs, _, err := acquireQuicSession(ctx, dst, gControlOnConnSetup)
+	cs, _, err := acquireQuicSession(ctx, dst, getDialerController())
 	if err != nil {
 		return nil, err
 	}

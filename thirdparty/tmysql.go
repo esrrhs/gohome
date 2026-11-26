@@ -112,7 +112,8 @@ func (t *TMysql) Load() error {
 		"name VARCHAR(1000) NOT NULL," +
 		"value VARCHAR(1000) NOT NULL," +
 		"time DATETIME NOT NULL," +
-		"PRIMARY KEY(name));")
+		"PRIMARY KEY(name)," +
+		"INDEX idx_time(time));")
 	if err != nil {
 		loggo.Error("TMysql CREATE TABLE fail %v", err)
 		db.Close()
@@ -145,7 +146,7 @@ func (t *TMysql) purge() {
 	if t.gdb == nil {
 		return
 	}
-	if _, err := t.gdb.Exec("delete from tmysql."+t.table+" where (TO_DAYS(NOW()) - TO_DAYS(time)) >= ?", t.day); err != nil {
+	if _, err := t.gdb.Exec("delete from tmysql."+t.table+" where time <= DATE_SUB(NOW(), INTERVAL ? DAY)", t.day); err != nil {
 		loggo.Error("TMysql purge fail %v", err)
 	}
 }

@@ -21,6 +21,9 @@ func NewCrypto(family string) *Crypto {
 }
 
 func (c *Crypto) Sum(data []byte, algo string, height uint64) []byte {
+	if c == nil || c.cn == nil {
+		return nil
+	}
 	return c.cn.Sum(data, algo, height)
 }
 

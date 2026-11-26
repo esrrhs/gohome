@@ -1,7 +1,7 @@
 package lru
 
 import (
-	"github.com/esrrhs/gohome/common"
+	"hash/maphash"
 	"time"
 )
 
@@ -13,6 +13,7 @@ LRUMultiCache 实现了一个多层级的最近最少使用（LRU）缓存系统
 
 type LRUMultiCache[K comparable, V any] struct {
 	caches []*LRUCache[K, V]
+	seed   maphash.Seed
 }
 
 func NewLRUMultiCache[K comparable, V any](numCaches int, capacity int, ttl time.Duration) *LRUMultiCache[K, V] {
@@ -25,16 +26,19 @@ func NewLRUMultiCache[K comparable, V any](numCaches int, capacity int, ttl time
 	for i := 0; i < numCaches; i++ {
 		caches[i] = NewLRUCache[K, V](perSize, ttl)
 	}
-	return &LRUMultiCache[K, V]{caches: caches}
+	return &LRUMultiCache[K, V]{
+		caches: caches,
+		seed:   maphash.MakeSeed(),
+	}
 }
 
 func (c *LRUMultiCache[K, V]) Get(key K) (V, bool) {
-	index := common.HashGeneric(key) % uint64(len(c.caches))
+	index := maphash.Comparable(c.seed, key) % uint64(len(c.caches))
 	return c.caches[index].Get(key)
 }
 
 func (c *LRUMultiCache[K, V]) Set(key K, value V) {
-	index := common.HashGeneric(key) % uint64(len(c.caches))
+	index := maphash.Comparable(c.seed, key) % uint64(len(c.caches))
 	c.caches[index].Set(key, value)
 }
 

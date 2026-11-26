@@ -26,6 +26,7 @@ type Group struct {
 	father   *Group
 	son      sync.Map
 	wg       sync.WaitGroup
+	mu       sync.Mutex
 	errOnce  sync.Once
 	err      error
 	isexit   int32
@@ -44,6 +45,9 @@ func NewGroup(name string, father *Group, exitfunc func()) *Group {
 
 	if father != nil {
 		father.addson(g)
+		if father.IsExit() {
+			g.exit(father.Error())
+		}
 	}
 
 	return g
@@ -76,13 +80,18 @@ func (g *Group) IsExit() bool {
 }
 
 func (g *Group) Error() error {
-	return g.err
+	g.mu.Lock()
+	err := g.err
+	g.mu.Unlock()
+	return err
 }
 
 func (g *Group) exit(err error) {
 	g.errOnce.Do(func() {
+		g.mu.Lock()
 		g.err = err
 		atomic.StoreInt32(&g.isexit, 1)
+		g.mu.Unlock()
 		close(g.donech)
 		if g.exitfunc != nil {
 			g.exitfunc()
@@ -101,10 +110,13 @@ func (g *Group) Done() <-chan int {
 }
 
 func (g *Group) Go(name string, f func() error) {
+	g.mu.Lock()
 	if atomic.LoadInt32(&g.isexit) != 0 {
+		g.mu.Unlock()
 		return
 	}
 	g.add()
+	g.mu.Unlock()
 
 	go func() {
 		defer common.CrashLog()
@@ -146,7 +158,7 @@ func (g *Group) Wait() error {
 	if g.father != nil {
 		g.father.removeson(g)
 	}
-	return g.err
+	return g.Error()
 }
 
 // Join waits until every goroutine started via Go has returned.
@@ -163,5 +175,5 @@ func (g *Group) Join() error {
 	if g.father != nil {
 		g.father.removeson(g)
 	}
-	return g.err
+	return g.Error()
 }

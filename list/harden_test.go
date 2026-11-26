@@ -552,3 +552,89 @@ func TestHardenSyncListEmptyPopAndConcurrent(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+func TestHardenReqQueuePanicDoesNotDeadlock(t *testing.T) {
+	shouldPanic := true
+	var mu sync.Mutex
+	gate := make(chan struct{})
+
+	q := NewReqQueue[string, string](func(k string) (string, error) {
+		mu.Lock()
+		p := shouldPanic
+		mu.Unlock()
+		if p {
+			<-gate
+			panic("boom inside requestFunc")
+		}
+		return "ok-" + k, nil
+	})
+
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, errs[idx] = q.Submit("same-key")
+		}(i)
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(gate)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err == nil {
+			t.Fatalf("caller %d expected panic error, got nil", i)
+		}
+	}
+
+	mu.Lock()
+	shouldPanic = false
+	mu.Unlock()
+	got, err := q.Submit("same-key")
+	if err != nil || got != "ok-same-key" {
+		t.Fatalf("subsequent Submit after panic = (%q, %v), want (\"ok-same-key\", nil)", got, err)
+	}
+}
+
+func TestHardenRBufferNegativeGuardsAndLazyAlloc(t *testing.T) {
+	rb := NewRBuffergo(1024*1024, true)
+	if rb.buffer != nil {
+		t.Fatal("large RBuffergo should defer slice allocation until first write")
+	}
+	if rb.CanWrite(-1) || rb.CanRead(-1) {
+		t.Fatal("negative size must be rejected by CanWrite/CanRead")
+	}
+	rb.SkipWrite(-5)
+	rb.SkipRead(-5)
+	if rb.Size() != 0 || rb.buffer != nil {
+		t.Fatal("negative SkipWrite/SkipRead must be no-op")
+	}
+	if !rb.Write([]byte("lazy-ok")) {
+		t.Fatal("Write failed")
+	}
+	out := make([]byte, 7)
+	if !rb.Read(out) || string(out) != "lazy-ok" {
+		t.Fatalf("Read back = %q, want lazy-ok", string(out))
+	}
+}
+
+func TestHardenROBufferStartIdWrapAndZeroPop(t *testing.T) {
+	var zero ROBuffergo
+	if err := zero.PopFront(); err == nil {
+		t.Fatal("zero-value PopFront must error instead of panicking")
+	}
+	if NewROBuffer(0, 0, 10) != nil || NewROBuffer(3, -1, 10) != nil {
+		t.Fatal("invalid len/startid must return nil")
+	}
+	b := NewROBuffer(4, 8, 10)
+	if b == nil {
+		t.Fatal("NewROBuffer(4, 8, 10) must succeed")
+	}
+	if err := b.Set(0, "wrapped-slot"); err != nil {
+		t.Fatalf("Set wrapped id 0 failed: %v", err)
+	}
+	if err, v := b.Get(0); err != nil || v != "wrapped-slot" {
+		t.Fatalf("Get wrapped id 0 = (%v, %v)", err, v)
+	}
+}

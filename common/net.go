@@ -2,9 +2,9 @@ package common
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -27,33 +27,23 @@ func GetOutboundIP() (net.IP, error) {
 	return localAddr.IP, nil
 }
 
+var privatePrefixes = [...]netip.Prefix{
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("fc00::/7"),  // ULA
+	netip.MustParsePrefix("fe80::/10"), // Link-local
+}
+
 // 判断IP是否为私有局域网IP
 func IsPrivateIP(ipStr string) bool {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
+	addr, err := netip.ParseAddr(strings.TrimSpace(ipStr))
+	if err != nil {
 		return false
 	}
-
-	privateIPv4Blocks := []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-	}
-	privateIPv6Blocks := []string{
-		"fc00::/7",  // ULA
-		"fe80::/10", // Link-local
-	}
-
-	var blocks []string
-	if ip.To4() != nil {
-		blocks = privateIPv4Blocks
-	} else {
-		blocks = privateIPv6Blocks
-	}
-
-	for _, cidr := range blocks {
-		_, block, _ := net.ParseCIDR(cidr)
-		if block.Contains(ip) {
+	addr = addr.Unmap()
+	for _, pfx := range privatePrefixes {
+		if pfx.Contains(addr) {
 			return true
 		}
 	}
@@ -66,9 +56,7 @@ var dohClient *http.Client
 func init() {
 	dohClient = &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-			},
+			ForceAttemptHTTP2: true,
 			DisableKeepAlives: false, // 关键：开启连接复用
 			MaxIdleConns:      100,   // 连接池大小
 			IdleConnTimeout:   90 * time.Second,
@@ -86,7 +74,7 @@ func ResolveDomainToIP(domain string) (string, error) {
 		return domain, nil
 	}
 
-	// 构造请求URL dns.alidns.com
+	// 构造请求URL dns.alidns.com (223.5.5.5 具备合法 IP SAN TLS 证书)
 	dohURL := "https://223.5.5.5/resolve?name=" + url.QueryEscape(domain) + "&type=1&short=true"
 
 	req, err := http.NewRequestWithContext(context.Background(), "GET", dohURL, nil)
@@ -99,11 +87,18 @@ func ResolveDomainToIP(domain string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("DoH request failed: %w", err)
 	}
-	defer resp.Body.Close() // 必须读取完 Body 并 Close 才能复用连接
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("DoH HTTP status not ok: %d", resp.StatusCode)
+	}
 
 	// 解析 JSON 响应
 	var result []string
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&result); err != nil {
 		return "", fmt.Errorf("JSON decode failed: %w", err)
 	}
 

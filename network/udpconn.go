@@ -53,6 +53,7 @@ type UdpConfig struct {
 	RecvChanLen         int
 	AcceptChanLen       int
 	RecvChanPushTimeout int
+	MaxSessions         int
 }
 
 func DefaultUdpConfig() *UdpConfig {
@@ -61,6 +62,7 @@ func DefaultUdpConfig() *UdpConfig {
 		RecvChanLen:         128,
 		AcceptChanLen:       128,
 		RecvChanPushTimeout: 100,
+		MaxSessions:         4096,
 	}
 }
 
@@ -184,8 +186,8 @@ func (c *UdpConn) Dial(dst string) (Conn, error) {
 	}()
 
 	var d net.Dialer
-	if gControlOnConnSetup != nil {
-		d = net.Dialer{Control: gControlOnConnSetup}
+	if ctrl := getDialerController(); ctrl != nil {
+		d = net.Dialer{Control: ctrl}
 	}
 	conn, err := d.DialContext(ctx, "udp", addr.String())
 	if err != nil {
@@ -287,6 +289,22 @@ func (c *UdpConn) loopRecv() error {
 
 		v, ok := c.listener.sonny.Load(srcaddrstr)
 		if !ok {
+			maxSess := c.config.MaxSessions
+			if maxSess <= 0 {
+				maxSess = 4096
+			}
+			curSess := 0
+			c.listener.sonny.Range(func(_, value interface{}) bool {
+				u := value.(*UdpConn)
+				if atomic.LoadInt32(&u.listenersonny.isclose) == 0 {
+					curSess++
+				}
+				return curSess < maxSess
+			})
+			if curSess >= maxSess {
+				continue
+			}
+
 			sonny := &udpConnListenerSonny{
 				dstaddr:    srcaddr,
 				fatherconn: c.listener.listenerconn,

@@ -2,7 +2,6 @@ package cryptonight
 
 import (
 	"encoding/binary"
-	"unsafe"
 
 	"github.com/esrrhs/gohome/crypto/cryptonight/inter/blake256"
 )
@@ -126,10 +125,9 @@ func v4_random_math(code []V4_Instruction, r []uint32) {
 	//loggo.Info("v4_random_math end r %v %v %v %v %v %v %v %v %v", r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8])
 }
 
-func check_data(data_index *int, bytes_needed int, data *[]byte) {
-	if *data_index+bytes_needed > len(*data) {
-		tmp := blake256.Sum256((*data)[:])
-		copy((*data)[:], tmp[:])
+func check_data(data_index *int, bytes_needed int, data *[32]byte) {
+	if *data_index+bytes_needed > len(data) {
+		*data = blake256.Sum256(data[:])
 		*data_index = 0
 	}
 }
@@ -138,10 +136,9 @@ func check_data(data_index *int, bytes_needed int, data *[]byte) {
 // "code" array must have space for NUM_INSTRUCTIONS_MAX+1 instructions
 func v4_random_math_init(code []V4_Instruction, height uint64) {
 
-	data := make([]int8, 32)
-	tmp := height
-	binary.LittleEndian.PutUint64(*(*[]byte)(unsafe.Pointer(&data)), tmp)
-	data[20] = -38 // change seed
+	var data [32]byte
+	binary.LittleEndian.PutUint64(data[:8], height)
+	data[20] = 0xda // -38 in two's complement; change seed
 
 	//loggo.Info("before data %d %d %d %d %d %d %d %d", data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7])
 
@@ -192,7 +189,7 @@ func v4_random_math_init(code []V4_Instruction, height uint64) {
 				break
 			}
 
-			check_data(&data_index, 1, (*[]byte)(unsafe.Pointer(&data)))
+			check_data(&data_index, 1, &data)
 
 			c := uint8(data[data_index])
 			data_index++
@@ -206,8 +203,8 @@ func v4_random_math_init(code []V4_Instruction, height uint64) {
 			// XOR = opcodes 6-7
 			opcode := uint8(c & ((1 << V4_OPCODE_BITS) - 1))
 			if opcode == 5 {
-				check_data(&data_index, 1, (*[]byte)(unsafe.Pointer(&data)))
-				if data[data_index] >= 0 {
+				check_data(&data_index, 1, &data)
+				if int8(data[data_index]) >= 0 {
 					opcode = ROR
 				} else {
 					opcode = ROL
@@ -326,8 +323,8 @@ func v4_random_math_init(code []V4_Instruction, height uint64) {
 					alu_busy[next_latency-op_latency[opcode]+1][alu_index] = true
 
 					// ADD instruction requires 4 more random bytes for 32-bit constant "C" in "a = a + b + C"
-					check_data(&data_index, 4, (*[]byte)(unsafe.Pointer(&data)))
-					t := binary.LittleEndian.Uint32((*(*[]byte)(unsafe.Pointer(&data)))[data_index:])
+					check_data(&data_index, 4, &data)
+					t := binary.LittleEndian.Uint32(data[data_index:])
 					code[code_size].C = t
 					data_index += 4
 				}

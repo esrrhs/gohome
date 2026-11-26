@@ -57,6 +57,9 @@ type ROBuffergo struct {
 }
 
 func NewROBuffer(len int, startid int, maxid int) *ROBuffergo {
+	if len <= 0 || startid < 0 {
+		return nil
+	}
 	if startid >= maxid {
 		return nil
 	}
@@ -70,7 +73,7 @@ func NewROBuffer(len int, startid int, maxid int) *ROBuffergo {
 	buffer.len = len
 	buffer.maxid = maxid
 	for i := range buffer.id {
-		buffer.id[i] = startid + i
+		buffer.id[i] = (startid + i) % maxid
 	}
 	return buffer
 }
@@ -150,6 +153,9 @@ func (b *ROBuffergo) Front() (error, interface{}) {
 }
 
 func (b *ROBuffergo) PopFront() error {
+	if b.begin >= len(b.flag) {
+		return errors.New("no init")
+	}
 	if !b.flag[b.begin] {
 		return errors.New("no front data")
 	}

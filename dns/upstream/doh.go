@@ -44,6 +44,7 @@ func (u *DoHUpstream) rebuildClient() error {
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: false,
 		},
+		ForceAttemptHTTP2: true,
 		DisableKeepAlives: false,
 		MaxIdleConns:      100,
 		IdleConnTimeout:   90 * time.Second,
@@ -57,7 +58,15 @@ func (u *DoHUpstream) rebuildClient() error {
 
 		switch proxyURL.Scheme {
 		case "socks5", "socks5h":
-			dialer, err := proxy.SOCKS5("tcp", proxyURL.Host, nil, proxy.Direct)
+			var auth *proxy.Auth
+			if proxyURL.User != nil {
+				pwd, _ := proxyURL.User.Password()
+				auth = &proxy.Auth{
+					User:     proxyURL.User.Username(),
+					Password: pwd,
+				}
+			}
+			dialer, err := proxy.SOCKS5("tcp", proxyURL.Host, auth, proxy.Direct)
 			if err != nil {
 				return fmt.Errorf("create socks5 dialer failed: %w", err)
 			}

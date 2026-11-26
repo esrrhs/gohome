@@ -24,10 +24,18 @@ type LRUResourceCache[K comparable, V any] struct {
 }
 
 func NewLRUResourceCache[K comparable, V any](maxEntries int, ttl time.Duration, resourceRequestFunc func(K) (V, error)) *LRUResourceCache[K, V] {
-	return &LRUResourceCache[K, V]{
-		cache: NewLRUMultiCache[K, V](runtime.NumCPU(), maxEntries, ttl),
-		req:   list.NewReqQueue[K, V](resourceRequestFunc),
+	cache := NewLRUMultiCache[K, V](runtime.NumCPU(), maxEntries, ttl)
+	rc := &LRUResourceCache[K, V]{
+		cache: cache,
 	}
+	rc.req = list.NewReqQueue[K, V](func(key K) (V, error) {
+		val, err := resourceRequestFunc(key)
+		if err == nil {
+			cache.Set(key, val)
+		}
+		return val, err
+	})
+	return rc
 }
 
 func (rc *LRUResourceCache[K, V]) GetResource(key K) (V, error) {
@@ -46,7 +54,6 @@ func (rc *LRUResourceCache[K, V]) GetResource(key K) (V, error) {
 		return zeroValue, err
 	}
 
-	rc.cache.Set(key, value)
 	return value, nil
 }
 

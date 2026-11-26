@@ -513,3 +513,43 @@ func TestHardenNewServer_DefaultAddr(t *testing.T) {
 		t.Fatalf("explicit addr must be kept, got %q", s.Addr())
 	}
 }
+
+func TestHardenQueryDirectServFailFailover(t *testing.T) {
+	badAddr, _, stopBad := startUDPHandlerStub(t, servFailHandler)
+	defer stopBad()
+	goodAddr, _, stopGood := startUDPHandlerStub(t, replyA("10.8.8.8"))
+	defer stopGood()
+
+	r := newStubResolver(t, []string{badAddr, goodAddr}, []string{"127.0.0.1:1"}, func(c *Config) {
+		c.DirectDomains = []string{"failover.test"}
+	})
+	ips, err := r.Resolve(context.Background(), "failover.test")
+	if err != nil || len(ips) != 1 || ips[0].String() != "10.8.8.8" {
+		t.Fatalf("expected failover past SERVFAIL to 10.8.8.8, got ips=%v err=%v", ips, err)
+	}
+}
+
+func TestHardenStrictGeoIPRejectsUnverifiedPublicIP(t *testing.T) {
+	directAddr, _, stopDirect := startUDPHandlerStub(t, replyA("203.0.113.99"))
+	defer stopDirect()
+	remoteAddr, _, stopRemote := startUDPHandlerStub(t, func(req *dns.Msg) *dns.Msg {
+		time.Sleep(40 * time.Millisecond)
+		return replyA("198.51.100.99")(req)
+	})
+	defer stopRemote()
+
+	r := newStubResolver(t, []string{directAddr}, []string{remoteAddr}, func(c *Config) {
+		c.StrictGeoIP = true
+	})
+
+	ips, err := r.Resolve(context.Background(), "strict-geo.test")
+	if err != nil || len(ips) != 1 || ips[0].String() != "198.51.100.99" {
+		t.Fatalf("StrictGeoIP without mmdb must discard unverified public direct IP, got %v (%v)", ips, err)
+	}
+	if proxy, err := r.ShouldProxy("203.0.113.99"); err != nil || !proxy {
+		t.Fatalf("StrictGeoIP ShouldProxy(public IP) = (%v, %v), want (true, nil)", proxy, err)
+	}
+	if proxy, err := r.ShouldProxy("10.0.0.1"); err != nil || proxy {
+		t.Fatalf("StrictGeoIP ShouldProxy(private IP) = (%v, %v), want (false, nil)", proxy, err)
+	}
+}

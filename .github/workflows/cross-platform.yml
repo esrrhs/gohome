@@ -4,8 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
-    # #29 supplies WSS + RDNS weak-link coverage; also test the stacked PR.
-    branches: [master, feat/wss-rdns-weaknet-protocol-ci]
+    branches: [master]
 
 permissions:
   contents: read

@@ -110,3 +110,10 @@ func TestTestSumWrapper(t *testing.T) {
 		t.Error("TestSum(\"not-an-algo\") = true, want false")
 	}
 }
+
+func TestCryptoUnknownFamilySumSafe(t *testing.T) {
+	c := NewCrypto("unknown-family")
+	if got := c.Sum([]byte("hello"), "cn/0", 0); got != nil {
+		t.Fatalf("expected nil digest for uninitialized family, got %x", got)
+	}
+}

@@ -173,6 +173,7 @@ type RicmpConfig struct {
 	CloseWaitTimeoutMs int
 	AcceptChanLen      int
 	Congestion         string
+	MaxSessions        int
 }
 
 func DefaultRicmpConfig() *RicmpConfig {
@@ -190,6 +191,7 @@ func DefaultRicmpConfig() *RicmpConfig {
 		CloseWaitTimeoutMs: 5000,
 		AcceptChanLen:      128,
 		Congestion:         "bb",
+		MaxSessions:        4096,
 	}
 }
 
@@ -298,7 +300,7 @@ func (c *RicmpConn) Read(p []byte) (n int, err error) {
 			if wg != nil && wg.IsExit() {
 				return 0, errors.New("closed conn")
 			}
-			time.Sleep(time.Millisecond * 100)
+			waitNotify(fm.RecvNotify(), 10*time.Millisecond)
 			continue
 		}
 
@@ -352,7 +354,7 @@ func (c *RicmpConn) Write(p []byte) (n int, err error) {
 				}
 				return 0, errors.New("closed conn")
 			}
-			time.Sleep(time.Millisecond * 100)
+			waitNotify(fm.SendNotify(), 10*time.Millisecond)
 			continue
 		}
 
@@ -363,7 +365,7 @@ func (c *RicmpConn) Write(p []byte) (n int, err error) {
 			return totalsize, nil
 		}
 
-		time.Sleep(time.Millisecond * 100)
+		waitNotify(fm.SendNotify(), 10*time.Millisecond)
 	}
 
 	if cur > 0 {
@@ -679,6 +681,24 @@ func (c *RicmpConn) loopListenerRecv(listenerconn *icmp.PacketConn) error {
 
 		v, ok := c.listener.sonny.Load(cid)
 		if !ok {
+			if cid == "" || len(cid) > 128 {
+				continue
+			}
+			maxSess := c.config.MaxSessions
+			if maxSess <= 0 {
+				maxSess = 4096
+			}
+			curSess := 0
+			c.listener.sonny.Range(func(_, value interface{}) bool {
+				u := value.(*RicmpConn)
+				if !u.isclose.Load() {
+					curSess++
+				}
+				return curSess < maxSess
+			})
+			if curSess >= maxSess {
+				continue
+			}
 			fm := NewFrameMgr(c.config.CutSize, c.config.MaxId, c.config.BufferSize, c.config.MaxWin, c.config.ResendTimems, c.config.Compress, c.config.Stat)
 			fm.SetDebugid(cid + "-listenersonny")
 			if c.config.Congestion == "bb" {
