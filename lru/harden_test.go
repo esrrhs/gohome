@@ -185,3 +185,25 @@ func TestHardenResourceZeroMaxEntries(t *testing.T) {
 		t.Fatalf("cache unbounded: size=%d > shards=%d", cache.Size(), runtime.NumCPU())
 	}
 }
+
+func TestHardenLRUMultiCustomComparableKeys(t *testing.T) {
+	type customID string
+	type endpointKey struct {
+		Host string
+		Port uint16
+	}
+
+	mc := NewLRUMultiCache[endpointKey, string](4, 32, time.Minute)
+	k := endpointKey{Host: "127.0.0.1", Port: 8080}
+	mc.Set(k, "backend-a")
+	if got, ok := mc.Get(k); !ok || got != "backend-a" {
+		t.Fatalf("struct key Get = (%q, %v), want (\"backend-a\", true)", got, ok)
+	}
+
+	rc := NewLRUResourceCache[customID, int](16, time.Minute, func(id customID) (int, error) {
+		return len(id), nil
+	})
+	if v, err := rc.GetResource("tenant-alpha"); err != nil || v != 12 {
+		t.Fatalf("defined-type key GetResource = (%d, %v), want (12, nil)", v, err)
+	}
+}

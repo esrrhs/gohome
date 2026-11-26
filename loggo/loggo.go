@@ -33,6 +33,7 @@ type Config struct {
 
 var gConfig Config
 var gInited bool
+var printerMu sync.RWMutex
 
 // logFiles 缓存当天各级别日志文件的句柄，避免每条日志都 open/close。
 // logFileMu 同时保护句柄表和实际写入，保证并发日志行不交错。
@@ -73,12 +74,17 @@ func Ini(config Config) {
 }
 
 func SetPrinter(w io.Writer) {
+	printerMu.Lock()
 	gConfig.printer = w
+	printerMu.Unlock()
 }
 
 func print(str string) {
-	if gConfig.printer != nil {
-		gConfig.printer.Write([]byte(str))
+	printerMu.RLock()
+	p := gConfig.printer
+	printerMu.RUnlock()
+	if p != nil {
+		p.Write([]byte(str))
 	} else {
 		fmt.Print(str)
 	}
@@ -318,7 +324,7 @@ func checkDate(config Config) {
 		}
 
 		date := strs[2]
-		date = strings.TrimRight(date, ".log")
+		date = strings.TrimSuffix(date, ".log")
 
 		t, e := time.Parse("2006-01-02", date)
 		if e != nil {
@@ -355,9 +361,16 @@ func crashLog() {
 }
 
 func dumpStacks() string {
-	buf := make([]byte, 16384)
-	buf = buf[:runtime.Stack(buf, true)]
-	return fmt.Sprintf("=== BEGIN goroutine stack dump ===\n%s\n=== END goroutine stack dump ===", buf)
+	size := 16384
+	const maxStackSize = 4 << 20
+	for {
+		buf := make([]byte, size)
+		n := runtime.Stack(buf, true)
+		if n < size || size >= maxStackSize {
+			return fmt.Sprintf("=== BEGIN goroutine stack dump ===\n%s\n=== END goroutine stack dump ===", buf[:n])
+		}
+		size *= 2
+	}
 }
 
 func loopCheck(config Config) {

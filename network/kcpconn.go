@@ -200,8 +200,8 @@ func (c *KcpConn) Dial(dst string) (Conn, error) {
 	}
 
 	var lc net.ListenConfig
-	if gControlOnConnSetup != nil {
-		lc.Control = gControlOnConnSetup
+	if ctrl := getDialerController(); ctrl != nil {
+		lc.Control = ctrl
 	}
 
 	laddr := &net.UDPAddr{}

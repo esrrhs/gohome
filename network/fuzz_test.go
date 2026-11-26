@@ -787,3 +787,32 @@ func FuzzRdnsQName(f *testing.F) {
 		}
 	})
 }
+
+// FuzzFrameMgrWireRecv feeds arbitrary untrusted wire bytes through
+// proto.Unmarshal -> OnRecvFrame -> Update to ensure malformed or empty
+// protobuf frames (e.g. Type=DATA with Data=nil) never panic or corrupt state.
+func FuzzFrameMgrWireRecv(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte{0x08, 0x00})
+	f.Add([]byte{0x08, 0x00, 0x20, 0x00})
+	f.Add([]byte{0x08, 0x01, 0x32, 0x02, 0x00, 0x01})
+	f.Add([]byte{0x08, 0x00, 0x2a, 0x04, 0x12, 0x02, 'h', 'i'})
+
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		if len(raw) > fuzzPktMax {
+			raw = raw[:fuzzPktMax]
+		}
+		fm := NewFrameMgr(64, 64, 1024, 16, 10, 0, 0)
+		fm.rttns = 0
+
+		var fr Frame
+		if err := proto.Unmarshal(raw, &fr); err == nil {
+			fm.OnRecvFrame(&fr)
+			fm.Update()
+			_ = fm.GetSendFrames()
+			if n := fm.GetRecvBufferSize(); n < 0 || n > 1024 {
+				t.Fatalf("recv buffer size invariant violated: %d", n)
+			}
+		}
+	})
+}

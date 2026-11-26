@@ -60,6 +60,9 @@ type Config struct {
 	// 境内归属地国家码，用于竞速结果与 ShouldProxy 的 GeoIP 判定，默认 "CN"。
 	// 部署在其他国家时（如 -lor US 搭配美国境内 DNS）应设置为对应国家码。
 	RegionCode string
+	// StrictGeoIP 开启严格防污染模式：当未加载 GeoIP 库或公网 IP 查无国家归属时，
+	// 不再默认放行视为境内，而是交由远程加密上游裁决 / 判定走代理。
+	StrictGeoIP bool
 
 	// 查询超时时间，默认 3s
 	Timeout time.Duration
@@ -538,7 +541,10 @@ func (r *StandardResolver) exchangeInternal(ctx context.Context, req *dns.Msg, q
 	}
 
 	// B. 显式命中黑名单代理域名 -> 仅走海外加密上游
-	if r.proxyDomains.Has(qName) && len(r.remoteUpstreams) > 0 {
+	r.mu.RLock()
+	hasRemote := len(r.remoteUpstreams) > 0
+	r.mu.RUnlock()
+	if r.proxyDomains.Has(qName) && hasRemote {
 		resp, err := r.queryRemote(ctx, req)
 		if err == nil && resp != nil {
 			r.recordRoute(qName, true, RouteReasonProxyDomain)
@@ -549,6 +555,10 @@ func (r *StandardResolver) exchangeInternal(ctx context.Context, req *dns.Msg, q
 	// C. 未命中域名：并发竞速（Dual-Stack Parallel Query）
 	// 同时向国内直连上游和海外远程上游发起请求
 	return r.queryParallel(ctx, req)
+}
+
+func isUsableDNSRcode(rcode int) bool {
+	return rcode == dns.RcodeSuccess || rcode == dns.RcodeNameError
 }
 
 func (r *StandardResolver) queryDirect(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
@@ -563,12 +573,22 @@ func (r *StandardResolver) queryDirect(ctx context.Context, req *dns.Msg) (*dns.
 	}
 
 	var lastErr error
+	var fallbackResp *dns.Msg
 	for _, u := range upstreams {
 		resp, err := u.Exchange(ctx, req)
 		if err == nil && resp != nil {
-			return resp, nil
+			if isUsableDNSRcode(resp.Rcode) {
+				return resp, nil
+			}
+			if fallbackResp == nil {
+				fallbackResp = resp
+			}
+			continue
 		}
 		lastErr = err
+	}
+	if fallbackResp != nil {
+		return fallbackResp, nil
 	}
 	if lastErr != nil {
 		return nil, fmt.Errorf("all direct upstreams failed: %w", lastErr)
@@ -587,12 +607,22 @@ func (r *StandardResolver) queryRemote(ctx context.Context, req *dns.Msg) (*dns.
 	}
 
 	var lastErr error
+	var fallbackResp *dns.Msg
 	for _, u := range upstreams {
 		resp, err := u.Exchange(ctx, req)
 		if err == nil && resp != nil {
-			return resp, nil
+			if isUsableDNSRcode(resp.Rcode) {
+				return resp, nil
+			}
+			if fallbackResp == nil {
+				fallbackResp = resp
+			}
+			continue
 		}
 		lastErr = err
+	}
+	if fallbackResp != nil {
+		return fallbackResp, nil
 	}
 	if lastErr != nil {
 		return nil, fmt.Errorf("all remote upstreams failed: %w", lastErr)
@@ -706,6 +736,10 @@ func (r *StandardResolver) isAllDomestic(ips []net.IP) bool {
 			if code != r.cfg.RegionCode {
 				return false
 			}
+			continue
+		}
+		if r.cfg.StrictGeoIP {
+			return false
 		}
 	}
 	return true
@@ -732,6 +766,9 @@ func (r *StandardResolver) ShouldProxy(target string) (bool, error) {
 		code, err := r.geodb.GetCountryCode(ip)
 		if err == nil && len(code) > 0 {
 			return code != r.cfg.RegionCode, nil
+		}
+		if r.cfg.StrictGeoIP {
+			return true, nil
 		}
 		return false, nil
 	}
@@ -863,10 +900,14 @@ func (r *StandardResolver) ClearRouteRecords() {
 	r.routes.clear()
 }
 
-// Close 释放 resolver 持有的资源（如 GeoIP 数据库句柄），关闭后不应继续使用。
+// Close 释放 resolver 持有的资源（如 GeoIP 数据库句柄与上游空闲连接），关闭后不应继续使用。
 func (r *StandardResolver) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	closeUpstreams(r.directUpstreams)
+	closeUpstreams(r.remoteUpstreams)
+	r.directUpstreams = nil
+	r.remoteUpstreams = nil
 	return r.geodb.Close()
 }
 

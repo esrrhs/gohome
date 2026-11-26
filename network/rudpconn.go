@@ -35,6 +35,7 @@ type RudpConfig struct {
 	Congestion         string
 	BatchSendPkgs      int
 	Key                string
+	MaxSessions        int
 }
 
 func rudpObfuscate(data []byte, key string) {
@@ -65,6 +66,7 @@ func DefaultRudpConfig() *RudpConfig {
 		Congestion:         "bb",
 		BatchSendPkgs:      128,
 		Key:                "",
+		MaxSessions:        4096,
 	}
 }
 
@@ -312,8 +314,8 @@ func (c *RudpConn) Dial(dst string) (Conn, error) {
 	}()
 
 	var d net.Dialer
-	if gControlOnConnSetup != nil {
-		d = net.Dialer{Control: gControlOnConnSetup}
+	if ctrl := getDialerController(); ctrl != nil {
+		d = net.Dialer{Control: ctrl}
 	}
 	conn, err := d.DialContext(ctx, "udp", addr.String())
 	if err != nil {
@@ -529,6 +531,22 @@ func (c *RudpConn) loopListenerRecv() error {
 
 		v, ok := c.listener.sonny.Load(srcaddrstr)
 		if !ok {
+			maxSess := c.config.MaxSessions
+			if maxSess <= 0 {
+				maxSess = 4096
+			}
+			curSess := 0
+			c.listener.sonny.Range(func(_, value interface{}) bool {
+				u := value.(*RudpConn)
+				if !u.isclose.Load() {
+					curSess++
+				}
+				return curSess < maxSess
+			})
+			if curSess >= maxSess {
+				continue
+			}
+
 			id := common.Guid()
 			fm := NewFrameMgr(c.config.CutSize, c.config.MaxId, c.config.BufferSize, c.config.MaxWin, c.config.ResendTimems, c.config.Compress, c.config.Stat)
 			fm.SetDebugid(id)

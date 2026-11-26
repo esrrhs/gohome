@@ -5,6 +5,7 @@ import (
 	"github.com/esrrhs/gohome/common"
 	"io"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -98,9 +99,21 @@ func HasProto(proto string) bool {
 }
 
 // gControlOnConnSetup 用于注册连接设置的控制函数。
-var gControlOnConnSetup func(network, address string, c syscall.RawConn) error
+var (
+	gControlMu          sync.RWMutex
+	gControlOnConnSetup func(network, address string, c syscall.RawConn) error
+)
 
 // RegisterDialerController 注册一个控制函数，允许在连接设置时执行额外操作。
 func RegisterDialerController(fn func(network, address string, c syscall.RawConn) error) {
+	gControlMu.Lock()
 	gControlOnConnSetup = fn
+	gControlMu.Unlock()
+}
+
+func getDialerController() func(network, address string, c syscall.RawConn) error {
+	gControlMu.RLock()
+	fn := gControlOnConnSetup
+	gControlMu.RUnlock()
+	return fn
 }

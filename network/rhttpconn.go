@@ -37,6 +37,7 @@ type HttpConfig struct {
 	HBTimeoutMs         int
 	MaxMsgIndex         int
 	RequestTimeoutMs    int // per-request HTTP timeout; 0 means default
+	MaxSessions         int
 }
 
 func DefaultHttpConfig() *HttpConfig {
@@ -51,6 +52,7 @@ func DefaultHttpConfig() *HttpConfig {
 		HBTimeoutMs:         10000,
 		MaxMsgIndex:         100,
 		RequestTimeoutMs:    15000,
+		MaxSessions:         4096,
 	}
 }
 
@@ -345,8 +347,8 @@ func (c *RhttpConn) newH1Transport() *http.Transport {
 	}
 	tp.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		var d net.Dialer
-		if gControlOnConnSetup != nil {
-			d = net.Dialer{Control: gControlOnConnSetup}
+		if ctrl := getDialerController(); ctrl != nil {
+			d = net.Dialer{Control: ctrl}
 		}
 		conn, err := d.DialContext(ctx, network, addr)
 		if err == nil && c.testOnDial != nil {
@@ -365,8 +367,8 @@ func (c *RhttpConn) newH2CTransport() http.RoundTripper {
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
 			var d net.Dialer
-			if gControlOnConnSetup != nil {
-				d = net.Dialer{Control: gControlOnConnSetup}
+			if ctrl := getDialerController(); ctrl != nil {
+				d = net.Dialer{Control: ctrl}
 			}
 			conn, err := d.DialContext(ctx, network, addr)
 			if err == nil && c.testOnDial != nil {
@@ -426,9 +428,19 @@ func (c *RhttpConn) postData(ctx context.Context, url string, d []byte) (int, []
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	maxBody := int64(c.config.MaxPacketSize)
+	if maxBody <= 0 {
+		maxBody = 1024 * 100
+	}
+	if maxBody < 1<<20 {
+		maxBody = 1 << 20
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return 0, nil, err
+	}
+	if int64(len(body)) > maxBody {
+		return 0, nil, errors.New("rhttp: response body too large")
 	}
 
 	return resp.StatusCode, body, nil
@@ -725,6 +737,28 @@ func (c *RhttpConn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			//loggo.Error("no sonny id %v", id)
 			w.WriteHeader(ProtoCodeFail)
 			w.Write([]byte("no sonny id"))
+			return
+		}
+		if len(id) == 0 || len(id) > 256 {
+			w.WriteHeader(ProtoCodeFail)
+			w.Write([]byte("invalid id"))
+			return
+		}
+		maxSess := c.config.MaxSessions
+		if maxSess <= 0 {
+			maxSess = 4096
+		}
+		curSess := 0
+		c.listener.sonny.Range(func(_, value interface{}) bool {
+			u := value.(*RhttpConn)
+			if !u.isclose.Load() {
+				curSess++
+			}
+			return curSess < maxSess
+		})
+		if curSess >= maxSess {
+			w.WriteHeader(ProtoCodeFull)
+			w.Write([]byte("too many sessions"))
 			return
 		}
 

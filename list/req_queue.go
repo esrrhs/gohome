@@ -1,6 +1,7 @@
 package list
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -49,13 +50,22 @@ func (q *ReqQueue[K, V]) Submit(key K) (V, error) {
 		// 如果没有任务在进行，开始新的任务
 		q.newNum.Add(1)
 		loggo.Debug("Starting new task for %v", key)
-		result, err := q.requestFunc(key)
-		req.value = result
-		req.err = err
-		q.tasks.Delete(key)
-		close(req.c) // 通知等待的任务完成
+		var result V
+		var err error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("req_queue requestFunc panic: %v", r)
+				}
+				req.value = result
+				req.err = err
+				q.tasks.Delete(key)
+				close(req.c) // 通知等待的任务完成（含 panic 异常路径，防止同 key 永久死锁）
+			}()
+			result, err = q.requestFunc(key)
+		}()
 		loggo.Debug("Task %v completed successfully", key)
-		return result, err
+		return req.value, req.err
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"crypto/rc4"
+	"errors"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 )
+
+const maxStreamDecoded = 64 << 20 // 64 MiB cap against zlib/gzip decompression bombs
+
+var ErrDecompressSizeExceeded = errors.New("decompressed data exceeds maximum allowed size")
 
 func CompressData(src []byte) []byte {
 	var b bytes.Buffer
@@ -29,8 +34,11 @@ func DeCompressData(src []byte) ([]byte, error) {
 	}
 	defer r.Close()
 	var out bytes.Buffer
-	if _, err := io.Copy(&out, r); err != nil {
+	if _, err := io.Copy(&out, io.LimitReader(r, maxStreamDecoded+1)); err != nil {
 		return nil, err
+	}
+	if out.Len() > maxStreamDecoded {
+		return nil, ErrDecompressSizeExceeded
 	}
 	return out.Bytes(), nil
 }
@@ -87,7 +95,14 @@ func DeCompressDataZstd(src []byte) ([]byte, error) {
 		}
 		if hdr.FrameContentSize > 0 {
 			dst := make([]byte, 0, int(hdr.FrameContentSize))
-			return zstdDecoder.DecodeAll(src, dst)
+			out, err := zstdDecoder.DecodeAll(src, dst)
+			if err != nil {
+				return nil, err
+			}
+			if len(out) > zstdMaxDecoded {
+				return nil, zstd.ErrDecoderSizeExceeded
+			}
+			return out, nil
 		}
 	}
 
@@ -118,7 +133,12 @@ type rc4State struct {
 	s [256]uint32
 }
 
-var rc4States sync.Map // string -> *rc4State
+const rc4MaxCachedKeys = 4096
+
+var (
+	rc4States     sync.Map // string -> *rc4State
+	rc4StateCount atomic.Int32
+)
 
 func rc4KSA(key []byte) *rc4State {
 	st := &rc4State{}
@@ -154,8 +174,12 @@ func Rc4(key string, src []byte) ([]byte, error) {
 		init = v.(*rc4State)
 	} else {
 		init = rc4KSA([]byte(key))
-		if actual, loaded := rc4States.LoadOrStore(key, init); loaded {
-			init = actual.(*rc4State)
+		if rc4StateCount.Load() < rc4MaxCachedKeys {
+			if actual, loaded := rc4States.LoadOrStore(key, init); loaded {
+				init = actual.(*rc4State)
+			} else {
+				rc4StateCount.Add(1)
+			}
 		}
 	}
 

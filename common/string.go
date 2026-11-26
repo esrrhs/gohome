@@ -14,27 +14,30 @@ const gcharset = "abcdefghijklmnopqrstuvwxyz" +
 	"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 func IntArrayToString(a []int, delim string) string {
-	var ret string
+	var b strings.Builder
 	for _, s := range a {
-		ret += strconv.Itoa(s) + delim
+		b.WriteString(strconv.Itoa(s))
+		b.WriteString(delim)
 	}
-	return ret
+	return b.String()
 }
 
 func Int32ArrayToString(a []int32, delim string) string {
-	var ret string
+	var b strings.Builder
 	for _, s := range a {
-		ret += strconv.Itoa((int)(s)) + delim
+		b.WriteString(strconv.FormatInt(int64(s), 10))
+		b.WriteString(delim)
 	}
-	return ret
+	return b.String()
 }
 
 func Int64ArrayToString(a []int64, delim string) string {
-	var ret string
+	var b strings.Builder
 	for _, s := range a {
-		ret += strconv.Itoa((int)(s)) + delim
+		b.WriteString(strconv.FormatInt(s, 10))
+		b.WriteString(delim)
 	}
-	return ret
+	return b.String()
 }
 
 func RandStr(l int) string {
@@ -274,13 +277,14 @@ func GzipStringBestSpeed(data string) string {
 }
 
 func GunzipString(data string) string {
-	var b bytes.Buffer
-	b.WriteString(data)
-	r, err := gzip.NewReader(&b)
+	r, err := gzip.NewReader(strings.NewReader(data))
 	if err != nil {
 		return ""
 	}
-	ret, _ := io.ReadAll(r)
-	r.Close()
+	defer r.Close()
+	ret, err := io.ReadAll(io.LimitReader(r, maxStreamDecoded+1))
+	if err != nil || len(ret) > maxStreamDecoded {
+		return ""
+	}
 	return string(ret)
 }

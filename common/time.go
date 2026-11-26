@@ -1,18 +1,21 @@
 package common
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
-var gnowsecond atomic.Value // time.Time
-
-func init() {
-	gnowsecond.Store(time.Now())
-	go updateNowInSecond()
-}
+var (
+	gnowsecond atomic.Value // time.Time
+	gnowOnce   sync.Once
+)
 
 func GetNowUpdateInSecond() time.Time {
+	gnowOnce.Do(func() {
+		gnowsecond.Store(time.Now())
+		go updateNowInSecond()
+	})
 	if val := gnowsecond.Load(); val != nil {
 		return val.(time.Time)
 	}
@@ -22,9 +25,10 @@ func GetNowUpdateInSecond() time.Time {
 func updateNowInSecond() {
 	defer CrashLog()
 
-	for {
-		gnowsecond.Store(time.Now())
-		Sleep(1)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for now := range ticker.C {
+		gnowsecond.Store(now)
 	}
 }
 

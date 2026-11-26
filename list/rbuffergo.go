@@ -46,6 +46,7 @@ index:  0 1 2 3 4 5 6 7 8 9 10
 
 type RBuffergo struct {
 	buffer        []byte
+	capacity      int
 	datasize      int
 	begin         int
 	end           int
@@ -55,13 +56,31 @@ type RBuffergo struct {
 	lock          sync.Locker
 }
 
+const rbufferEagerThreshold = 4096
+
 func NewRBuffergo(len int, lock bool) *RBuffergo {
-	buffer := &RBuffergo{}
-	buffer.buffer = make([]byte, len)
+	if len < 0 {
+		len = 0
+	}
+	buffer := &RBuffergo{
+		capacity: len,
+	}
+	// Small ring buffers allocate upfront; large megabyte-scale session buffers
+	// allocate lazily on first write so unauthenticated pre-handshake sessions
+	// cannot trigger multi-megabyte amplification per packet.
+	if len <= rbufferEagerThreshold {
+		buffer.buffer = make([]byte, len)
+	}
 	if lock {
 		buffer.lock = &sync.Mutex{}
 	}
 	return buffer
+}
+
+func (b *RBuffergo) ensureBuffer() {
+	if b.buffer == nil && b.capacity > 0 {
+		b.buffer = make([]byte, b.capacity)
+	}
 }
 
 func (b *RBuffergo) CanWrite(size int) bool {
@@ -69,7 +88,10 @@ func (b *RBuffergo) CanWrite(size int) bool {
 		b.lock.Lock()
 		defer b.lock.Unlock()
 	}
-	return b.datasize+size <= len(b.buffer)
+	if size < 0 {
+		return false
+	}
+	return b.datasize+size <= b.capacity
 }
 
 func (b *RBuffergo) SkipWrite(size int) {
@@ -78,14 +100,15 @@ func (b *RBuffergo) SkipWrite(size int) {
 		defer b.lock.Unlock()
 	}
 
-	if !(b.datasize+size <= len(b.buffer)) {
+	if size <= 0 || !(b.datasize+size <= b.capacity) {
 		return
 	}
+	b.ensureBuffer()
 
 	b.datasize += size
 	b.end += size
-	if b.end >= len(b.buffer) {
-		b.end -= len(b.buffer)
+	if b.end >= b.capacity {
+		b.end -= b.capacity
 	}
 }
 
@@ -95,17 +118,21 @@ func (b *RBuffergo) Write(data []byte) bool {
 		defer b.lock.Unlock()
 	}
 
-	if !(b.datasize+len(data) <= len(b.buffer)) {
+	if !(b.datasize+len(data) <= b.capacity) {
 		return false
 	}
+	if len(data) == 0 {
+		return true
+	}
+	b.ensureBuffer()
 	// [1][3]
 	if b.end >= b.begin {
 		// 能装下
-		if len(b.buffer)-b.end >= len(data) {
+		if b.capacity-b.end >= len(data) {
 			copy(b.buffer[b.end:], data)
 		} else {
-			copy(b.buffer[b.end:], data[0:len(b.buffer)-b.end])
-			copy(b.buffer, data[len(b.buffer)-b.end:])
+			copy(b.buffer[b.end:], data[0:b.capacity-b.end])
+			copy(b.buffer, data[b.capacity-b.end:])
 		}
 	} else /*[2]*/ {
 		copy(b.buffer[b.end:], data)
@@ -113,8 +140,8 @@ func (b *RBuffergo) Write(data []byte) bool {
 
 	b.datasize += len(data)
 	b.end += len(data)
-	if b.end >= len(b.buffer) {
-		b.end -= len(b.buffer)
+	if b.end >= b.capacity {
+		b.end -= b.capacity
 	}
 
 	return true
@@ -124,6 +151,9 @@ func (b *RBuffergo) CanRead(size int) bool {
 	if b.lock != nil {
 		b.lock.Lock()
 		defer b.lock.Unlock()
+	}
+	if size < 0 {
+		return false
 	}
 
 	return b.datasize >= size
@@ -135,14 +165,16 @@ func (b *RBuffergo) SkipRead(size int) {
 		defer b.lock.Unlock()
 	}
 
-	if !(b.datasize >= size) {
+	if size < 0 || !(b.datasize >= size) {
 		return
 	}
 
 	b.datasize -= size
-	b.begin += size
-	if b.begin >= len(b.buffer) {
-		b.begin -= len(b.buffer)
+	if b.capacity > 0 {
+		b.begin += size
+		if b.begin >= b.capacity {
+			b.begin -= b.capacity
+		}
 	}
 
 	if b.lock == nil {
@@ -162,15 +194,19 @@ func (b *RBuffergo) Read(data []byte) bool {
 	if !(b.datasize >= len(data)) {
 		return false
 	}
+	if len(data) == 0 {
+		return true
+	}
+	b.ensureBuffer()
 
 	// [2][4]
 	if b.begin >= b.end {
 		// 能读完
-		if len(b.buffer)-b.begin >= len(data) {
+		if b.capacity-b.begin >= len(data) {
 			copy(data, b.buffer[b.begin:])
 		} else {
-			copy(data[0:len(b.buffer)-b.begin], b.buffer[b.begin:])
-			copy(data[len(b.buffer)-b.begin:], b.buffer)
+			copy(data[0:b.capacity-b.begin], b.buffer[b.begin:])
+			copy(data[b.capacity-b.begin:], b.buffer)
 		}
 	} else /* [1]*/ {
 		copy(data, b.buffer[b.begin:])
@@ -178,8 +214,8 @@ func (b *RBuffergo) Read(data []byte) bool {
 
 	b.datasize -= len(data)
 	b.begin += len(data)
-	if b.begin >= len(b.buffer) {
-		b.begin -= len(b.buffer)
+	if b.begin >= b.capacity {
+		b.begin -= b.capacity
 	}
 
 	if b.lock == nil {
@@ -235,7 +271,7 @@ func (b *RBuffergo) Size() int {
 }
 
 func (b *RBuffergo) Capacity() int {
-	return len(b.buffer)
+	return b.capacity
 }
 
 func (b *RBuffergo) Empty() bool {
@@ -253,7 +289,7 @@ func (b *RBuffergo) Full() bool {
 		defer b.lock.Unlock()
 	}
 
-	return b.datasize == len(b.buffer)
+	return b.datasize == b.capacity
 }
 
 func (b *RBuffergo) GetReadLineBuffer() []byte {
@@ -262,10 +298,14 @@ func (b *RBuffergo) GetReadLineBuffer() []byte {
 		defer b.lock.Unlock()
 	}
 
-	if b.datasize < len(b.buffer)-b.begin {
+	if b.datasize == 0 {
+		return nil
+	}
+	b.ensureBuffer()
+	if b.datasize < b.capacity-b.begin {
 		return b.buffer[b.begin : b.begin+b.datasize]
 	} else {
-		return b.buffer[b.begin:len(b.buffer)]
+		return b.buffer[b.begin:b.capacity]
 	}
 }
 
@@ -275,13 +315,22 @@ func (b *RBuffergo) GetWriteLineBuffer() []byte {
 		defer b.lock.Unlock()
 	}
 
-	if len(b.buffer)-b.datasize < len(b.buffer)-b.end {
-		return b.buffer[b.end : b.end+len(b.buffer)-b.datasize]
+	if b.capacity == 0 || b.datasize == b.capacity {
+		return nil
+	}
+	b.ensureBuffer()
+	if b.capacity-b.datasize < b.capacity-b.end {
+		return b.buffer[b.end : b.end+b.capacity-b.datasize]
 	} else {
-		return b.buffer[b.end:len(b.buffer)]
+		return b.buffer[b.end:b.capacity]
 	}
 }
 
 func (b *RBuffergo) GetBuffer() []byte {
+	if b.lock != nil {
+		b.lock.Lock()
+		defer b.lock.Unlock()
+	}
+	b.ensureBuffer()
 	return b.buffer
 }

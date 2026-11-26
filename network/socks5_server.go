@@ -1,6 +1,7 @@
 package network
 
 import (
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -132,7 +133,9 @@ func Sock5HandshakeBy(conn io.ReadWriter, username string, password string) (err
 		}
 	}
 
-	if username == string(user) && password == string(pass) {
+	userOK := subtle.ConstantTimeCompare([]byte(username), user) == 1
+	passOK := subtle.ConstantTimeCompare([]byte(password), pass) == 1
+	if userOK && passOK {
 		_, err = conn.Write([]byte{userAuthVersion, authSuccess})
 		return err
 	}

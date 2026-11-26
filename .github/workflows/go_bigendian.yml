@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "master" ]
   pull_request:
-    branches: [ "master", "feat/wss-rdns-weaknet-protocol-ci" ]
+    branches: [ "master" ]
 
 jobs:
   test-s390x:
@@ -48,7 +48,12 @@ jobs:
           
               echo "=== Testing crypto/cryptonight/inter/skein ==="
               cd /workspace/crypto/cryptonight/inter/skein && go test -v
+              cd /workspace/crypto/cryptonight/inter/skein/skein256 && go test -v
+              cd /workspace/crypto/cryptonight/inter/skein/skein1024 && go test -v
           
               echo "=== Testing crypto/ ==="
               cd /workspace/crypto/ && go test -v
+
+              echo "=== Testing portable packages & fuzz corpora ==="
+              cd /workspace && go test ./common/... ./list/... ./lru/... ./pool/... ./dns/... ./thirdparty/...
             '

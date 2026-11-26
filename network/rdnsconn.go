@@ -57,6 +57,7 @@ type RdnsConfig struct {
 	PollIntervalMs int
 	// EDNSUdpSize sets EDNS0 UDP payload size (default 1232).
 	EDNSUdpSize uint16
+	MaxSessions int
 }
 
 // DefaultRdnsConfig returns DNS-friendly FrameMgr defaults (tiny CutSize).
@@ -78,6 +79,7 @@ func DefaultRdnsConfig() *RdnsConfig {
 		QueryType:          "TXT",
 		PollIntervalMs:     50,
 		EDNSUdpSize:        1232,
+		MaxSessions:        4096,
 	}
 }
 
@@ -165,7 +167,7 @@ func (c *RdnsConn) Read(p []byte) (n int, err error) {
 			if wg != nil && wg.IsExit() {
 				return 0, errors.New("closed conn")
 			}
-			time.Sleep(time.Millisecond * 100)
+			waitNotify(fm.RecvNotify(), 10*time.Millisecond)
 			continue
 		}
 		return size, nil
@@ -222,14 +224,14 @@ func (c *RdnsConn) Write(p []byte) (n int, err error) {
 				}
 				return 0, errors.New("closed conn")
 			}
-			time.Sleep(time.Millisecond * 100)
+			waitNotify(fm.SendNotify(), 10*time.Millisecond)
 			continue
 		}
 		cur += size
 		if cur >= totalsize {
 			return totalsize, nil
 		}
-		time.Sleep(time.Millisecond * 100)
+		waitNotify(fm.SendNotify(), 10*time.Millisecond)
 	}
 	if cur > 0 {
 		return cur, errors.New("write closed conn")
@@ -578,16 +580,10 @@ func (d *rdnsFrameQueue) stage(fm *FrameMgr) error {
 	return nil
 }
 
-// pop alternates FIFO service with control/retransmit service. A lost early
-// frame must not wait behind the entire unsent window: that would block both
-// in-order data and heartbeat processing beyond FrameMgr's liveness timeout.
-func (d *rdnsFrameQueue) pop() []byte {
-	if len(d.order) == 0 {
-		return nil
-	}
+// nextIndex picks the index in d.order that the next pop() will serve.
+func (d *rdnsFrameQueue) nextIndex() int {
 	index := 0
-	d.turn++
-	if d.turn%2 == 0 {
+	if (d.turn+1)%2 == 0 {
 		for i, key := range d.order {
 			if key.kind != int32(Frame_DATA) || d.sent[key.id] {
 				index = i
@@ -595,6 +591,26 @@ func (d *rdnsFrameQueue) pop() []byte {
 			}
 		}
 	}
+	return index
+}
+
+func (d *rdnsFrameQueue) peekLen() int {
+	if len(d.order) == 0 {
+		return 0
+	}
+	idx := d.nextIndex()
+	return len(d.pending[d.order[idx]])
+}
+
+// pop alternates FIFO service with control/retransmit service. A lost early
+// frame must not wait behind the entire unsent window: that would block both
+// in-order data and heartbeat processing beyond FrameMgr's liveness timeout.
+func (d *rdnsFrameQueue) pop() []byte {
+	if len(d.order) == 0 {
+		return nil
+	}
+	index := d.nextIndex()
+	d.turn++
 	key := d.order[index]
 	copy(d.order[index:], d.order[index+1:])
 	d.order = d.order[:len(d.order)-1]
@@ -827,6 +843,22 @@ func (c *RdnsConn) loopListenerRecv() error {
 		v, loaded := c.listener.sonny.Load(session)
 		var u *RdnsConn
 		if !loaded {
+			maxSess := c.config.MaxSessions
+			if maxSess <= 0 {
+				maxSess = 4096
+			}
+			curSess := 0
+			c.listener.sonny.Range(func(_, value interface{}) bool {
+				su := value.(*RdnsConn)
+				if !su.isclose.Load() {
+					curSess++
+				}
+				return curSess < maxSess
+			})
+			if curSess >= maxSess {
+				c.writeDNSError(req, srcaddr, dns.RcodeServerFailure)
+				continue
+			}
 			id := common.Guid()
 			// A single serialized DATA frame must fit the downlink DNS budget too.
 			fm := NewFrameMgr(min(c.config.CutSize, 900), c.config.MaxId, c.config.BufferSize, c.config.MaxWin, c.config.ResendTimems, c.config.Compress, c.config.Stat)
@@ -928,15 +960,10 @@ func (c *RdnsConn) collectDownlink(u *RdnsConn) ([]byte, error) {
 	// Leave overflow in the owned FIFO, rather than losing staged frames or
 	// retaining FrameMgr's pooled objects across Update calls.
 	for len(s.order) > 0 && len(frames) < 8 {
-		// Conservative bound; all pending frames fit individually. Keeping one
-		// response under 950 bytes avoids UDP fragmentation for default cuts.
-		maxNext := 0
-		for _, payload := range s.pending {
-			if len(payload) > maxNext {
-				maxNext = len(payload)
-			}
-		}
-		if size+2+maxNext > 950 && len(frames) > 0 {
+		// Inspect the exact candidate pop() will choose next so a single large
+		// queued DATA frame cannot prematurely stop packing small ACK/PING frames.
+		nextLen := s.peekLen()
+		if size+2+nextLen > 950 && len(frames) > 0 {
 			break
 		}
 		payload := s.pop()

@@ -109,6 +109,33 @@ func ShellRunCommand(command string, silent bool) (string, error) {
 	return outstr, nil
 }
 
+func ShellRunCommandTimeout(command string, silent bool, timeout int) (string, error) {
+	d := time.Now().Add(time.Duration(timeout) * time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), d)
+	defer cancel()
+
+	if !silent {
+		loggo.Info("shell RunCommand start %v %v ", command, timeout)
+	}
+
+	begin := time.Now()
+	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+	setProcessGroupKill(cmd)
+	out, err := cmd.CombinedOutput()
+	outstr := string(out)
+	if err != nil {
+		loggo.Warn("shell RunCommand fail %v %v %v", cmd.Args, outstr, ctx.Err())
+		return "", err
+	}
+
+	if !silent {
+		loggo.Info("shell RunCommand ok %v %v", cmd.Args, time.Since(begin))
+		loggo.Info("%v", outstr)
+	}
+
+	return outstr, nil
+}
+
 func ShellRunExe(exe string, silent bool, param ...string) (string, error) {
 
 	exe = filepath.Clean(exe)

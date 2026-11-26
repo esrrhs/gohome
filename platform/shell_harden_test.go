@@ -207,3 +207,24 @@ func TestShellRunNonSilentSmoke(t *testing.T) {
 		t.Fatal("expected timeout error")
 	}
 }
+
+func TestShellRunCommandTimeoutKillsProcessGroup(t *testing.T) {
+	pidfile := filepath.Join(t.TempDir(), "cmd_child.pid")
+	start := time.Now()
+	_, err := ShellRunCommandTimeout("sleep 20 & echo $! > "+pidfile+"; wait", true, 1)
+	if err == nil {
+		t.Fatal("expected timeout error from ShellRunCommandTimeout")
+	}
+	if time.Since(start) > 4*time.Second {
+		t.Fatal("ShellRunCommandTimeout did not respect timeout")
+	}
+	b, err := os.ReadFile(pidfile)
+	if err != nil {
+		t.Fatalf("grandchild pidfile missing: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		t.Fatalf("invalid grandchild pid: %q", string(b))
+	}
+	waitProcessDead(t, pid, 2*time.Second)
+}

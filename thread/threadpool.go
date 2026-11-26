@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/esrrhs/gohome/common"
+	"github.com/esrrhs/gohome/loggo"
 )
 
 /*
@@ -24,6 +25,7 @@ ThreadPool 实现了一个简单的线程池，用于并发处理任务。
 
 type ThreadPool struct {
 	workResultLock sync.WaitGroup
+	stopOnce       sync.Once
 	workerNum      int32
 	max            int
 	exef           func(interface{})
@@ -87,10 +89,23 @@ func (tp *ThreadPool) AddJobTimeout(hash int, v interface{}, timeoutms int) bool
 }
 
 func (tp *ThreadPool) Stop() {
-	for i := 0; i < tp.max; i++ {
-		tp.control <- i
-	}
+	tp.stopOnce.Do(func() {
+		for i := 0; i < tp.max; i++ {
+			tp.control <- i
+		}
+	})
 	tp.workResultLock.Wait()
+}
+
+func (tp *ThreadPool) execJobSafe(v interface{}) {
+	defer func() {
+		if r := recover(); r != nil {
+			loggo.Error("threadpool job panic: %v\n%s", r, common.DumpStacks())
+		}
+	}()
+	if tp.exef != nil {
+		tp.exef(v)
+	}
 }
 
 func (tp *ThreadPool) run(index int) {
@@ -106,7 +121,7 @@ func (tp *ThreadPool) run(index int) {
 		case <-tp.control:
 			return
 		case v := <-tp.ca[index]:
-			tp.exef(v)
+			tp.execJobSafe(v)
 			tp.processNum[index].Add(1)
 		}
 	}

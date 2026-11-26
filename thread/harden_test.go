@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 var errHardenSentinel = errors.New("harden sentinel")
@@ -146,5 +147,67 @@ func TestHardenTaskPoolQueueFull(t *testing.T) {
 	// 计数接口在空池上保持零值可用
 	if tp.DoneNum() != 0 || tp.SleepNum() != 0 || tp.TaskNum() != 0 {
 		t.Fatal("idle zero-worker pool stats must be zero")
+	}
+}
+
+func TestHardenTaskPoolPanicRecoveryAndStop(t *testing.T) {
+	tp := NewTaskPool(2, 8)
+	defer tp.Stop()
+
+	if err := tp.AddTask(func() {
+		panic("task boom")
+	}); err == nil {
+		t.Fatal("expected error from panicking task")
+	}
+
+	// Workers must survive a task panic and continue serving subsequent tasks.
+	var okCount atomic.Int32
+	for i := 0; i < 4; i++ {
+		if err := tp.AddTask(func() { okCount.Add(1) }); err != nil {
+			t.Fatalf("post-panic AddTask #%d failed: %v", i, err)
+		}
+	}
+	if okCount.Load() != 4 {
+		t.Fatalf("okCount = %d, want 4", okCount.Load())
+	}
+
+	tp.Stop()
+	tp.Stop() // idempotent
+	if err := tp.AddTask(func() {}); err == nil {
+		t.Fatal("AddTask after Stop must return error")
+	}
+}
+
+func TestHardenThreadPoolPanicSurvivesAndIdempotentStop(t *testing.T) {
+	var ran atomic.Int32
+	tp := NewThreadPool(1, 8, func(v interface{}) {
+		if v.(int) == -1 {
+			panic("shard boom")
+		}
+		ran.Add(1)
+	})
+
+	tp.AddJob(0, -1)
+	tp.AddJob(0, 1)
+	tp.AddJob(0, 2)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && ran.Load() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	tp.Stop()
+	tp.Stop() // must not deadlock on second Stop
+	if ran.Load() != 2 {
+		t.Fatalf("shard worker died after panic: ran=%d, want 2", ran.Load())
+	}
+}
+
+func TestHardenGroupBornUnderExitedFather(t *testing.T) {
+	father := NewGroup("exited-father", nil, nil)
+	father.Stop()
+
+	son := NewGroup("late-son", father, nil)
+	if !son.IsExit() || son.Error() == nil {
+		t.Fatal("child group created under already-exited father must inherit exited state")
 	}
 }

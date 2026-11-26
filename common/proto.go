@@ -58,7 +58,8 @@ func LoadProtobufMethods(filename string) (error, []protoreflect.MethodDescripto
 
 func MessageToFullJson(mi protoreflect.MessageDescriptor) (error, string) {
 	message := dynamicpb.NewMessage(mi)
-	fullFill(message, mi)
+	visiting := map[protoreflect.FullName]bool{mi.FullName(): true}
+	fullFill(message, mi, visiting)
 	b, err := protojson.MarshalOptions{Multiline: true, Indent: "  ", EmitUnpopulated: true}.Marshal(message)
 	if err != nil {
 		return err, ""
@@ -66,13 +67,18 @@ func MessageToFullJson(mi protoreflect.MessageDescriptor) (error, string) {
 	return nil, string(b)
 }
 
-func fullFill(message *dynamicpb.Message, mi protoreflect.MessageDescriptor) {
+func fullFill(message *dynamicpb.Message, mi protoreflect.MessageDescriptor, visiting map[protoreflect.FullName]bool) {
 	for i := 0; i < mi.Fields().Len(); i++ {
 		fd := mi.Fields().Get(i)
 		if !fd.IsMap() && !fd.IsList() && (fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind) {
 			submi := fd.Message()
+			if visiting[submi.FullName()] {
+				continue
+			}
+			visiting[submi.FullName()] = true
 			submessage := dynamicpb.NewMessage(submi)
-			fullFill(submessage, submi)
+			fullFill(submessage, submi, visiting)
+			delete(visiting, submi.FullName())
 			message.Set(fd, protoreflect.ValueOfMessage(submessage))
 		}
 	}

@@ -3,6 +3,8 @@ package common
 import (
 	"bytes"
 	"compress/zlib"
+	"crypto/ecdsa"
+	"crypto/x509"
 	"math"
 	"os"
 	"path/filepath"
@@ -14,6 +16,10 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 func TestDeCompressDataCorrupt(t *testing.T) {
@@ -290,5 +296,118 @@ func TestFullFillOperatorPrecedence(t *testing.T) {
 	}
 	if !fixed(false, false, false, true) {
 		t.Fatal("singular group should be full-filled")
+	}
+}
+
+func TestChannelCloseUnblocksBlockedWrite(t *testing.T) {
+	c := NewChannel(1)
+	c.Write(1) // fill buffer
+
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		c.Write(2) // blocks until Close()
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		c.Close()
+	}()
+
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Channel.Close deadlocked against blocked Write")
+	}
+
+	select {
+	case <-writerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked Channel.Write did not unblock on Close")
+	}
+}
+
+func TestDeCompressConcatenatedZstdBomb(t *testing.T) {
+	chunk := bytes.Repeat([]byte{'A'}, (zstdMaxDecoded/2)+1024)
+	f1 := CompressDataZstd(chunk)
+	f2 := CompressDataZstd(chunk)
+	concat := append(append([]byte(nil), f1...), f2...)
+
+	if _, err := DeCompressDataZstd(concat); err == nil {
+		t.Fatal("concatenated zstd frames exceeding zstdMaxDecoded must fail")
+	}
+}
+
+func TestGenerateTLSConfigValidWindow(t *testing.T) {
+	cfg, err := GenerateTLSConfig("alpn-check")
+	if err != nil {
+		t.Fatalf("GenerateTLSConfig: %v", err)
+	}
+	if len(cfg.Certificates) != 1 || len(cfg.Certificates[0].Certificate) == 0 {
+		t.Fatal("missing certificate in tls.Config")
+	}
+	cert, err := x509.ParseCertificate(cfg.Certificates[0].Certificate[0])
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	if _, ok := cert.PublicKey.(*ecdsa.PublicKey); !ok {
+		t.Fatalf("expected ECDSA public key, got %T", cert.PublicKey)
+	}
+	now := time.Now()
+	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+		t.Fatalf("certificate validity [%v, %v] does not cover now %v", cert.NotBefore, cert.NotAfter, now)
+	}
+}
+
+func TestMessageToFullJsonSelfRecursive(t *testing.T) {
+	labelOpt := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
+	typeStr := descriptorpb.FieldDescriptorProto_TYPE_STRING
+	typeMsg := descriptorpb.FieldDescriptorProto_TYPE_MESSAGE
+
+	fdp := &descriptorpb.FileDescriptorProto{
+		Name:    proto.String("recursive.proto"),
+		Package: proto.String("rectest"),
+		Syntax:  proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{{
+			Name: proto.String("Node"),
+			Field: []*descriptorpb.FieldDescriptorProto{
+				{
+					Name:   proto.String("name"),
+					Number: proto.Int32(1),
+					Label:  &labelOpt,
+					Type:   &typeStr,
+				},
+				{
+					Name:     proto.String("next"),
+					Number:   proto.Int32(2),
+					Label:    &labelOpt,
+					Type:     &typeMsg,
+					TypeName: proto.String(".rectest.Node"),
+				},
+			},
+		}},
+	}
+	files, err := protodesc.NewFiles(&descriptorpb.FileDescriptorSet{
+		File: []*descriptorpb.FileDescriptorProto{fdp},
+	})
+	if err != nil {
+		t.Fatalf("NewFiles: %v", err)
+	}
+	desc, err := files.FindDescriptorByName("rectest.Node")
+	if err != nil {
+		t.Fatalf("FindDescriptorByName: %v", err)
+	}
+	merr, js := MessageToFullJson(desc.(protoreflect.MessageDescriptor))
+	if merr != nil || !strings.Contains(js, `"name"`) {
+		t.Fatalf("MessageToFullJson recursive failed: err=%v json=%q", merr, js)
+	}
+}
+
+func TestMinMaxEmptyVariadic(t *testing.T) {
+	if MinOfInt() != 0 || MaxOfInt() != 0 || MinOfInt64() != 0 || MaxOfInt64() != 0 {
+		t.Fatal("empty variadic Min/Max must return 0")
 	}
 }

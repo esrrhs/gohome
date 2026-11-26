@@ -1,10 +1,12 @@
 package thread
 
 import (
+	"errors"
 	"fmt"
 	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/loggo"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -27,13 +29,16 @@ TaskPool 实现了一个任务池（Task Pool），用于并发执行 CPU 密集
 type Task struct {
 	id   int
 	f    func()
-	done chan bool
+	done chan error
 }
 
 // TaskPool 是任务执行池的结构体
 type TaskPool struct {
 	tasks      chan Task
 	numWorkers int
+	stopCh     chan struct{}
+	stopOnce   sync.Once
+	wg         sync.WaitGroup
 	// idSeq / doneNum / sleepNum 会被多个 worker 与调用方并发读写，
 	// 必须走原子操作：曾经用普通 int，-race 下能稳定报 DATA RACE，
 	// 且多 worker 的自增会丢计数。
@@ -44,21 +49,49 @@ type TaskPool struct {
 
 // Init 初始化任务池
 func NewTaskPool(numWorkers, taskQueueSize int) *TaskPool {
-	tp := &TaskPool{}
-	tp.numWorkers = numWorkers
-	tp.tasks = make(chan Task, taskQueueSize)
+	if taskQueueSize < 0 {
+		taskQueueSize = 0
+	}
+	tp := &TaskPool{
+		numWorkers: numWorkers,
+		tasks:      make(chan Task, taskQueueSize),
+		stopCh:     make(chan struct{}),
+	}
 
 	// 启动 N 个 Worker
 	for i := 1; i <= tp.numWorkers; i++ {
+		tp.wg.Add(1)
 		go tp.worker(i)
 	}
 	return tp
 }
 
+// Stop 优雅停止任务池并释放所有绑定的 OS 线程。
+func (tp *TaskPool) Stop() {
+	tp.stopOnce.Do(func() {
+		close(tp.stopCh)
+	})
+	tp.wg.Wait()
+}
+
+func runTaskSafe(t Task) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("task %d panic: %v", t.id, r)
+			loggo.Error("task %d panic: %v\n%s", t.id, r, common.DumpStacks())
+		}
+	}()
+	if t.f != nil {
+		t.f()
+	}
+	return nil
+}
+
 // worker 执行任务的 Worker
 func (tp *TaskPool) worker(id int) {
 	runtime.LockOSThread()
-
+	defer runtime.UnlockOSThread()
+	defer tp.wg.Done()
 	defer common.CrashLog()
 
 	batchCount := 16
@@ -85,35 +118,60 @@ func (tp *TaskPool) worker(id int) {
 			}
 		}
 
-		for _, task := range tasks {
-			loggo.Debug("Worker %d executing task %d", id, task.id)
-			task.f() // 执行任务
-			task.done <- true
-			tp.doneNum.Add(1)
-			loggo.Debug("Task %d done\n", task.id)
+		if len(tasks) > 0 {
+			sleepTime = 1 * time.Microsecond
+			for _, task := range tasks {
+				loggo.Debug("Worker %d executing task %d", id, task.id)
+				err := runTaskSafe(task)
+				task.done <- err
+				tp.doneNum.Add(1)
+				loggo.Debug("Task %d done\n", task.id)
+			}
+			continue
 		}
 
-		if len(tasks) == 0 {
-			tp.sleepNum.Add(1)
-			sleepTime = min(2*sleepTime, 1*time.Millisecond)
-			time.Sleep(sleepTime) // 如果没有任务，稍微休眠一下
+		select {
+		case <-tp.stopCh:
+			// 退出前排空残余已入队任务，避免并发 AddTask 等待者挂死
+			for {
+				select {
+				case task := <-tp.tasks:
+					err := runTaskSafe(task)
+					task.done <- err
+					tp.doneNum.Add(1)
+				default:
+					return
+				}
+			}
+		default:
 		}
+
+		tp.sleepNum.Add(1)
+		sleepTime = min(2*sleepTime, 1*time.Millisecond)
+		time.Sleep(sleepTime) // 如果没有任务，稍微休眠一下
 	}
 }
 
 // AddTask 添加任务到任务池，并等待任务完成
 func (tp *TaskPool) AddTask(f func()) error {
+	select {
+	case <-tp.stopCh:
+		return errors.New("task pool is stopped")
+	default:
+	}
+
 	id := tp.idSeq.Add(1)
 	task := Task{
 		id:   int(id),
 		f:    f,
-		done: make(chan bool),
+		done: make(chan error, 1),
 	}
 	select {
+	case <-tp.stopCh:
+		return errors.New("task pool is stopped")
 	case tp.tasks <- task: // 尝试非阻塞发送
 		loggo.Debug("Task %d added to the pool", task.id)
-		<-task.done // 等待任务完成
-		return nil
+		return <-task.done // 等待任务完成
 	default:
 		return fmt.Errorf("task queue is full, task %d was not added", task.id)
 	}

@@ -93,6 +93,15 @@ func (s *SocketUpstream) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, 
 		}
 	}
 
-	resp, _, err := client.Exchange(req, s.addr)
+	resp, _, err := client.ExchangeContext(ctx, req, s.addr)
+	if err == nil && resp != nil && resp.Truncated && s.network == "udp" {
+		tcpClient := &dns.Client{
+			Net:     "tcp",
+			Timeout: client.Timeout,
+		}
+		if tcpResp, _, tcpErr := tcpClient.ExchangeContext(ctx, req, s.addr); tcpErr == nil && tcpResp != nil {
+			return tcpResp, nil
+		}
+	}
 	return resp, err
 }

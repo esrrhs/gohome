@@ -45,8 +45,9 @@ func HashString(s string) uint64 {
 
 // 计算整数的FNV哈希值
 func HashInt(i int) uint64 {
+	var buf [24]byte
 	h := fnv.New64a()
-	h.Write([]byte(fmt.Sprint(i)))
+	h.Write(strconv.AppendInt(buf[:0], int64(i), 10))
 	return h.Sum64()
 }
 

@@ -1,4 +1,4 @@
-# Nightly fuzz pass over all 27 native fuzz targets.
+# Nightly fuzz pass over all 28 native fuzz targets.
 # Each target gets a short -fuzztime so the whole matrix stays under ~45m wall.
 name: Nightly Fuzz
 
@@ -17,7 +17,7 @@ jobs:
       matrix:
         include:
           - pkg: ./network/
-            targets: "FuzzFrameMgrRecvReassembly FuzzFrameMgrCut FuzzFrameMgrMarshal FuzzBBCongestion FuzzSock5UnpackUDP FuzzSock5GetRequest FuzzSock5HandshakeAuth FuzzIcmpPacketPayload FuzzRicmpListenAddr FuzzRdnsQName"
+            targets: "FuzzFrameMgrRecvReassembly FuzzFrameMgrCut FuzzFrameMgrMarshal FuzzFrameMgrWireRecv FuzzBBCongestion FuzzSock5UnpackUDP FuzzSock5GetRequest FuzzSock5HandshakeAuth FuzzIcmpPacketPayload FuzzRicmpListenAddr FuzzRdnsQName"
           - pkg: ./dns/fakeip/
             targets: "FuzzFakeIPRoundTrip FuzzNormalizeDomain"
           - pkg: ./dns/cache/
